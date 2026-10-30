@@ -550,7 +550,7 @@ The last row matters most: a workspace must never apply its own frontmatter alia
 Rules:
 
 - `corpus_id` is **declared and stable**, never derived from a path. Default `main`.
-- `root_hash` (formerly `vault_id`) is a hash of the canonical root, stored in the manifest as a **locator only**. Moving a repository changes `root_hash` and must never change a `DocId`.
+- `built_root` is the canonical path the index was built from, stored in the manifest as a **diagnostic only**. Moving a repository changes `built_root` and must never change a `DocId`.
 - **Archived corpora are hard-excluded by default**, not down-weighted. A multiplier still lets an old fact into a top-3 answer, which is exactly the failure being prevented.
 - Query selects corpora: `--corpus primary` (default) | `all` | `<id>`. Every result carries `corpus`.
 - When archived corpora are explicitly included, `search.archived_weight` applies (default 0.8; primary 1.0) and appears in the score breakdown.
@@ -564,7 +564,7 @@ Rules:
 - A corpus configured as `read_only` on a read-only filesystem uses `index_dir` to place its index in a writable cache.
 - The point of an archive is analysis, not truth: `--corpus context --intent history` gives pattern analysis over old ideas and decisions with zero risk of them being served as current.
 
-**M0 compatibility.** M0 wrote `janus.toml` and `.janus/` at the root and resolved `--vault`. That is exactly single-corpus mode: the file it wrote is already a valid corpus config. No retrofit is needed; workspace parsing, `--workspace`, and the `root_hash` rename land in M1+ as additive work.
+**M0 compatibility.** M0 wrote `janus.toml` and `.janus/` at the root and resolved `--vault`. That is exactly single-corpus mode: the file it wrote is already a valid corpus config. No retrofit is needed; workspace parsing, `--workspace`, and the `built_root` manifest field land in M1+ as additive work.
 
 ### 6.12 Scopes: per-org and per-domain facts
 
@@ -827,7 +827,7 @@ pub struct Index {
     pub built_at: DateTime<Utc>,
     pub corpus_id: CorpusId,           // declared, stable, never path-derived
     pub corpus_role: CorpusRole,       // Primary | Archived
-    pub root_hash: RootHash,           // hash of canonical root; locator only, never identity
+    pub built_root: PathBuf,           // canonical root the index was built from; diagnostic only
     pub vault_root: PathBuf,
     pub strings: StringPool,           // interned rel_paths, titles, headings, tags
     pub docs: Vec<DocumentMeta>,       // ~120 B each, string-pool handles
@@ -845,7 +845,7 @@ Two rules make this cheap:
 
 This also means the on-disk format does not change between M4 (simple `read` of the whole file) and M8 (mmap + optional quantization): only the load path changes.
 
-- Rebuild triggers: `format_version`/`schema_version`/`embedder`/dim/dtype mismatch, chunking config change, or `--rebuild`.
+- Rebuild triggers: `format_version`/`schema_version`/`embedder`/dim/dtype mismatch, chunking config change, a `built_root` mismatch (copied or relocated index), or `--rebuild`.
 - Incremental: skip a file when `content_hash` is unchanged; reuse chunks whose `chunk_id` still exists (across moves, too — §6.9); only embed the delta.
 - Embedding is never required for correctness. With `--no-embeddings` (or if the model is absent and download is disallowed), janus-mem runs lexical-only, omits `vectors.f32`, and says so in every response (`degraded`).
 - Corruption: blake3 checksums for both files live in `manifest.json`; mismatch ⇒ rebuild from source with a warning. A truncated or partial index is never loaded.
@@ -854,7 +854,9 @@ This also means the on-disk format does not change between M4 (simple `read` of 
 Every stored path is vault-relative. The manifest carries two different identifiers, and they must not be confused:
 
 - `corpus_id` — declared in config, stable, participates in identity (§6.4).
-- `root_hash` (formerly `vault_id`) — a hash of the canonical root, used only to locate/index a corpus. Moving the repository changes `root_hash` and must **not** change any `DocId`.
+- `built_root` — the canonical root path the index was built from. Used only to detect a copied or misplaced index (and to make `index_dir` overrides safe). A mismatch logs a warning and triggers a rebuild on the next index run; it is never an error, because moving a vault is legitimate. Moving a repository changes `built_root` and must **not** change any `DocId`.
+
+The two must never be confused: `corpus_id` is *declared* and stable; `built_root` is *observed* and changes when the tree moves. Only `corpus_id` participates in identity (as a namespace prefix).
 
 v1 loads one primary corpus per process, but nothing in the format assumes a single corpus: a registry is a list of corpus descriptors plus per-corpus indexes merged at query time (§6.11).
 
@@ -1309,7 +1311,7 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | D28 | Generated ids use cuid2 at length **16** (when id generation is enabled at all) | 16 chars ≈ 79 bits ≈ 1.2×10²⁴ values: a 99.9%-collision-free bound at ~4.9×10¹⁰ ids, far beyond any local vault. See §15 Q12 for the math and why length is not the real safety net | Yes |
 | D29 | Performance is a guardrail, not a goal: p50 < 100 ms is the v1 bar; single-digit ms is aspirational; no micro-optimization before M8 measurements | The project exists to be useful and to teach Rust, not to win a benchmark; premature optimization also teaches the wrong lessons | Yes |
 | D30 | Git coexistence is a hard requirement (§8.6) | Vaults are version-controlled; a tool that fights git is unusable regardless of retrieval quality | No |
-| D31 | All persisted data is corpus-scoped: a declared, stable `corpus_id` in the manifest (identity) plus a path-hash `root_hash` (locator only) | Makes archived corpora and a multi-corpus registry additive rather than a format rewrite, while keeping identity independent of filesystem location | No |
+| D31 | All persisted data is corpus-scoped: a declared, stable `corpus_id` in the manifest (identity) plus the observed `built_root` path (diagnostic only) | Makes archived corpora and a multi-corpus registry additive rather than a format rewrite, while keeping identity independent of filesystem location | No |
 | D32 | Document-level temporal relations only; no entity/relation graph | Keeps the model learnable and the index small; the high-value questions are document-shaped, and entity extraction is a different (LLM-heavy) product | Yes |
 | D33 | Path-pattern type inference is configurable and best-effort; no folder layout is ever required | The tool must work on an existing vault as-is; a future `janus scaffold` is opt-in convenience | No |
 | D34 | Add `finding` and `idea` as first-class types, and make the type set an open, config-driven registry (`TypeSpec`) rather than a closed enum | Findings (evidence) and ideas (proposals) are the two most common agents of change; `idea → decision` and `finding → finding` are the supersession chains the engine exists to track. An open registry lets domain types be added without a release | Yes (weights are config) |
@@ -1499,7 +1501,7 @@ archived_weight = 0.8
 - **Shared-with** — retrieval tags that let a document answer for several scopes without changing its identity.
 - **Vault** — UX term for the primary corpus root. Internally the precise term is *corpus*.
 - **Workspace** — a set of corpora plus federation policy (roles, read-only, cross-corpus links, archived weight). Described by `workspace.toml` (§6.11).
-- **Root hash** — a hash of a corpus's canonical root path. A manifest locator only; never part of identity. (Named `vault_id` in earlier drafts.)
+- **Built root** — the canonical path a corpus's index was built from. Diagnostic only, used to detect a copied or relocated index; never part of identity. (Named `vault_id`/`root_hash` in earlier drafts.)
 - **Validity window** — `[effective_from, valid_to)`: the interval during which a document's claim is true in the world. Resolved per query scope set (§6.12).
 - **Effective status** — status derived from the supersession graph (a document with a live successor is superseded), independent of the declared `status` field.
 
