@@ -63,7 +63,7 @@ The release artifact is `janus` — a ~10–30 MB native binary that indexes a v
 - **Not** a knowledge graph database. Entity/relation extraction is out of scope; supersession between *documents* is in scope. What this means in practice is explained below.
 - **Not** a Python extension (no PyO3). Deliberate: the point is to write Rust, not to hide it.
 - **No `unsafe`.** Not because it's forbidden, but because this project does not need it and it removes a whole class of distraction.
-- **No multi-vault federation** in v1 (single root per process), no remote embeddings, no cross-encoder reranking in v1. However, every persisted structure is vault-scoped (`vault_id`, vault-relative paths, one index per root) so a vault *registry* is an additive change later, not a format rewrite.
+- **No multi-corpus federation** in v1 (one primary root per process), no remote embeddings, no cross-encoder reranking in v1. However, the corpus model is specified now (§6.11) and every persisted structure is corpus-scoped (declared `corpus_id`, vault-relative paths, one index per root), so archived corpora and a registry are additive later, not a format rewrite.
 
 **What “no entity/relation extraction” means.** janus-mem does not try to identify people, organizations, concepts, or arbitrary relationships between them, and does not build a graph of “Alice works at X” edges. It indexes documents and the *document-level* temporal relations the frontmatter declares: this doc supersedes that doc, this doc is deprecated, this doc is a principle.
 
@@ -157,7 +157,7 @@ Non-workflow: janus-mem is never invoked as part of a *write* path the user did 
 5. **Deterministic.** Same vault + same index + same query = same ranked list, byte for byte. No wall-clock in scoring without an injected `Clock`; no hash-map iteration order in output.
 6. **Offline.** No network at query time. Network allowed only for first-run model download, and only with `--download` / `JANUS_ALLOW_DOWNLOAD=1`.
 7. **Boring technology.** No async where sync suffices, no unsafe, no custom macros, no distributed anything.
-8. **Small surface.** Four read tools, three write tools. Every additional tool is a maintenance and prompt-budget cost.
+8. **Small surface.** Four read tools, four write tools. Every additional tool is a maintenance and prompt-budget cost.
 9. **Git is a co-tenant, not a bystander.** The vault is version-controlled. janus-mem never touches `.git/`, never stages or commits, respects `.gitignore`, keeps its own state in one ignorable directory, produces minimal diffs, and preserves line endings so `git diff` stays readable (§8.6).
 
 ### 5.1 Engineering principles (SOLID, DRY, TDD, DI)
@@ -225,6 +225,8 @@ title: "Local Caching Architecture"
 type: decision           # open set; defaults: decision|spec|principle|finding|journal|idea|note
 status: active           # active | draft | superseded | deprecated
 date: 2026-10-29         # authored/decided date; falls back to mtime
+effective_from: 2026-11-01  # optional valid-time start; defaults to date
+effective_to: null          # optional valid-time end (exclusive); usually derived
 supersedes: decisions/2024-11-02-postgres-cache.md
 superseded_by: null      # maintained by janus-mem when superseding
 doc_version: "2.0"       # human-facing doc revision
@@ -239,6 +241,7 @@ Rules:
 - Missing `type` → inferred from **configurable path patterns** (defaults recognize `decisions/`, `adr/`, `specs/`, `principles/`, `research/`, `findings/`, `ideas/`, `journals/`), else `note`. A vault with folders named `notes/`, `archive/`, or `2026/Q4/` loses nothing: everything falls back to `note` and authority weighting stays flat until the pattern list is extended.
 - Missing `status` → `active` for every type (never `draft` by default).
 - Missing `date` → parse `YYYY-MM-DD` prefix from filename, else frontmatter `created`, else filesystem mtime. Record the *source* of the date (`filename | frontmatter | mtime`) and surface it in responses so the agent can judge confidence.
+- `effective_from` / `effective_to` are optional valid-time keys with their own semantics (§6.10). They never fall back to mtime; if absent, the window is derived from `date` and the supersession chain. When the only available date came from mtime, the document has no trustworthy valid time and is excluded from `as_of` queries with a `no_validity` note.
 - Unknown `status` is not an error: it maps to `status: unknown` and gets the 0.8× gate factor plus a `doctor` note. Unknown `type` keeps its name (types are an open registry, §6.6.1) and gets the fallback weight 0.80 plus a `doctor` note. Fail-open on read, fail-closed on write.
 - Files with no frontmatter are fully supported and are **never** mutated to add one unless the user explicitly calls `write_document` with frontmatter for that path.
 - `doctor` reports: duplicate `id`, missing dates, `supersedes` targets that don't exist, broken chains (A superseded_by B, B superseded_by C but C doesn't supersede B), and `superseded_by` without a reciprocal `supersedes`.
@@ -253,6 +256,8 @@ Two mechanisms, in this order:
 2. **Derivation (new path, or brand-new document).** `DocId = blake3(match_key)`, using the first *unambiguous* key below. On a move, the key is used to attach the new path to a vanished document and **inherit** its `DocId`; the id is not re-derived from scratch.
 
 Match keys, in order. The first key that yields exactly one unmatched candidate wins; two or more candidates is ambiguous and falls through to the next key. Never merge.
+
+Match keys are namespaced by `corpus_id` (§6.11), so an archived document and a primary document with the same title and date can never collide. Whether `scope` also enters the key is an **open decision** (§15 Q18) with real churn consequences, so it is deliberately not decided here.
 
 | Order | Key | Notes |
 |---|---|---|
@@ -379,7 +384,8 @@ The Rust side resolves each type once into a `TypeSpec { authority, timeless, ha
 - Links are **symmetric in effect**: `A.superseded_by = B` implies `B.supersedes = A` for traversal, even if only one side is declared. `doctor` reports one-sided links.
 - Chains are followed transitively (`A → B → C`); cycles are detected, reported by `doctor`, and broken deterministically (link ignored, warning emitted) rather than panicking.
 - Supersession is orthogonal to `status`: a doc can be `superseded` without a `superseded_by` (retired with no replacement) — this is the "quiet expiry" case that Graphiti-style systems get wrong. `lineage` still reports it as a terminal state.
-- Cross-vault links are not supported (paths are vault-relative).
+- **Validity windows.** A document's `valid_to` is `min(effective_to, earliest successor's effective_from)`. The chain is a *derivation fallback*, never the only source: explicit `effective_from`/`effective_to` win (§6.10).
+- **Cross-corpus links are qualified and opt-in.** `supersedes: "third-brain:/decisions/old.md"`; unqualified paths resolve only inside the document's own corpus, and qualified links require `allow_cross_corpus_links = true` (§6.11). An archived decision can never supersede a current one by accident.
 
 ### 6.8 Versions
 
@@ -436,6 +442,88 @@ Other cases:
 - **Identity churn.** If a rewrite changes both title and date (or deletes an `id`), the document resolves to a new `DocId`. `doctor` detects the probable predecessor via the tombstone's content hash and reports it as a continuation hint. It reports; it never silently restores.
 - **Consistent snapshots.** The index hashes the bytes it actually read; if the file changes mid-read, it re-reads (bounded retries). It never trusts mtime alone.
 
+### 6.10 Temporal semantics: valid time and transaction time
+
+Two clocks, never conflated:
+
+| Axis | Question | Where it lives |
+|---|---|---|
+| **Valid time** (world time, business time) | When was this true *in reality*? | Frontmatter `date`, `effective_from`, `effective_to`; supersession chain |
+| **Transaction time** (system time, ingestion time) | When did *we* learn or record it? | Git history; never in frontmatter |
+
+Four dates, and they routinely differ:
+
+| Date | Source | Question |
+|---|---|---|
+| **Authored / decided** | `date` | When did we decide it? |
+| **Effective** | `effective_from` | When did it start being true? |
+| **Recorded** | git commit, index observation | When did it enter the vault / index? |
+| **Observed-superseded** | index pass | When did we notice a successor? |
+
+Frontmatter keys (all optional):
+
+```yaml
+date: 2025-01-14            # authored/decided (existing)
+effective_from: 2025-04-01  # valid-time start; defaults to `date`
+effective_to: 2026-03-01    # valid-time end, exclusive; usually derived
+```
+
+Rules:
+
+1. `effective_from` defaults to `date`. **Never to mtime.**
+2. `effective_to` is exclusive. If absent, it is derived as the earliest successor's `effective_from` (§6.7). The chain is the *fallback*; explicit keys win.
+3. `valid = [effective_from, valid_to)` where `valid_to = min(effective_to, earliest successor's effective_from)`.
+4. `valid_to <= effective_from` → `invalid_validity` (`doctor` error). The window is treated as empty; the document still appears in `history` and `exhaustive`.
+5. `current(now) = effective_status ∈ {active, draft} AND effective_from <= now AND (valid_to is None OR valid_to > now)`, where `effective_status` is defined in rule 6.
+6. **Effective status is derived, not hand-maintained.** If `superseded_by` resolves to an existing document, the document is superseded even when `status: active` is declared. If `status: superseded` has no successor, it is quiet-expired (still superseded). `doctor` reports disagreements as `status_mismatch` and never rewrites them.
+7. **`as_of DATE` uses valid time only.** It includes documents where `effective_from <= T < valid_to`; decay is off; **status is returned but does not gate**. A document that is superseded today may have been current in June 2025 — gating on today's status would silently drop the correct answer.
+8. Decay in the `current` intent is anchored on `effective_from`, not `date`: a decision that took effect yesterday is recent even if it was drafted a year ago.
+9. Missing dates entirely → excluded from `as_of` (reported as `no_validity`), included in `current`.
+
+**Why explicit keys, not chain-only derivation.** Deriving windows from the chain fails in four real cases: in-place rewrites (no successor, so no new window); effective ≠ decided (“decided in January, effective in April”); backdated imports (negative windows); and future branching, where one fact is superseded differently in different scopes. The chain still supplies the default — it just isn't the only source.
+
+**Transaction time is git's job.** janus-mem does not store it, and it must not write system timestamps into frontmatter: that would mutate user files, pollute diffs, and be wrong after a sidecar rebuild. Git already records every version with a commit timestamp and survives index loss. The index may keep diagnostic timestamps (`first_seen_at`, `observed_superseded_at`) for `doctor` and freshness reporting, but they are derived, rebuildable, and never used in scoring or written to the vault. A `--git-history` enrichment (pure-Rust `gix`, no shelling out) can answer “what did we know at time T” after 1.0.
+
+Scope-relative validity — a global fact superseded only for one org — depends on the scope decision and is deferred (§15 Q18).
+
+### 6.11 Corpora: primary and archived vaults
+
+A **corpus** is a root directory with its own index. Its `role` determines whether its facts may answer “what is true now”.
+
+```toml
+[[corpora]]
+id = "main"
+root = "."
+role = "primary"
+
+[[corpora]]
+id = "third-brain"
+root = "~/old-vault"
+role = "archived"
+read_only = true
+
+[search]
+allow_cross_corpus_links = false
+archived_weight = 0.8
+```
+
+Rules:
+
+- `corpus_id` is **declared and stable**, never derived from a path. Default `main`. (`vault_id`, a root-path hash, remains a manifest locator only — moving the repo must not change identity.)
+- One index per corpus at `<root>/.janus/`. A combined index is unnecessary: scoring is per-document and independent, so merging per-corpus top-K by `final` is exact.
+- **Archived corpora are hard-excluded by default**, not down-weighted. A multiplier still lets an old fact into a top-3 answer, which is exactly the failure being prevented.
+- Query selects corpora: `--corpus primary` (default) | `all` | `<id>`. Every result carries `corpus`.
+- When archived corpora are explicitly included, `search.archived_weight` applies (default 0.8; primary is 1.0) and appears in the score breakdown.
+- **Cross-corpus links are opt-in and qualified.** `supersedes: "third-brain:/decisions/old.md"`. Unqualified paths resolve only within the document's own corpus. Qualified links take effect only when `allow_cross_corpus_links = true` (default false); otherwise `doctor` reports `cross_corpus_link_ignored`.
+- **Promotion is an explicit write, never a background consequence:**
+  - `janus promote third-brain:/path --link-from decisions/new.md` — patches the primary document's `supersedes` to include the qualified source (etagged, dry-run by default).
+  - `janus promote third-brain:/path --adopt` — creates a new primary document citing the source. The archived document is untouched.
+  - Promotion never moves, rewrites, or deletes archived documents.
+- **Archived corpora are read-only** unless `read_only = false` is set deliberately; write tools refuse paths outside a writable corpus.
+- Identity keys are namespaced by `corpus_id` (§6.4), so identical documents in different corpora cannot collide.
+- Graph/entity edges carry `corpus_id` (§8.9): analysis spans corpora without conflating authority.
+- The point of an archive is analysis, not truth: `--corpus third-brain --intent history` gives pattern analysis over old ideas and decisions with zero risk of them being served as current.
+
 ---
 
 ## 7. Behaviour
@@ -444,12 +532,14 @@ Other cases:
 
 | Intent | Decay | Status filter | Use |
 |---|---|---|---|
-| `current` (default) | on, 180-day half-life | active, draft | "What's true now?" |
-| `history` | off | active, draft, deprecated, superseded | "What did we ever say?" |
+| `current` (default) | on, 180-day half-life | active, draft, and valid at `now` | "What's true now?" |
+| `history` | off | all statuses, including expired | "What did we ever say?" |
 | `evolution` | off | all | Feed `lineage`; ordered oldest→newest |
 | `exhaustive` | off | all, including `unknown` | Debug/audit |
 
-CLI flags can override parameters individually: `--decay-half-life 30`, `--include-superseded`, `--types decision,spec`.
+`--as-of DATE` is a **parameter, not an intent**, and it overrides the intent's semantics: it switches to valid-time filtering (§6.10), turns decay off, and stops gating on status. `--as-of` always implies history ordering.
+
+CLI flags can override parameters individually: `--decay-half-life 30`, `--include-superseded`, `--types decision,spec`, `--corpus all`.
 
 ### 7.2 Scoring
 
@@ -465,7 +555,9 @@ final      = relevance · authority · decay
 ```
 
 - **Retrieval is candidate-scoped.** The scorer signature is effectively `score(query, candidates: Option<&CandidateSet>)`, where a candidate set is a bitset or sorted `ChunkId` list. v1 always passes `None` (all chunks). This exists so a future graph expansion, tag filter, or “only these docs” restriction reuses the exact same scoring path instead of growing a second one (§8.9).
-- `age_days` uses the document's effective date and the injected `Clock`, clamped at 0 (future-dated docs get decay = 1.0).
+- `age_days` uses `effective_from` (falling back to `date`) and the injected `Clock`, clamped at 0 (future-dated docs get decay = 1.0).
+- `as_of` requests bypass the status gate and set `decay = 1.0`; inclusion is decided by the valid-time window alone. The response still reports declared and effective status so the agent can see what the document's standing was.
+- When multiple corpora are explicitly queried, `final` is multiplied by `search.archived_weight` and the corpus name is reported per result. Primary-only queries apply no corpus weight.
 - Vectors are L2-normalized at index time, so cosine is a dot product.
 - A doc's score is the max over its chunks; the returned chunk is the argmax. (No document-level score aggregation in v1.)
 - Optional MMR-style diversity pass (`--diversity 0.3`, default off) to avoid five chunks of the same doc.
@@ -645,7 +737,9 @@ pub struct Index {
     pub schema_version: u16,           // frontmatter schema this index understands
     pub embedder: Option<EmbedderId>,  // model, dim, normalization, quantization
     pub built_at: DateTime<Utc>,
-    pub vault_id: VaultId,             // stable hash of the canonical root (future multi-vault)
+    pub corpus_id: CorpusId,           // declared, stable, never path-derived
+    pub corpus_role: CorpusRole,       // Primary | Archived
+    pub vault_id: VaultId,             // hash of canonical root; locator only, never identity
     pub vault_root: PathBuf,
     pub strings: StringPool,           // interned rel_paths, titles, headings, tags
     pub docs: Vec<DocumentMeta>,       // ~120 B each, string-pool handles
@@ -669,7 +763,12 @@ This also means the on-disk format does not change between M4 (simple `read` of 
 - Corruption: blake3 checksums for both files live in `manifest.json`; mismatch ⇒ rebuild from source with a warning. A truncated or partial index is never loaded.
 - Atomic index update: write `index.bin.new` / `vectors.f32.new`, fsync, rename both, then rewrite `manifest.json` last. Readers see the old manifest or the new one, never a mix.
 
-Every stored path is vault-relative, and the manifest carries a `vault_id` (a hash of the canonical root, not a random value). v1 loads one vault per process, but nothing in the format assumes a single vault: a future registry is a table of `VaultId → root` plus a merged query path (D31).
+Every stored path is vault-relative. The manifest carries two different identifiers, and they must not be confused:
+
+- `corpus_id` — declared in config, stable, participates in identity (§6.4).
+- `vault_id` — a hash of the canonical root, used only to locate/index a corpus. Moving the repository changes `vault_id` and must **not** change any `DocId`.
+
+v1 loads one primary corpus per process, but nothing in the format assumes a single corpus: a registry is a list of corpus descriptors plus per-corpus indexes merged at query time (§6.11).
 
 ### 8.3.1 RAM budget
 
@@ -815,6 +914,7 @@ What we deliberately do **not** do now: no empty graph tables, no entity enum, n
 janus init [--vault PATH]                    # create janus.toml + .janus/, add to .gitignore
 janus index [PATHS...] [--rebuild] [--no-embeddings] [--dry-run]
 janus search <QUERY> [--intent current|history|evolution|exhaustive]
+                     [--as-of DATE] [--corpus primary|all|<id>]
                      [--limit N] [--types T,..] [--tags T,..]
                      [--decay-half-life DAYS] [--include-superseded]
                      [--json] [--no-color]
@@ -825,6 +925,8 @@ janus set <PATH> --expect-hash H --key status=superseded [--key k=v ...] [--dry-
 janus write <PATH> --frontmatter f.yaml (--body -|f.md)
             [--create | --overwrite --expect-hash H] [--dry-run]
 janus supersede <OLD> <NEW> [--append-only] [--dry-run]
+janus promote <corpus>:<path> (--link-from <path> | --adopt) [--dry-run]
+janus corpora [--json]                       # configured corpora, roles, index freshness
 janus doctor [--json]                        # index health, broken links, duplicates
 janus ids [PATH...] [--json]                 # resolved DocId, tier, and key for inspection
 janus suggest-links [--threshold 0.85]       # candidates only; never applies
@@ -840,7 +942,7 @@ Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash,
 
 | Tool | Params | Returns |
 |---|---|---|
-| `search` | `query`, `limit?`, `intent?`, `types?`, `tags?`, `include_superseded?`, `decay_half_life_days?`, `max_chars?` | Ranked results with score breakdown, age, status, path |
+| `search` | `query`, `limit?`, `intent?`, `as_of?`, `corpus?`, `types?`, `tags?`, `include_superseded?`, `decay_half_life_days?`, `max_chars?` | Ranked results with score breakdown, age, declared + effective status, validity window, corpus, path |
 | `get_lineage` | `path?` **or** `topic?` (exactly one) | Ordered chain with relation edges and terminal state |
 | `get_authoritative_facts` | `query?`, `tags?`, `types?`, `limit?` | Active decisions/specs/principles only |
 | `read_document` | `path`, `max_chars?`, `chunk_id?` | Frontmatter as JSON + body (or a specific chunk's span) |
@@ -854,6 +956,7 @@ Plus `janus_status` (read-only, no params): index freshness, doc/chunk counts, e
 | `update_frontmatter` | `path`, `patch`, **`expected_hash`**, `dry_run?` | Surgical key patch; refuses unsupported shapes |
 | `write_document` | `path`, `frontmatter`, `body`, `mode` (create/overwrite), `expected_hash` (required for overwrite), `dry_run?` | Whole-file create/replace |
 | `supersede_document` | `old_path`, **`expected_hash`**, `new_path?`, `new_title?`, `dry_run?` | Transactional dual patch (or append-only with `new_path` created first) |
+| `promote_document` | `source` (`corpus:path`), `target_path?`, `mode` (`link`/`adopt`), `expected_hash?`, `dry_run?` | Declares an archived document as lineage for a primary one; never moves or rewrites the archive (§6.11) |
 
 `expected_hash` is the `content_hash`/etag returned by every read tool. It is **required** for `update_frontmatter`, `supersede_document`, and for `write_document` in `overwrite` mode. Without it, the call returns `PreconditionRequired` and a dry-run preview; it never mutates. All write tools return receipts, and a hash mismatch returns `Conflict` with both hashes so the agent can re-read and retry.
 
@@ -892,11 +995,15 @@ Every tool returns the same outer shape, so agents learn one contract:
   "degraded": ["embeddings disabled; lexical only"],
   "notes": ["4 superseded results hidden; use intent=history to see them"],
   "results": [ { "path": "...", "title": "...", "status": "active",
+                 "effective_status": "active",
                  "type": "decision", "date": "2026-03-15", "age_days": 228,
+                 "effective_from": "2026-03-15", "valid_to": null,
+                 "corpus": "main",
                  "author": "claude-opus",
                  "date_source": "frontmatter", "doc_version": "2.0",
                  "scores": { "semantic": 0.81, "lexical": 12.4, "relevance": 0.78,
-                             "authority": 1.5, "decay": 0.93, "final": 1.09 },
+                             "authority": 1.5, "decay": 0.93, "corpus": 1.0,
+                             "final": 1.09 },
                  "chunk_id": "…", "heading": "## Decision", "text": "…",
                  "truncated": false } ]
 }
@@ -915,6 +1022,8 @@ Errors are `{ "ok": false, "code": "conflict", "message": "...", "hint": "..." }
 | Property | `proptest` | Patch invariants I1–I7; decay monotonicity; chunker never panics on arbitrary UTF-8, CRLF, BOM, unclosed fences, and `---` inside bodies |
 | Integration | `assert_cmd` + fixture vault | `index → search → lineage → supersede → search` end to end |
 | Concurrency | `tempfile` + threads | Concurrent `set` on one file: exactly one wins, the loser gets `Conflict` |
+| Temporal | unit + integration | `as_of` returns what was valid at T; a doc superseded today is still returned for a past T and is absent from `current`; `valid_to <= effective_from` is reported as `invalid_validity`; `effective_from` defaults to `date` and never to mtime; the chain is used only when explicit keys are absent; decay is anchored on `effective_from` |
+| Corpora | integration | Archived documents never appear in a default query; they appear with `--corpus all`/`<id>`; an unqualified cross-corpus link is ignored unless `allow_cross_corpus_links`; promotion never mutates an archived file; every result carries `corpus` |
 | Identity/moves | integration + property | Derivation is deterministic for new docs; identity is carried forward for in-place edits (title/date/version changes do not churn); title+date **and** title+version both survive move+edit with **zero file writes**; ambiguous keys fall through to path; an id-less, frontmatter-less vault indexes correctly; stale textual links resolve through the alias table; no confirmation step is ever required |
 | Platform | CI matrix (macOS, Linux) + `#[cfg]` tests | Path handling with spaces/unicode/case-only renames, CRLF preservation, atomic replace, advisory locks. Windows must at least compile (`cargo check --target x86_64-pc-windows-msvc`) even though it is not gated |
 | Retrieval quality | `tests/eval/queries.jsonl` | ≥30 hand-labelled queries; report nDCG@10 and "active top-1" rate; run in CI as a non-blocking report |
@@ -961,8 +1070,8 @@ Hand-written BM25 (inverted index, tokenizer, optional stemmer); scoring module 
 **Learn:** traits, trait objects vs. generics, `Send`/`Sync`, rayon, slices and `chunks_exact`, serde/bincode, feature flags, `Option<&T>` in structs, `Arc`.
 
 ### M5 — Temporal graph (3–4 days)
-Supersession parsing, transitive chains, cycle detection, `janus lineage` (chain + terminal state), `janus doctor` link checks, `suggest-links` (similarity candidates, no writes), `janus ids`, and §6.9 move handling: derived-identity and exact-hash moves, path alias table, continuation hints, tombstones, `janus moves`.
-**Done when:** `lineage` renders a correct 5-link chain from the fixture vault, detects the seeded cycle, and survives a simulated “dream cycle” that (a) moves a linked doc unchanged, (b) moves and edits a linked doc with no `id` anywhere, and (c) rewrites a third body — all without breaking any chain, touching any file, or requiring any confirmation step.
+Supersession parsing, transitive chains, cycle detection, derived validity windows, `--as-of` valid-time queries (§6.10), effective-status derivation, `janus lineage` (chain + terminal state), `janus doctor` link checks, `suggest-links` (similarity candidates, no writes), `janus ids`, and §6.9 move handling: derived-identity and exact-hash moves, path alias table, continuation hints, tombstones, `janus moves`.
+**Done when:** `lineage` renders a correct 5-link chain from the fixture vault, `search --as-of` returns the old value for a past date and the new one today, detects the seeded cycle, and survives a simulated “dream cycle” that (a) moves a linked doc unchanged, (b) moves and edits a linked doc with no `id` anywhere, and (c) rewrites a third body — all without breaking any chain, touching any file, or requiring any confirmation step.
 **Learn:** recursive functions and explicit stacks (avoid gratuitous recursion), `HashMap` graph representation, `enum` state machines, borrowing across a traversal, `impl Display` for output types.
 
 ### M6 — MCP server, read-only (3–5 days)
@@ -1069,6 +1178,8 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | Hand-rolled BM25 quality is poor | Med | Med | Eval harness at M3; decision gate at M4 to swap in `tantivy` |
 | Loss of motivation after the novelty fades | Med | High | M3 delivers daily use in ~2 weeks; dogfood in the real vault from M3 onward |
 | Index bloat / stale index confusion | Low | Med | `janus_status` always reports freshness; auto-rebuild on version mismatch; `doctor` checks index mtime vs vault mtime |
+| Archived/old facts leak into current answers | Med | High | Hard corpus filter (not a weight) for archived roles; every result is labeled; cross-corpus links are qualified and off by default (§6.11) |
+| `status` and validity windows disagree | High | Med | Derive `effective_status`; report `status_mismatch` and `invalid_validity` in `doctor`; never rewrite declarations |
 
 ---
 
@@ -1106,13 +1217,18 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | D28 | Generated ids use cuid2 at length **16** (when id generation is enabled at all) | 16 chars ≈ 79 bits ≈ 1.2×10²⁴ values: a 99.9%-collision-free bound at ~4.9×10¹⁰ ids, far beyond any local vault. See §15 Q12 for the math and why length is not the real safety net | Yes |
 | D29 | Performance is a guardrail, not a goal: p50 < 100 ms is the v1 bar; single-digit ms is aspirational; no micro-optimization before M8 measurements | The project exists to be useful and to teach Rust, not to win a benchmark; premature optimization also teaches the wrong lessons | Yes |
 | D30 | Git coexistence is a hard requirement (§8.6) | Vaults are version-controlled; a tool that fights git is unusable regardless of retrieval quality | No |
-| D31 | All persisted data is vault-scoped, with a `vault_id` in the manifest, even though v1 supports one vault | Makes a future multi-vault registry additive rather than a format rewrite | No |
+| D31 | All persisted data is corpus-scoped: a declared, stable `corpus_id` in the manifest (identity) plus a path-hash `vault_id` (locator only) | Makes archived corpora and a multi-corpus registry additive rather than a format rewrite, while keeping identity independent of filesystem location | No |
 | D32 | Document-level temporal relations only; no entity/relation graph | Keeps the model learnable and the index small; the high-value questions are document-shaped, and entity extraction is a different (LLM-heavy) product | Yes |
 | D33 | Path-pattern type inference is configurable and best-effort; no folder layout is ever required | The tool must work on an existing vault as-is; a future `janus scaffold` is opt-in convenience | No |
 | D34 | Add `finding` and `idea` as first-class types, and make the type set an open, config-driven registry (`TypeSpec`) rather than a closed enum | Findings (evidence) and ideas (proposals) are the two most common agents of change; `idea → decision` and `finding → finding` are the supersession chains the engine exists to track. An open registry lets domain types be added without a release | Yes (weights are config) |
 | D35 | Model document links as generic `EdgeKind` values instead of a `SupersessionGraph` type | v1 uses only `Supersedes`, but a graph extension becomes additive rather than a format rewrite (§8.9) | Yes |
 | D36 | The scorer takes an optional candidate set from day one | Graph traversal, tag filters, and “restrict to these docs” all reuse one scoring path, so a second, subtly different scorer never appears | Yes |
 | D37 | Future entity/relation extraction is opt-in, index-time, versioned, and tagged `Derived`; declared edges always win | Keeps retrieval deterministic and offline while making machine-inferred knowledge auditable and visibly distinct from the user's claims | No |
+| D38 | Valid time is explicit (`effective_from`/`effective_to`, optional) with chain-derived windows as a *fallback*, not the source | Derivation alone fails for in-place rewrites, decided-vs-effective dates, backdated imports, and branching. Explicit keys win, the chain fills gaps | Yes |
+| D39 | Corpora have declared ids and roles (`primary`/`archived`); one index per corpus; archived corpora are hard-filtered from default queries | A weight still lets old facts into top-3 answers. Filtering by role is the only reliable guarantee, and per-corpus indexes make merge exact and failure isolated | Yes |
+| D40 | Transaction time is delegated to git; janus-mem never writes system timestamps into frontmatter | Frontmatter timestamps mutate user files, pollute diffs, and are wrong after a sidecar rebuild. Git already stores every version with timestamps | Yes (add `--git-history`) |
+| D41 | `as_of` queries bypass the status gate and set decay to 1 | Status is relative to *now*. Gating a historical query on today's status silently drops the correct answer | No |
+| D42 | Cross-corpus links must be qualified (`corpus:path`) and are off by default; promotion is an explicit, etagged write | An archived decision must never supersede a current one by accident, and "manual confirmation" must be an action, not a prompt someone may ignore | No |
 
 ### Open questions (to resolve at the milestone in brackets)
 
@@ -1120,12 +1236,13 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 2. **[M6]** `rmcp` vs. hand-rolled JSON-RPC stdio? Hand-rolled is ~300 lines and teaches the protocol; `rmcp` is less work and more future-proof.
 3. **[M6]** Should the MCP server keep a warm index (fast, long-running) or reload per call (simple, always fresh)? Proposal: warm + `notify`-based invalidation, with `janus_status` reporting staleness.
 4. **[M7]** Does the vault owner want `supersede` to also bump `doc_version` automatically, or only on request? Proposal: only on request (D8 spirit: never invent metadata).
-5. **[M8]** Is multi-vault (per-project roots in one process) worth it, or is one vault per agent config enough?
+5. **[post-1.0]** Multi-corpus: is a registry worth it, or is one primary vault plus one archive per agent config enough?
 6. **[M8]** Add cross-encoder reranking? Would need an ONNX reranker; conflicts with "no LLM in the loop" only in spirit, not in fact. Default: no.
 7. **[ongoing]** Should there be a `--format obsidian` output mode (wikilinks, block refs)? Post-1.0.
 8. **[M3]** Is `rg`-style regex search worth exposing alongside BM25 (`janus grep`)? Leaning no — `rg` already exists.
 9. **[M8]** Which quantization ships as a supported option — f16 only, or i8 too? f16 is nearly lossless and halves memory; i8 needs per-vector rescaling and an eval run to prove recall holds.
 10. ~~**[M5]** Is 0.80 the right auto-apply threshold for structural move detection?~~ Resolved by D23/D25: no threshold is load-bearing. Identity is derived from document metadata; similarity only produces annotations.
+11. **[post-1.0]** Python wrapper: thin `subprocess` client over `janus rpc` (no bindings), or PyO3? Proposal: `janus rpc` first — it also validates the adapter design.
 12. ~~**[M8]** Should `write_document` generate ids? cuid2, UUIDv7, or ULID?~~ Resolved: cuid2, **16 chars**, opt-in via `--new-id` (D28). Collision math, with alphabet size 36 and the birthday bound `p ≈ N² / (2·36^L)`:
 
     | Length | Values | 99.9%-safe up to |
@@ -1138,11 +1255,15 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 
     12 chars is already mathematically sufficient for any realistic vault; 16 costs nothing and removes the question. Length is *not* the real safety net, though: ids imported from other systems can collide regardless of length, so `doctor`'s duplicate detection stays mandatory.
 13. **[post-1.0]** Index non-Markdown text (`.txt`, `.org`, `.rst`) behind an `[index] include` list? Deferred by D27. If added, those files need a defined default type (`note`), no date unless the filename parses, and a lower authority weight.
-14. **[post-1.0]** Multi-vault: one process, many roots, a `vault_id` on every result, and cross-vault search opt-in. Data structures are scoped for it now (D31); only the config/registry and path resolution would change.
+14. **[post-1.0]** Corpus registry UX: one process serving many roots, `--corpus` defaults, and whether archived corpora are read-only by default in every case.
 15. **[post-1.0]** `janus scaffold`: generate an opinionated starter layout (`decisions/`, `specs/`, `principles/`, `journals/`) plus a `janus.toml` for users who don't have a vault yet. Strictly opt-in and separate from the indexing path (D33).
 16. **[post-1.0]** Entity graph: which extractor (small local LLM, NER model, or agent-supplied edges at write time)? The last option is the cheapest and most trustworthy — the agent that writes a `finding` could declare its entities via frontmatter — but it depends on agent cooperation. Deferred; §8.9 defines the contract either way.
 17. **[post-1.0]** Entity identity: normalized name + type, declared entity nodes in frontmatter, or both? Proposal: start with declared entities, add auto-resolution only with confidence and provenance.
-11. **[post-1.0]** Python wrapper: thin `subprocess` client over `janus rpc` (no bindings), or PyO3? Proposal: `janus rpc` first — it also validates the adapter design.
+18. **[OPEN — decide before M1]** Scopes, and whether `scope` participates in the identity match key. This is the one decision with real churn consequences: adding a field to identity later re-keys every scoped document. Everything else about scopes (flat tags, global default, filter-not-weight) is low-risk.
+19. **[post-1.0]** `--git-history` enrichment: read commit timestamps with pure-Rust `gix` (no shelling out) to answer "what did we know at time T" and to make `as_of` + transaction time composable. Cost and performance unknown.
+20. **[post-1.0]** Should explicitly-included archived corpora have a configurable weight, or a separate result section ("archived matches") so they can never rank above a primary answer?
+21. **[M7]** Does `deprecated` still earn its place now that tombstones and `effective_status` exist? Candidate merge: `deprecated` = retired with no successor; keep the declared field for authoring, derive the rest.
+22. **[M7]** When `supersede` patches a document, should it set `effective_to` on the old doc to the new doc's `effective_from`, or continue deriving it from the chain? Explicit is more correct but writes an extra key the user did not ask for.
 
 ---
 
@@ -1160,6 +1281,8 @@ author = ["author", "generated_by", "model"]
 type = ["type", "kind", "doc_type"]
 status = ["status", "state"]
 date = ["date", "created", "decided"]
+effective_from = ["effective_from", "valid_from", "effective"]
+effective_to = ["effective_to", "valid_to", "expires"]
 supersedes = ["supersedes", "superseded"]
 superseded_by = ["superseded_by", "superseded-by"]
 tags = ["tags", "keywords"]
@@ -1202,6 +1325,15 @@ idea = 90
 "journals/" = "journal"
 "ideas/" = "idea"
 
+[[corpora]]                   # v1 loads the primary corpus; others are post-1.0
+id = "main"
+root = "."
+role = "primary"
+
+[search]
+allow_cross_corpus_links = false
+archived_weight = 0.8
+
 [index]
 exclude = ["archive/private/**", "**/*.draft.md"]
 
@@ -1236,19 +1368,25 @@ max_chars = 4000
 ### 16.3 Glossary
 
 - **Agent memory platform** — a system that captures and curates an agent's conversational memories (extraction, consolidation, forgetting). janus-mem is not one; see §3.1.
+- **As-of** — a query mode that filters by valid time instead of current status: what was true on a given date.
 - **Authority** — multiplier reflecting how binding a document is (decision > spec > principle > journal).
 - **Breadcrumb** — `title › H1 › H2` preamble added to embedding text only.
 - **Chunk** — a heading-delimited section of a document, the unit of retrieval and embedding.
+- **Corpus** — a root directory with its own index and a declared `corpus_id` and role (`primary` or `archived`).
 - **Doc ID** — identity of a document, matched from declared metadata and carried forward while its path is stable (§6.4).
 - **Match key** — the ordered metadata evidence used to attach a new path to a vanished document: declared id, content hash, title+date, title+version, unique title, then path.
 - **mtime** — filesystem modification time. Used only for cheap change detection, `doctor` freshness reports, and as a *last-resort* date source. Never used for identity, because clones, checkouts, and copies churn it.
 - **Intent** — a named bundle of decay + status-filter settings (`current`, `history`, `evolution`, `exhaustive`).
 - **Ordinal** — a chunk's 0-based position within its document. Display ordering only; never identity.
+- **Transaction time** — when the system recorded or learned a fact. Delegated to git history; never stored in frontmatter.
+- **Valid time** — when a fact was true in the world: `effective_from` to `valid_to`. Distinct from authored date and from transaction time.
 - **Sidecar** — the `.janus/` directory; derived, rebuildable index data.
 - **Supersession** — declared replacement of one document by another; the graph edge behind `lineage`.
 - **Timeless** — exempt from time decay (principles, active decisions).
 - **Vault** — the root directory janus-mem indexes.
-- **Vault ID** — a hash of the vault's canonical root path; stored in the manifest so a future registry can address multiple vaults without a format change.
+- **Vault ID** — a hash of the vault's canonical root path. A manifest locator only; never part of identity.
+- **Validity window** — `[effective_from, valid_to)`: the interval during which a document's claim is true in the world.
+- **Effective status** — status derived from the supersession graph (a document with a live successor is superseded), independent of the declared `status` field.
 
 ### 16.4 Definition of Done for v1.0
 
