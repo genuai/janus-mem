@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, SubCommand};
+use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -17,7 +17,7 @@ pub struct Cli {
     pub command: Command,
 }
 
-#[derive(Debug, SubCommand)]
+#[derive(Debug, Subcommand)]
 pub enum Command {
     /// Create janus.toml and .janus/ for a vault
     Init,
