@@ -175,9 +175,16 @@ These exist to keep the project maintainable *and* to give the Rust learning a s
 
 ## 6. Domain model
 
-### 6.1 Vault
+### 6.1 Corpus roots, config, and index
 
-A vault is a directory tree. Config lives at `<vault>/janus.toml` or `<vault>/.janus/config.toml`; the index lives in `<vault>/.janus/`. Root resolution order: `--vault <path>` → `JANUS_VAULT` → nearest ancestor containing `janus.toml` or `.janus/` → error.
+A **corpus** is a directory tree. Corpus-local config lives at `<root>/janus.toml`; the index lives in `<root>/.janus/`. A **workspace** is a set of corpora queried together plus federation policy (§6.11).
+
+Resolution:
+
+- **Workspace mode:** `--workspace PATH` → `JANUS_WORKSPACE` → platform config file → otherwise none.
+- **Single-corpus mode:** `--vault PATH` → `JANUS_VAULT` → nearest ancestor containing `janus.toml` or `.janus/` → error.
+
+`--vault` is the single-corpus shortcut and keeps its M0 behavior. "Vault" in UX text means the primary corpus; internally the precise term is corpus.
 
 Default ignore rules: `.git/`, `target/`, `node_modules/`, `.janus/`, `.obsidian/`, plus `.gitignore` semantics (use the `ignore` crate).
 
@@ -257,7 +264,12 @@ Two mechanisms, in this order:
 
 Match keys, in order. The first key that yields exactly one unmatched candidate wins; two or more candidates is ambiguous and falls through to the next key. Never merge.
 
-Match keys are namespaced by `corpus_id` (§6.11), so an archived document and a primary document with the same title and date can never collide. Whether `scope` also enters the key is an **open decision** (§15 Q18) with real churn consequences, so it is deliberately not decided here.
+Match keys 3–5 are namespaced: `corpus_id ‖ scope ‖ title ‖ date`, where `scope` defaults to `global` (§6.12). Keys 1–2 are already globally unique and are not namespaced. Consequences:
+
+- Identical documents in different corpora cannot collide.
+- `Q4 plan` in `org:acme` and `Q4 plan` in `org:beta` cannot collide.
+- Adding or removing a `shared_with` tag does **not** change identity (it is a retrieval tag, not a namespace).
+- Changing the owning `scope` does change identity; `doctor` reports it as identity churn with a continuation hint.
 
 | Order | Key | Notes |
 |---|---|---|
@@ -376,6 +388,8 @@ idea = 90
 "ideas/" = "idea"
 ```
 
+**Types encode behavior; tags encode genre.** A type earns its place only if it needs a different authority weight, decay, or lifecycle. `report` and `proposal` are genres: `proposal` is an alias for `idea`, and `report` is an alias for `finding` plus a `report` tag. If reports turn out to be systematically derivative and should rank below primary evidence, that is a behavioral difference and justifies a real config entry (`[authority] report = 1.05`, `[decay.by_type] report = 120`) — no release required.
+
 The Rust side resolves each type once into a `TypeSpec { authority, timeless, half_life_days }` at config load and passes it to the scorer. Unknown types get weight 0.80, the global half-life, and a `doctor` note — never a hard failure. `type` never influences identity (§6.4).
 
 ### 6.7 Supersession
@@ -484,45 +498,118 @@ Rules:
 
 **Transaction time is git's job.** janus-mem does not store it, and it must not write system timestamps into frontmatter: that would mutate user files, pollute diffs, and be wrong after a sidecar rebuild. Git already records every version with a commit timestamp and survives index loss. The index may keep diagnostic timestamps (`first_seen_at`, `observed_superseded_at`) for `doctor` and freshness reporting, but they are derived, rebuildable, and never used in scoring or written to the vault. A `--git-history` enrichment (pure-Rust `gix`, no shelling out) can answer “what did we know at time T” after 1.0.
 
-Scope-relative validity — a global fact superseded only for one org — depends on the scope decision and is deferred (§15 Q18).
+Scope-relative validity — a global fact superseded only for one org — is specified in §6.12 (rule 7) and is why validity windows are resolved against the query's scope set.
 
-### 6.11 Corpora: primary and archived vaults
+### 6.11 Corpora and workspaces
 
-A **corpus** is a root directory with its own index. Its `role` determines whether its facts may answer “what is true now”.
+Two different files with two different jobs. **A corpus describes how to read itself; a workspace describes which corpora you query together and how.**
+
+| | Corpus config | Workspace config |
+|---|---|---|
+| File | `<root>/janus.toml` | `~/.config/janus/workspace.toml`, or any path via `--workspace` |
+| Owner | The user | janus-mem (small, safe to rewrite atomically) |
+| Owns | Frontmatter aliases, types, authority, decay, paths, excludes, chunking, embedding | Corpus list, roles, read-only, index location, cross-corpus policy, archived weight |
+| Reusable standalone | Yes | No |
+| Index | `<root>/.janus/` (or `index_dir` override) | None — there is no global index |
 
 ```toml
+# workspace.toml — janus-managed
 [[corpora]]
 id = "main"
-root = "."
+root = "/usr/workspace"
 role = "primary"
 
 [[corpora]]
-id = "third-brain"
-root = "~/old-vault"
+id = "context"
+root = "/opt/context"
 role = "archived"
 read_only = true
+index_dir = "~/.cache/janus/context"   # optional; default <root>/.janus
 
 [search]
 allow_cross_corpus_links = false
 archived_weight = 0.8
 ```
 
+Corpus-local `janus.toml` stays what §16.1 shows: parsing and scoring rules only. **It never contains `[[corpora]]`, a role, or federation policy**, because the same directory could be primary in one workspace and archived in another.
+
+**Precedence: every setting has exactly one home.**
+
+| Layer | Owns | Never does |
+|---|---|---|
+| Corpus config | How to parse, type, score, and chunk *that* corpus | Define corpora or roles |
+| Workspace | Corpus list, roles, read-only, index location, federation policy | Override corpus parsing/identity/scoring rules |
+| CLI flags | Query-scoped selection and limits | Change persisted semantics |
+
+The last row matters most: a workspace must never apply its own frontmatter aliases or type weights to every corpus, or an old vault with different conventions gets read with the wrong rules. That is the whole reason corpora have local config.
+
+**Resolution order:** `--workspace` → `JANUS_WORKSPACE` → platform config dir → none. When no workspace exists, single-corpus mode applies (`--vault` → `JANUS_VAULT` → ancestor `janus.toml`).
+
+**No global index.** Each corpus owns its index because the index is derived from that corpus, rebuildable, movable, and isolatable. Query-time merging is exact: scoring is per-document, so merging per-corpus top-K by `final` is lossless.
+
 Rules:
 
-- `corpus_id` is **declared and stable**, never derived from a path. Default `main`. (`vault_id`, a root-path hash, remains a manifest locator only — moving the repo must not change identity.)
-- One index per corpus at `<root>/.janus/`. A combined index is unnecessary: scoring is per-document and independent, so merging per-corpus top-K by `final` is exact.
+- `corpus_id` is **declared and stable**, never derived from a path. Default `main`.
+- `root_hash` (formerly `vault_id`) is a hash of the canonical root, stored in the manifest as a **locator only**. Moving a repository changes `root_hash` and must never change a `DocId`.
 - **Archived corpora are hard-excluded by default**, not down-weighted. A multiplier still lets an old fact into a top-3 answer, which is exactly the failure being prevented.
 - Query selects corpora: `--corpus primary` (default) | `all` | `<id>`. Every result carries `corpus`.
-- When archived corpora are explicitly included, `search.archived_weight` applies (default 0.8; primary is 1.0) and appears in the score breakdown.
-- **Cross-corpus links are opt-in and qualified.** `supersedes: "third-brain:/decisions/old.md"`. Unqualified paths resolve only within the document's own corpus. Qualified links take effect only when `allow_cross_corpus_links = true` (default false); otherwise `doctor` reports `cross_corpus_link_ignored`.
+- When archived corpora are explicitly included, `search.archived_weight` applies (default 0.8; primary 1.0) and appears in the score breakdown.
+- **Cross-corpus links are opt-in and qualified.** `supersedes: "context:/decisions/old.md"`. Unqualified paths resolve only within the document's own corpus. Qualified links take effect only when `allow_cross_corpus_links = true` (default false); otherwise `doctor` reports `cross_corpus_link_ignored`.
 - **Promotion is an explicit write, never a background consequence:**
-  - `janus promote third-brain:/path --link-from decisions/new.md` — patches the primary document's `supersedes` to include the qualified source (etagged, dry-run by default).
-  - `janus promote third-brain:/path --adopt` — creates a new primary document citing the source. The archived document is untouched.
+  - `janus promote context:/path --link-from decisions/new.md` — patches the primary document's `supersedes` to include the qualified source (etagged, dry-run by default).
+  - `janus promote context:/path --adopt` — creates a new primary document citing the source. The archived document is untouched.
   - Promotion never moves, rewrites, or deletes archived documents.
 - **Archived corpora are read-only** unless `read_only = false` is set deliberately; write tools refuse paths outside a writable corpus.
 - Identity keys are namespaced by `corpus_id` (§6.4), so identical documents in different corpora cannot collide.
-- Graph/entity edges carry `corpus_id` (§8.9): analysis spans corpora without conflating authority.
-- The point of an archive is analysis, not truth: `--corpus third-brain --intent history` gives pattern analysis over old ideas and decisions with zero risk of them being served as current.
+- A corpus configured as `read_only` on a read-only filesystem uses `index_dir` to place its index in a writable cache.
+- The point of an archive is analysis, not truth: `--corpus context --intent history` gives pattern analysis over old ideas and decisions with zero risk of them being served as current.
+
+**M0 compatibility.** M0 wrote `janus.toml` and `.janus/` at the root and resolved `--vault`. That is exactly single-corpus mode: the file it wrote is already a valid corpus config. No retrofit is needed; workspace parsing, `--workspace`, and the `root_hash` rename land in M1+ as additive work.
+
+### 6.12 Scopes: per-org and per-domain facts
+
+A **scope** partitions facts by owner (company, client, personal) without splitting them into separate corpora. Fixed facts shared by several owners are expressed as extra tags, not duplicated documents.
+
+```yaml
+scope: org:acme                        # single, optional; owning scope. Absent = global
+shared_with: [shared:finance, shared:legal]   # optional; retrieval tags only
+```
+
+Rules:
+
+1. **`scope` is single-valued and owns identity.** Absent = `global`. Normalized (trim, lowercase, collapse whitespace); must match `[a-z0-9][a-z0-9._:-]*`.
+2. **`shared_with` is a set of retrieval tags and never enters the identity key.** Adding or removing a shared tag must not re-key a document.
+3. **Matching.** Let `S(d) = {d.scope} ∪ d.shared_with`, and treat `global` as the universal set. A document matches query scope set `Q` when `S(d) ∩ Q ≠ ∅` or `d.scope == global`. With no `--scope` (the default), everything matches — nothing is silently hidden.
+4. **`--scope` may be repeated.** `--scope org:acme --scope shared:finance` unions them. `--scope-only` additionally excludes `global` and shared-only matches, answering "what does acme itself assert?".
+5. **Identity** (§6.4): title-derived keys are prefixed with `corpus_id ‖ scope`. Two orgs may each own a `Q4 plan` without collision. Changing `scope` re-keys the document and is reported as churn.
+6. **Cross-scope supersession is allowed only when scopes intersect.** `A → B` is effective when `S(A) ∩ S(B) ≠ ∅` **or** either side is `global`. A disjoint link (`org:acme` supersedes `org:beta`) is **ignored** for status and window derivation, and `doctor` reports `cross_scope_supersession` as an error. This is the key safety property: acme cannot silently retire beta's facts. An explicit `allow_disjoint_supersession = true` exists for deliberate exceptions and should be rare.
+7. **Validity windows are scope-relative.** For query scope set `Q`, `valid_to(A, Q) = min(A.effective_to, earliest effective successor B where B is global or S(B) ∩ Q ≠ ∅)`. Consequence: a global document superseded by an acme-only document is **superseded for acme queries and still current for beta**. With the default all-scopes query, `Q` is universal, so the successor wins everywhere in that view.
+8. **`effective_status` is computed for the query's scope set**, not once globally. The response reports it alongside the declared `status` (§6.10).
+9. **Default query covers all scopes.** `--scope` narrows. `authoritative_facts` with no scope is therefore a union view; agents asking about a specific org should pass `--scope org:<name>`.
+
+**Scope groups — idea, not v1.** Naming every shared tag on every query is tedious. A future workspace map:
+
+```toml
+[scope_groups]
+acme = ["org:acme", "shared:finance", "shared:legal"]
+```
+
+would let `--scope acme` expand to the full set, with the expansion echoed in response `notes`. Deferred: it is sugar, it silently widens result sets, and plain repeated `--scope` covers the need until the tag list grows.
+
+#### 6.12.1 Test obligations (write these when scopes are implemented)
+
+These subtleties are easy to get wrong and cheap to pin down:
+
+1. **Scoped windows.** Global doc `G` superseded by acme doc `B`: `--scope org:acme` excludes `G`; `--scope org:beta` still returns `G`; the default (no scope) returns `B`. Same result via `as_of` at a date after `B.effective_from`.
+2. **Disjoint links are inert.** `org:acme` doc declaring `supersedes` of an `org:beta` doc: beta's effective status is unchanged, and `doctor` reports `cross_scope_supersession`.
+3. **Shared tags enable supersession.** Two docs with disjoint owning scopes but a common `shared_with` tag are treated as intersecting.
+4. **Shared tags never re-key.** Adding/removing `shared_with` leaves `DocId` unchanged; changing `scope` changes it and is reported as churn.
+5. **Same title, different scope.** `Q4 plan` in acme and beta get distinct `DocId`s and both survive indexing.
+6. **Same title, same scope.** Ambiguous identity falls through to `rel_path` for both, and `doctor` reports `duplicate_identity`.
+7. **Default is a union.** Without `--scope`, results from every scope are returned, each labeled with its scope.
+8. **`--scope-only`.** Excludes global and shared-only matches; a doc tagged only `shared:finance` does not appear for `--scope org:acme --scope-only`.
+9. **Normalization.** `ORG:Acme` and `org:acme` are the same scope; whitespace is trimmed. An invalid scope value is a `doctor` warning and falls back to `global`.
+10. **Scope + corpus compose.** `--corpus all --scope org:acme` filters by both dimensions independently.
 
 ---
 
@@ -557,6 +644,7 @@ final      = relevance · authority · decay
 - **Retrieval is candidate-scoped.** The scorer signature is effectively `score(query, candidates: Option<&CandidateSet>)`, where a candidate set is a bitset or sorted `ChunkId` list. v1 always passes `None` (all chunks). This exists so a future graph expansion, tag filter, or “only these docs” restriction reuses the exact same scoring path instead of growing a second one (§8.9).
 - `age_days` uses `effective_from` (falling back to `date`) and the injected `Clock`, clamped at 0 (future-dated docs get decay = 1.0).
 - `as_of` requests bypass the status gate and set `decay = 1.0`; inclusion is decided by the valid-time window alone. The response still reports declared and effective status so the agent can see what the document's standing was.
+- **Scope is a filter, never a weight.** Similarity cannot separate two orgs' otherwise-similar documents; only a hard filter can (§6.12).
 - When multiple corpora are explicitly queried, `final` is multiplied by `search.archived_weight` and the corpus name is reported per result. Primary-only queries apply no corpus weight.
 - Vectors are L2-normalized at index time, so cosine is a dot product.
 - A doc's score is the max over its chunks; the returned chunk is the argmax. (No document-level score aggregation in v1.)
@@ -739,7 +827,7 @@ pub struct Index {
     pub built_at: DateTime<Utc>,
     pub corpus_id: CorpusId,           // declared, stable, never path-derived
     pub corpus_role: CorpusRole,       // Primary | Archived
-    pub vault_id: VaultId,             // hash of canonical root; locator only, never identity
+    pub root_hash: RootHash,           // hash of canonical root; locator only, never identity
     pub vault_root: PathBuf,
     pub strings: StringPool,           // interned rel_paths, titles, headings, tags
     pub docs: Vec<DocumentMeta>,       // ~120 B each, string-pool handles
@@ -766,7 +854,7 @@ This also means the on-disk format does not change between M4 (simple `read` of 
 Every stored path is vault-relative. The manifest carries two different identifiers, and they must not be confused:
 
 - `corpus_id` — declared in config, stable, participates in identity (§6.4).
-- `vault_id` — a hash of the canonical root, used only to locate/index a corpus. Moving the repository changes `vault_id` and must **not** change any `DocId`.
+- `root_hash` (formerly `vault_id`) — a hash of the canonical root, used only to locate/index a corpus. Moving the repository changes `root_hash` and must **not** change any `DocId`.
 
 v1 loads one primary corpus per process, but nothing in the format assumes a single corpus: a registry is a list of corpus descriptors plus per-corpus indexes merged at query time (§6.11).
 
@@ -915,17 +1003,19 @@ janus init [--vault PATH]                    # create janus.toml + .janus/, add 
 janus index [PATHS...] [--rebuild] [--no-embeddings] [--dry-run]
 janus search <QUERY> [--intent current|history|evolution|exhaustive]
                      [--as-of DATE] [--corpus primary|all|<id>]
+                     [--scope <SCOPE>]... [--scope-only]
                      [--limit N] [--types T,..] [--tags T,..]
                      [--decay-half-life DAYS] [--include-superseded]
                      [--json] [--no-color]
 janus lineage <PATH|--topic QUERY> [--json]
-janus facts [--tags T,..] [--query Q] [--json]         # authoritative_facts
+janus facts [--tags T,..] [--query Q] [--scope S]... [--json]   # authoritative_facts
 janus read <PATH> [--json]
 janus set <PATH> --expect-hash H --key status=superseded [--key k=v ...] [--dry-run]
 janus write <PATH> --frontmatter f.yaml (--body -|f.md)
             [--create | --overwrite --expect-hash H] [--dry-run]
 janus supersede <OLD> <NEW> [--append-only] [--dry-run]
 janus promote <corpus>:<path> (--link-from <path> | --adopt) [--dry-run]
+janus workspace init|add <id> <root> [--role archived] [--read-only]
 janus corpora [--json]                       # configured corpora, roles, index freshness
 janus doctor [--json]                        # index health, broken links, duplicates
 janus ids [PATH...] [--json]                 # resolved DocId, tier, and key for inspection
@@ -942,9 +1032,9 @@ Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash,
 
 | Tool | Params | Returns |
 |---|---|---|
-| `search` | `query`, `limit?`, `intent?`, `as_of?`, `corpus?`, `types?`, `tags?`, `include_superseded?`, `decay_half_life_days?`, `max_chars?` | Ranked results with score breakdown, age, declared + effective status, validity window, corpus, path |
+| `search` | `query`, `limit?`, `intent?`, `as_of?`, `corpus?`, `scope?`, `scope_only?`, `types?`, `tags?`, `include_superseded?`, `decay_half_life_days?`, `max_chars?` | Ranked results with score breakdown, age, declared + effective status, validity window, corpus, path |
 | `get_lineage` | `path?` **or** `topic?` (exactly one) | Ordered chain with relation edges and terminal state |
-| `get_authoritative_facts` | `query?`, `tags?`, `types?`, `limit?` | Active decisions/specs/principles only |
+| `get_authoritative_facts` | `query?`, `tags?`, `types?`, `scope?`, `limit?` | Active decisions/specs/principles only |
 | `read_document` | `path`, `max_chars?`, `chunk_id?` | Frontmatter as JSON + body (or a specific chunk's span) |
 
 Plus `janus_status` (read-only, no params): index freshness, doc/chunk counts, embedder, vault root, whether writes are enabled. Cheap, and it stops agents from guessing.
@@ -998,7 +1088,8 @@ Every tool returns the same outer shape, so agents learn one contract:
                  "effective_status": "active",
                  "type": "decision", "date": "2026-03-15", "age_days": 228,
                  "effective_from": "2026-03-15", "valid_to": null,
-                 "corpus": "main",
+                 "corpus": "main", "scope": "org:acme",
+                 "shared_with": ["shared:finance"],
                  "author": "claude-opus",
                  "date_source": "frontmatter", "doc_version": "2.0",
                  "scores": { "semantic": 0.81, "lexical": 12.4, "relevance": 0.78,
@@ -1022,6 +1113,7 @@ Errors are `{ "ok": false, "code": "conflict", "message": "...", "hint": "..." }
 | Property | `proptest` | Patch invariants I1–I7; decay monotonicity; chunker never panics on arbitrary UTF-8, CRLF, BOM, unclosed fences, and `---` inside bodies |
 | Integration | `assert_cmd` + fixture vault | `index → search → lineage → supersede → search` end to end |
 | Concurrency | `tempfile` + threads | Concurrent `set` on one file: exactly one wins, the loser gets `Conflict` |
+| Scopes | unit + integration | The ten obligations in §6.12.1: scoped validity windows, disjoint links inert, shared tags intersect, `shared_with` never re-keys, same-title-different-scope survives, `--scope-only`, default union, normalization, corpus+scope composition |
 | Temporal | unit + integration | `as_of` returns what was valid at T; a doc superseded today is still returned for a past T and is absent from `current`; `valid_to <= effective_from` is reported as `invalid_validity`; `effective_from` defaults to `date` and never to mtime; the chain is used only when explicit keys are absent; decay is anchored on `effective_from` |
 | Corpora | integration | Archived documents never appear in a default query; they appear with `--corpus all`/`<id>`; an unqualified cross-corpus link is ignored unless `allow_cross_corpus_links`; promotion never mutates an archived file; every result carries `corpus` |
 | Identity/moves | integration + property | Derivation is deterministic for new docs; identity is carried forward for in-place edits (title/date/version changes do not churn); title+date **and** title+version both survive move+edit with **zero file writes**; ambiguous keys fall through to path; an id-less, frontmatter-less vault indexes correctly; stale textual links resolve through the alias table; no confirmation step is ever required |
@@ -1050,7 +1142,7 @@ Each milestone is a **vertical slice**: it ends with something runnable, tested,
 **Learn:** cargo, modules, `Result`, `?`, `From`, clap derive, `thiserror`.
 
 ### M1 — Scan and parse (2–3 days)
-Recursive walk with `ignore`, path confinement, frontmatter isolation (fences, BOM, CRLF), metadata resolution hierarchy, `janus scan --json` (no index yet).
+Corpus-local config parsing (`janus.toml` with aliases/types/authority/decay; unknown keys tolerated), recursive walk with `ignore`, path confinement, frontmatter isolation (fences, BOM, CRLF), metadata resolution hierarchy including `scope`/`shared_with`, `janus scan --json` (no index yet). Workspace-file *shape* is reserved but not implemented.
 **Done when:** the fixture vault parses into the expected `Document` list, including all the ugly cases, and every doc reports where its date came from.
 **Learn:** `PathBuf`/`OsStr`, `&str` vs `String`, lifetimes in parsing functions, iterators, `Option` combinators, byte-index slicing and UTF-8 boundary safety.
 
@@ -1060,7 +1152,7 @@ Heading-aware chunker with breadcrumbs and fence/table awareness; byte-span trac
 **Learn:** `pulldown-cmark` event lifetimes, `Vec<T>` vs `&[T]`, `Cow<str>`, borrow-checker fights with a streaming parser (the main teaching moment of this milestone).
 
 ### M3 — Lexical search, daily usable (3–4 days)
-Hand-written BM25 (inverted index, tokenizer, optional stemmer); scoring module with authority, status gates, and intents; `janus search` and `janus facts` with human + JSON output.
+Hand-written BM25 (inverted index, tokenizer, optional stemmer); scoring module with authority, status gates, intents, and the scope filter (`--scope`, `--scope-only`, default union); `janus search` and `janus facts` with human + JSON output.
 **Done when:** the author uses `janus search` instead of `rg` for a day, and the eval set's "active top-1" rate is ≥80% (lexical only).
 **Learn:** `HashMap`/`BTreeMap`, `Eq`/`Hash` derives, sorting with `sort_by`, `&mut self` accumulation, iterator chains, float comparison pitfalls, `#[derive]` and newtypes (`DocId`, `ChunkId` — no stringly typed IDs).
 
@@ -1070,7 +1162,7 @@ Hand-written BM25 (inverted index, tokenizer, optional stemmer); scoring module 
 **Learn:** traits, trait objects vs. generics, `Send`/`Sync`, rayon, slices and `chunks_exact`, serde/bincode, feature flags, `Option<&T>` in structs, `Arc`.
 
 ### M5 — Temporal graph (3–4 days)
-Supersession parsing, transitive chains, cycle detection, derived validity windows, `--as-of` valid-time queries (§6.10), effective-status derivation, `janus lineage` (chain + terminal state), `janus doctor` link checks, `suggest-links` (similarity candidates, no writes), `janus ids`, and §6.9 move handling: derived-identity and exact-hash moves, path alias table, continuation hints, tombstones, `janus moves`.
+Supersession parsing, transitive chains, cycle detection, intersect-or-global cross-scope rules, scope-relative validity windows, `--as-of` valid-time queries (§6.10), effective-status derivation, `janus lineage` (chain + terminal state), `janus doctor` link/scope checks (`cross_scope_supersession`, `invalid_validity`), `suggest-links` (similarity candidates, no writes), `janus ids`, and §6.9 move handling: derived-identity and exact-hash moves, path alias table, continuation hints, tombstones, `janus moves`.
 **Done when:** `lineage` renders a correct 5-link chain from the fixture vault, `search --as-of` returns the old value for a past date and the new one today, detects the seeded cycle, and survives a simulated “dream cycle” that (a) moves a linked doc unchanged, (b) moves and edits a linked doc with no `id` anywhere, and (c) rewrites a third body — all without breaking any chain, touching any file, or requiring any confirmation step.
 **Learn:** recursive functions and explicit stacks (avoid gratuitous recursion), `HashMap` graph representation, `enum` state machines, borrowing across a traversal, `impl Display` for output types.
 
@@ -1217,7 +1309,7 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | D28 | Generated ids use cuid2 at length **16** (when id generation is enabled at all) | 16 chars ≈ 79 bits ≈ 1.2×10²⁴ values: a 99.9%-collision-free bound at ~4.9×10¹⁰ ids, far beyond any local vault. See §15 Q12 for the math and why length is not the real safety net | Yes |
 | D29 | Performance is a guardrail, not a goal: p50 < 100 ms is the v1 bar; single-digit ms is aspirational; no micro-optimization before M8 measurements | The project exists to be useful and to teach Rust, not to win a benchmark; premature optimization also teaches the wrong lessons | Yes |
 | D30 | Git coexistence is a hard requirement (§8.6) | Vaults are version-controlled; a tool that fights git is unusable regardless of retrieval quality | No |
-| D31 | All persisted data is corpus-scoped: a declared, stable `corpus_id` in the manifest (identity) plus a path-hash `vault_id` (locator only) | Makes archived corpora and a multi-corpus registry additive rather than a format rewrite, while keeping identity independent of filesystem location | No |
+| D31 | All persisted data is corpus-scoped: a declared, stable `corpus_id` in the manifest (identity) plus a path-hash `root_hash` (locator only) | Makes archived corpora and a multi-corpus registry additive rather than a format rewrite, while keeping identity independent of filesystem location | No |
 | D32 | Document-level temporal relations only; no entity/relation graph | Keeps the model learnable and the index small; the high-value questions are document-shaped, and entity extraction is a different (LLM-heavy) product | Yes |
 | D33 | Path-pattern type inference is configurable and best-effort; no folder layout is ever required | The tool must work on an existing vault as-is; a future `janus scaffold` is opt-in convenience | No |
 | D34 | Add `finding` and `idea` as first-class types, and make the type set an open, config-driven registry (`TypeSpec`) rather than a closed enum | Findings (evidence) and ideas (proposals) are the two most common agents of change; `idea → decision` and `finding → finding` are the supersession chains the engine exists to track. An open registry lets domain types be added without a release | Yes (weights are config) |
@@ -1229,6 +1321,11 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | D40 | Transaction time is delegated to git; janus-mem never writes system timestamps into frontmatter | Frontmatter timestamps mutate user files, pollute diffs, and are wrong after a sidecar rebuild. Git already stores every version with timestamps | Yes (add `--git-history`) |
 | D41 | `as_of` queries bypass the status gate and set decay to 1 | Status is relative to *now*. Gating a historical query on today's status silently drops the correct answer | No |
 | D42 | Cross-corpus links must be qualified (`corpus:path`) and are off by default; promotion is an explicit, etagged write | An archived decision must never supersede a current one by accident, and "manual confirmation" must be an action, not a prompt someone may ignore | No |
+| D43 | Scopes use a single owning `scope` plus a `shared_with` tag set; `scope` enters identity, `shared_with` never does | Separates the two jobs: retrieval partitioning needs a set, identity needs one stable value. Shared tags are exactly the ones likely to be edited, so they must not re-key documents | Yes |
+| D44 | Default queries cover all scopes; `--scope` narrows, `--scope-only` excludes global/shared matches | Nothing is silently hidden; narrowing is explicit and visible in the response | Yes |
+| D45 | Cross-scope supersession is allowed only when scopes intersect or one side is global; disjoint links are inert and reported as `doctor` errors | Acme must not be able to retire beta's facts. Refusing a likely mistake is safer than warning and applying it anyway | Yes (`allow_disjoint_supersession`) |
+| D46 | Validity windows and `effective_status` are resolved per query scope set | A global fact superseded only for one org must remain current for the others. This is the semantic cost of allowing intersecting cross-scope supersession | No |
+| D47 | Corpus-local config and workspace config are separate files with disjoint responsibilities ("one setting, one home"); no global index | A corpus must be readable standalone and with its own conventions; a workspace must never reinterpret a corpus's parsing or scoring rules | No |
 
 ### Open questions (to resolve at the milestone in brackets)
 
@@ -1259,17 +1356,18 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 15. **[post-1.0]** `janus scaffold`: generate an opinionated starter layout (`decisions/`, `specs/`, `principles/`, `journals/`) plus a `janus.toml` for users who don't have a vault yet. Strictly opt-in and separate from the indexing path (D33).
 16. **[post-1.0]** Entity graph: which extractor (small local LLM, NER model, or agent-supplied edges at write time)? The last option is the cheapest and most trustworthy — the agent that writes a `finding` could declare its entities via frontmatter — but it depends on agent cooperation. Deferred; §8.9 defines the contract either way.
 17. **[post-1.0]** Entity identity: normalized name + type, declared entity nodes in frontmatter, or both? Proposal: start with declared entities, add auto-resolution only with confidence and provenance.
-18. **[OPEN — decide before M1]** Scopes, and whether `scope` participates in the identity match key. This is the one decision with real churn consequences: adding a field to identity later re-keys every scoped document. Everything else about scopes (flat tags, global default, filter-not-weight) is low-risk.
+18. ~~**[OPEN — decide before M1]** Scopes, and whether `scope` participates in the identity match key.~~ Resolved by D43–D46: one owning `scope` (in identity) plus `shared_with` (not in identity); default all scopes; intersect-or-global supersession; scope-relative windows (§6.12).
 19. **[post-1.0]** `--git-history` enrichment: read commit timestamps with pure-Rust `gix` (no shelling out) to answer "what did we know at time T" and to make `as_of` + transaction time composable. Cost and performance unknown.
 20. **[post-1.0]** Should explicitly-included archived corpora have a configurable weight, or a separate result section ("archived matches") so they can never rank above a primary answer?
 21. **[M7]** Does `deprecated` still earn its place now that tombstones and `effective_status` exist? Candidate merge: `deprecated` = retired with no successor; keep the declared field for authoring, derive the rest.
-22. **[M7]** When `supersede` patches a document, should it set `effective_to` on the old doc to the new doc's `effective_from`, or continue deriving it from the chain? Explicit is more correct but writes an extra key the user did not ask for.
+22. **[post-1.0]** Scope groups (`[scope_groups]` expanding `--scope acme` to a shared tag set). Deferred as sugar; plain repeated `--scope` covers the need until the tag list grows.
+23. **[M7]** When `supersede` patches a document, should it set `effective_to` on the old doc to the new doc's `effective_from`, or continue deriving it from the chain? Explicit is more correct but writes an extra key the user did not ask for.
 
 ---
 
 ## 16. Appendix
 
-### 16.1 Example config (`janus.toml`)
+### 16.1 Corpus config (`<root>/janus.toml`)
 
 ```toml
 index_dir = ".janus"   # the vault root is the directory containing this file
@@ -1287,6 +1385,8 @@ supersedes = ["supersedes", "superseded"]
 superseded_by = ["superseded_by", "superseded-by"]
 tags = ["tags", "keywords"]
 version = ["doc_version", "version"]
+scope = ["scope", "org", "domain"]
+shared_with = ["shared_with", "shared", "shared-with"]
 
 [defaults]
 type = "note"
@@ -1325,15 +1425,6 @@ idea = 90
 "journals/" = "journal"
 "ideas/" = "idea"
 
-[[corpora]]                   # v1 loads the primary corpus; others are post-1.0
-id = "main"
-root = "."
-role = "primary"
-
-[search]
-allow_cross_corpus_links = false
-archived_weight = 0.8
-
 [index]
 exclude = ["archive/private/**", "**/*.draft.md"]
 
@@ -1351,7 +1442,28 @@ allow_write = false
 max_chars = 4000
 ```
 
-### 16.2 Example MCP configuration
+### 16.2 Workspace config (`workspace.toml`)
+
+```toml
+[[corpora]]
+id = "main"
+root = "/usr/workspace"
+role = "primary"
+
+[[corpora]]
+id = "context"
+root = "/opt/context"
+role = "archived"
+read_only = true
+index_dir = "~/.cache/janus/context"   # optional; default <root>/.janus
+
+[search]
+allow_cross_corpus_links = false
+allow_disjoint_supersession = false
+archived_weight = 0.8
+```
+
+### 16.3 Example MCP configuration
 
 ```json
 {
@@ -1365,7 +1477,7 @@ max_chars = 4000
 }
 ```
 
-### 16.3 Glossary
+### 16.4 Glossary
 
 - **Agent memory platform** — a system that captures and curates an agent's conversational memories (extraction, consolidation, forgetting). janus-mem is not one; see §3.1.
 - **As-of** — a query mode that filters by valid time instead of current status: what was true on a given date.
@@ -1383,12 +1495,15 @@ max_chars = 4000
 - **Sidecar** — the `.janus/` directory; derived, rebuildable index data.
 - **Supersession** — declared replacement of one document by another; the graph edge behind `lineage`.
 - **Timeless** — exempt from time decay (principles, active decisions).
-- **Vault** — the root directory janus-mem indexes.
-- **Vault ID** — a hash of the vault's canonical root path. A manifest locator only; never part of identity.
-- **Validity window** — `[effective_from, valid_to)`: the interval during which a document's claim is true in the world.
+- **Scope** — the single owning partition of a document (`org:acme`, `personal`, …). Absent means `global`. Enters identity (§6.12).
+- **Shared-with** — retrieval tags that let a document answer for several scopes without changing its identity.
+- **Vault** — UX term for the primary corpus root. Internally the precise term is *corpus*.
+- **Workspace** — a set of corpora plus federation policy (roles, read-only, cross-corpus links, archived weight). Described by `workspace.toml` (§6.11).
+- **Root hash** — a hash of a corpus's canonical root path. A manifest locator only; never part of identity. (Named `vault_id` in earlier drafts.)
+- **Validity window** — `[effective_from, valid_to)`: the interval during which a document's claim is true in the world. Resolved per query scope set (§6.12).
 - **Effective status** — status derived from the supersession graph (a document with a live successor is superseded), independent of the declared `status` field.
 
-### 16.4 Definition of Done for v1.0
+### 16.5 Definition of Done for v1.0
 
 - All of M0–M7 shipped, `clippy -D warnings` clean, tests green, no `unsafe`.
 - W1–W7 work end to end against the real vault, with `grep` disabled for a week.
