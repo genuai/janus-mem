@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | Status | Draft v0.1 — awaiting review |
-| Last updated | 2026-10-29 |
+| Last updated | 2026-10-30 |
 | Author | genuai |
 | Repo | github.com/genuai/janus-mem |
 | License | MIT |
