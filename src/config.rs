@@ -33,12 +33,10 @@ pub fn init_vault(root: &Path) -> Result<PathBuf, JanusError> {
     })?;
 
     let gitignore_path = root.join(".gitignore");
-    if gitignore_path.exists() {
-        if let Ok(content) = fs::read_to_string(&gitignore_path) {
-            if !content.contains(JANUS_DIR) {
-                eprintln!("Warning: Add .janus/ to your .gitignore file.");
-            }
-        }
+    if gitignore_path.exists()
+        && fs::read_to_string(&gitignore_path).is_ok_and(|c| !c.contains(JANUS_DIR))
+    {
+        eprintln!("Warning: Add .janus/ to your .gitignore file.");
     }
 
     Ok(config_path)
