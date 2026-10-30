@@ -39,7 +39,7 @@ Add (versions are current at the time of writing; verify with `cargo search`):
 | `serde` + `serde_json` | 1.x | DTOs for `scan --json`; config deserialize |
 | `serde` `derive` feature | — | derives on Config/DTOS |
 | `toml` | 1.x | corpus config parsing (§16.1) |
-| `serde_yaml_ng` | 0.10 | YAML frontmatter READ. **Note:** spec's stack says `serde_yaml`, which is archived/deprecated; `serde_yml` is unmaintained per crates.io. `serde_yaml_ng` is the maintained fork. If it vanishes, fall back to a hand-rolled subset parser for the frontmatter keys — do not add a heavy YAML 1.2 crate. |
+| `oneyaml` | 1.2 | YAML frontmatter READ. **Note:** spec's stack says `serde_yaml`, which is archived/deprecated; `serde_yaml_ng` is a maintained fork but pulls YAML 1.1 semantics (timestamps, `yes`/`no` booleans) and a recursive parser. `oneyaml` was chosen instead: `#![forbid(unsafe_code)]` (D12), 402/402 yaml-test-suite + fuzzed, iterative parsing (no stack overflow on deep nesting), YAML 1.2.2 core schema (`2026-10-29` stays a string — deterministic for our `NaiveDate` parse), resource limits, warnings-over-errors via `from_str_with_diagnostics` (feeds the fail-open `/ DocNote` contract), and lossless `Document` editing with byte-for-byte round-trip that M7's §7.3 span-preserving patcher can reuse. Only runtime dep is `serde`. Younger crate line than serde_yaml_ng — the fail-open read contract bounds the risk; pin the exact version. Fallback if it ever dies: `serde_yaml_ng` or a hand-rolled subset parser; never a heavy YAML crate. |
 | `chrono` | 0.4 | `NaiveDate` for dates (no timezone juggling in M1) |
 | `ignore` | 0.4 | walk with .gitignore semantics (§6.1, §8.2) |
 | `globset` | 0.4 | `[index] exclude` + `[paths]` pattern matching |
@@ -104,7 +104,7 @@ Newtypes per the M1 learn plan: `DocId`, `ChunkId`, plus a `Config` newtype is o
 |---|---|---|---|
 | D-FM-1 | `raw_frontmatter` contents | Full verbatim block **including** `---` fences; `span` = byte range of that block incl. trailing newline when present. M7 will refine exact splice semantics. | vault/frontmatter.rs |
 | D-FM-2 | No closing `---` fence found | Treat as **no frontmatter** (whole file = body), note it. Never error, never guess. | vault/frontmatter.rs |
-| D-FM-3 | Duplicate YAML keys | YAML dup-keys = malformed → typed view `None`, note `yaml_duplicate_key`. (serde_yaml_ng errors on dupes; catch and fall back.) | vault/frontmatter.rs |
+| D-FM-3 | Duplicate YAML keys | Tolerated, not fatal: parse with `oneaml::from_str_with_diagnostics`; each dup-key warning becomes a `DocNote` (`yaml_duplicate_key`). Value semantics: **last wins** (`Settings::new().duplicate_keys(DuplicateKeys::LastWins)`) — deterministic and matches the “ignore and preserve everything else” spirit of §6.3. Raw block always retained regardless. Only a hard parse error (syntax, non-map root, limits) degrades the typed view to `None` + note. | vault/frontmatter.rs |
 | D-FM-4 | Frontmatter key case | Match aliases case-sensitively (YAML keys are case-sensitive). No lowercasing. | vault/frontmatter.rs |
 | D-FM-5 | Date parsing | `%Y-%m-%d`, then ISO-8601 datetime prefix (`%Y-%m-%dT…`), else invalid → absent + note. | vault/document.rs |
 | D-FM-6 | `[paths]` pattern semantics | Treated as gitignore-style globs over the '/' rel_path via `globset` (same engine as `[index] exclude`). `"decisions/"` matches any path containing that segment sequence. First match wins; only consulted when frontmatter `type` is absent. | config.rs |
@@ -120,6 +120,12 @@ Newtypes per the M1 learn plan: `DocId`, `ChunkId`, plus a `Config` newtype is o
 | D-CFG-4 | Alias → canonical cycles in `[types]` | Resolve transitively with a cycle guard; on cycle → fall back to raw string + note. | config.rs |
 | D-OUT-1 | `--workspace`/`JANUS_WORKSPACE` | Absent from CLI in M1. `Config` module doc reserves the shape (corpus id/role, index_dir, search policy per §16.2) in a comment only. | config.rs |
 | D-SC-1 | Is path confinement only about filesystem escape? | Also reject paths that resolve INTO `.git/`/`.janus/` (defense in depth, §8.6 rule 1). | vault/mod.rs (`confine`) |
+
+**Note on the YAML crate (settled after the first draft).** `serde_yaml` is archived; `serde_yml` is unmaintained;
+`serde_yaml_ng` (YAML 1.1, recursive) was the initial default but was replaced by `oneyaml` 1.2 after review — zero
+`unsafe`, 402/402 conformance, iterative + bounded, YAML 1.2.2, and its lossless `Document` API is the M7 patcher's
+future home (SPEC §14 flags span-preserving patching as the project's highest-risk item). If you hit an oneyaml bug,
+record it in `docs/notes/01-m1.md` and report upstream; the fail-open contract prevents it from corrupting a scan.
 
 Record each settled decision in `docs/notes/01-m1.md` per §12.3.3 (≈10 honest lines, including “what would I do differently”).
 
@@ -157,7 +163,7 @@ tolerated, and no behavior beyond parsing.
 - Invalid values (negative weight, half-life 0) parse with warnings, no panic.
 
 **Handoff to another AI (paste):** “Implement Phase 1 (config parsing) of M1 for janus-mem per
-`docs/m1-breakdown.md` Phase 1. Read `SPEC.md` §6.6.1, §16.1, §11-M1, and `src/config.rs` first. Add serde/toml/serde_yaml_ng
+`docs/m1-breakdown.md` Phase 1. Read `SPEC.md` §6.6.1, §16.1, §11-M1, and `src/config.rs` first. Add serde/toml/oneyaml
 deps with one-line justifications. All structs `#[derive(…)]` + `#[serde(default)]`; no `deny_unknown_fields`; no `unwrap()`
 in lib code; `cargo clippy -- -D warnings` must pass; tests first for anything with a rule. Design conversation output goes
 to `docs/notes/01-m1.md`.”
@@ -228,10 +234,13 @@ always-excluded regardless of config.”)
      fence is pure ASCII). No closing fence ⇒ no frontmatter + note (D-FM-2).
    - Fence caveats: a `---` line *inside* a YAML block string or a doc whose body begins with `---` for other reasons —
      frontmatter only ever starts at offset 0 (first line after BOM), so body-embedded fences are irrelevant.
-2. YAML parse of the inner text via `serde_yaml_ng::from_str::<serde_yaml_ng::Mapping>` (or `Value`): comments natively OK.
-   Fail-open: mapping that is not a string-keyed map, duplicate keys (D-FM-3), or syntax error ⇒ typed view `None` + note
-   `yaml_unparseable`, raw block retained so M7 could still patch later. Unknown keys inside frontmatter are ignored
-   (the contract is “reads a subset, preserves the rest”, §6.3).
+2. YAML parse of the inner text via `oneaml::from_str_with_diagnostics::<oneaml::Value>` (comments, BOM, CRLF natively OK;
+   `Settings::new().duplicate_keys(DuplicateKeys::LastWins)` per D-FM-3). Map diagnostics → `DocNote`s:
+   `yaml_duplicate_key`, `yaml_warning`. Fail-open only on a hard error (syntax error, non-map root, `Limits` hit,
+   depth cap) ⇒ typed view `None` + note `yaml_unparseable`, raw block retained so M7 could still patch later.
+   Unknown keys inside frontmatter are ignored (the contract is “reads a subset, preserves the rest”, §6.3), and
+   `Value`/`Mapping` walk applies the config aliases (first match wins). A typed serde derive onto `Frontmatter` is
+   *not* used — aliases make field names differ from YAML keys, so the manual `Value` walk is the labeled path.
 3. Alias mapping (first match wins, config-driven): map raw values into `Frontmatter` typed view. Scalars coerced with
    tolerance (`id: 123` ⇒ `"123"`), lists must be lists (`tags` as scalar ⇒ single-element or note), `timeless` bool coerce.
 4. Metadata resolution (§6.3) — the teaching moment for `Option` combinators; each rule emits a note when it falls back:
