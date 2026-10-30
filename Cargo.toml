@@ -1,0 +1,32 @@
+[package]
+name = "janus-mem"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "janus"
+path = "src/main.rs"
+
+[lib]
+name = "janus_mem"
+path = "src/lib.rs"
+
+[dependencies]
+# simplified error handling
+anyhow = "1.0.104"
+# cli arg parser
+clap = { version = "4.6.7", features = ["derive", "env"] }
+# custom error types
+thiserror = "2.0.21"
+# instrumentation framework
+tracing = "0.1.44"
+# utilities for structured logging
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+# cli integration testing
+assert_cmd = "2.2.2"
+# for predicate functions
+predicates = "3.1.4"
+# to create temp files/dirs
+tempfile = "3.27.0"
