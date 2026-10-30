@@ -17,7 +17,7 @@ fn init_tracing() {
 
 fn run(cli: Cli) -> Result<(), JanusError> {
     let vault_path = config::resolve_vault(cli.vault)?;
-    tracing::info!(vault = %&vault_path.display(), "vault resolved");
+    tracing::info!(vault = %vault_path.display(), "vault resolved");
 
     match cli.command {
         Command::Init => {
@@ -30,7 +30,7 @@ fn run(cli: Cli) -> Result<(), JanusError> {
     Ok(())
 }
 
-fn main() -> std::process::ExitCode {
+fn main() -> ExitCode {
     init_tracing();
 
     let cli = Cli::parse();

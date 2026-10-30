@@ -1151,8 +1151,7 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 ### 16.1 Example config (`janus.toml`)
 
 ```toml
-vault = "."
-index_dir = ".janus"
+index_dir = ".janus"   # the vault root is the directory containing this file
 
 [frontmatter]                 # key aliases; first match wins
 id = ["id", "uid", "uuid", "zettel_id", "permalink"]

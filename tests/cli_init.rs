@@ -59,10 +59,16 @@ fn test_cli_init_twice_fails() {
 
 #[test]
 fn test_cli_vault_does_not_exist() {
+    // Portable: a child of a temp dir that was never created.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let missing = temp_dir.path().join("does-not-exist");
+
     janus_cmd()
         .arg("--vault")
-        .arg("/definitely/does/not/exist")
+        .arg(&missing)
         .arg("init")
         .assert()
-        .code(1);
+        .code(1)
+        // The error must name the path that failed, not just the OS error.
+        .stderr(contains("does-not-exist"));
 }
