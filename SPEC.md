@@ -222,7 +222,7 @@ Canonical keys (defaults; aliases configurable per §16.1):
 id: 01JABC...            # optional; any opaque string. Omit it and identity is derived (§6.4)
 author: "claude-opus"     # optional provenance; opaque, never inferred, not scored in v1
 title: "Local Caching Architecture"
-type: decision           # decision | spec | principle | journal | note
+type: decision           # open set; defaults: decision|spec|principle|finding|journal|idea|note
 status: active           # active | draft | superseded | deprecated
 date: 2026-10-29         # authored/decided date; falls back to mtime
 supersedes: decisions/2024-11-02-postgres-cache.md
@@ -236,10 +236,10 @@ timeless: false          # opt out of decay; default true for principle/decision
 
 Rules:
 
-- Missing `type` → inferred from **configurable path patterns** (defaults recognize `decisions/`, `adr/`, `specs/`, `principles/`, `journals/`), else `note`. A vault with folders named `notes/`, `archive/`, or `2026/Q4/` loses nothing: everything falls back to `note` and authority weighting stays flat until the pattern list is extended.
+- Missing `type` → inferred from **configurable path patterns** (defaults recognize `decisions/`, `adr/`, `specs/`, `principles/`, `research/`, `findings/`, `ideas/`, `journals/`), else `note`. A vault with folders named `notes/`, `archive/`, or `2026/Q4/` loses nothing: everything falls back to `note` and authority weighting stays flat until the pattern list is extended.
 - Missing `status` → `active` for every type (never `draft` by default).
 - Missing `date` → parse `YYYY-MM-DD` prefix from filename, else frontmatter `created`, else filesystem mtime. Record the *source* of the date (`filename | frontmatter | mtime`) and surface it in responses so the agent can judge confidence.
-- Unknown `status`/`type` values are not errors: they map to `status: unknown` / `type: note` and produce a `doctor` warning plus a small score penalty. Fail-open on read, fail-closed on write.
+- Unknown `status` is not an error: it maps to `status: unknown` and gets the 0.8× gate factor plus a `doctor` note. Unknown `type` keeps its name (types are an open registry, §6.6.1) and gets the fallback weight 0.80 plus a `doctor` note. Fail-open on read, fail-closed on write.
 - Files with no frontmatter are fully supported and are **never** mutated to add one unless the user explicitly calls `write_document` with frontmatter for that path.
 - `doctor` reports: duplicate `id`, missing dates, `supersedes` targets that don't exist, broken chains (A superseded_by B, B superseded_by C but C doesn't supersede B), and `superseded_by` without a reciprocal `supersedes`.
 
@@ -325,8 +325,10 @@ Authority is a multiplier applied after relevance, derived from `type` and `stat
 | `decision` | 1.50 | An explicit, committed choice |
 | `spec` | 1.35 | Committed intent |
 | `principle` | 1.20 | Durable, but general |
+| `finding` | 1.10 | Evidence from research, measurement, or observation. Trustworthy, but not binding |
 | `journal` | 1.00 | Baseline, personal, provisional |
 | `note` | 0.90 | Unclassified |
+| `idea` | 0.85 | A proposal or speculation. Lowest bindingness; often short-lived |
 | unknown type | 0.80 | Fail-low, not fail-silent |
 
 Status gate (before scoring):
@@ -339,7 +341,37 @@ Status gate (before scoring):
 | `superseded` | ❌ | ✅ | ✅ |
 | `unknown` | ✅ (0.8×) | ✅ | ✅ |
 
-`decision`/`spec`/`principle` are `timeless: true` by default (no decay); `journal` and `note` decay by default. An explicit `timeless:` in frontmatter always wins.
+**`finding` and `idea` are first-class types, not journal variants.** They carry the distinction that matters for reasoning: *what we observed* (finding) versus *what we might do* (idea) versus *what we chose* (decision). That distinction only pays off because of supersession: the canonical chain is `idea → decision`, and `finding → finding` when new evidence arrives. Modeling them as generic notes would throw away exactly the transitions the engine exists to track.
+
+Decay defaults: `decision`/`spec`/`principle` are `timeless: true` (no decay); `finding` decays slowly (365-day half-life — evidence ages, but slower than commentary); `journal`/`note` at 180; `idea` fast (90 days — an unexplored idea should not outrank current work). An explicit `timeless:` or per-type override in config always wins.
+
+### 6.6.1 Types are an open registry, not an enum
+
+`type` is a string resolved against a config-driven registry, so adding a domain type (`runbook`, `retro`, `customer-interview`) never requires a code change or a release:
+
+```toml
+[types]                     # alias → canonical type
+adr = "decision"
+rfc = "spec"
+research = "finding"
+proposal = "idea"
+
+[authority]                 # canonical type → weight
+finding = 1.10
+idea = 0.85
+
+[decay.by_type]             # overrides the global half-life
+finding = 365
+journal = 180
+idea = 90
+
+[paths]                     # optional path-pattern → type hints
+"decisions/" = "decision"
+"research/" = "finding"
+"ideas/" = "idea"
+```
+
+The Rust side resolves each type once into a `TypeSpec { authority, timeless, half_life_days }` at config load and passes it to the scorer. Unknown types get weight 0.80, the global half-life, and a `doctor` note — never a hard failure. `type` never influences identity (§6.4).
 
 ### 6.7 Supersession
 
@@ -432,6 +464,7 @@ decay      = exp(−ln(2) · age_days / half_life_days)     = 1.0 if timeless or
 final      = relevance · authority · decay
 ```
 
+- **Retrieval is candidate-scoped.** The scorer signature is effectively `score(query, candidates: Option<&CandidateSet>)`, where a candidate set is a bitset or sorted `ChunkId` list. v1 always passes `None` (all chunks). This exists so a future graph expansion, tag filter, or “only these docs” restriction reuses the exact same scoring path instead of growing a second one (§8.9).
 - `age_days` uses the document's effective date and the injected `Clock`, clamped at 0 (future-dated docs get decay = 1.0).
 - Vectors are L2-normalized at index time, so cosine is a dot product.
 - A doc's score is the max over its chunks; the returned chunk is the argmax. (No document-level score aggregation in v1.)
@@ -617,7 +650,7 @@ pub struct Index {
     pub strings: StringPool,           // interned rel_paths, titles, headings, tags
     pub docs: Vec<DocumentMeta>,       // ~120 B each, string-pool handles
     pub chunks: Vec<ChunkMeta>,        // id, doc_id, byte span, heading handles
-    pub links: SupersessionGraph,      // DocId → supersedes / superseded_by
+    pub edges: Vec<Edge>,              // v1: only EdgeKind::Supersedes; generic (§8.9)
     pub path_history: BTreeMap<DocId, Vec<PathEntry>>,
     pub vectors: VectorSection,        // offset, len, dim, dtype into vectors.f32
 }
@@ -730,6 +763,48 @@ Also produced per release: `janus-aarch64-apple-darwin.tar.xz`, `janus-x86_64-un
 - The embedding model is **not** bundled (it would add ~100 MB); it is downloaded on first `index` with an explicit prompt, cached in a platform config dir, or supplied offline via `JANUS_MODEL_DIR`. `--no-embeddings` never needs a network.
 - The installer script is small, pinned to a release tag, verifies checksums, and supports `--no-modify-path`. We publish it, but we also document `cargo binstall` as the preferred path for Rust users, because piping curl to bash is a trust decision the user should make consciously.
 
+### 8.9 Extension contract: the future entity graph
+
+v1 builds no entity graph, but the data model is deliberately shaped so one can be added without a rewrite. These invariants are the contract:
+
+| Invariant (already true) | Why it enables a graph |
+|---|---|
+| `chunk_id` is a content hash, not `doc_id`-scoped | An entity mention anchors to a chunk and survives moves and edits; re-extraction is scoped to changed chunks |
+| Every chunk stores a byte span | Every mention can cite exact source text — no unattributed “the graph says so” |
+| `DocId` is stable across moves, with `path_history` | Extracted facts inherit the document's date, status, and lineage, and survive renames |
+| The index is derived and versioned (`format_version`) | Entity/edge tables are a format bump + rebuild, not a migration of user data |
+| Edges are a generic list with a `kind` | Supersession is just one kind; `Mentions`, `RelatesTo`, `PartOf` are additive |
+| Retrieval can take a candidate set (§7.2) | Graph expansion yields chunk/doc IDs that feed the *same* scorer, preserving authority, decay, and status gates |
+| Derived data is explicitly tagged | Machine-extracted edges can never masquerade as user-declared facts |
+
+Sketch of the future shape:
+
+```rust
+pub enum EdgeKind { Supersedes, Mentions, RelatesTo { predicate: String } }
+pub enum EdgeSource {
+    Declared,                                              // frontmatter
+    Derived { extractor: String, version: String, confidence: f32 },
+}
+pub struct Edge {
+    pub kind: EdgeKind,
+    pub from: NodeId, pub to: NodeId,                     // Doc | Chunk | Entity
+    pub source: EdgeSource,
+    pub valid_from: Option<NaiveDate>, pub valid_to: Option<NaiveDate>,
+    pub doc_id: DocId, pub chunk_id: Option<ChunkId>, pub span: Option<(u32, u32)>,
+}
+```
+
+A future `graph_query` tool would traverse `entity → mentions → docs/chunks → existing scorer`, returning answers with the same provenance fields plus the edge trail. Scoring, authority, decay, and status gates do not change.
+
+Honest constraints, stated up front:
+
+- **Extraction needs a model.** Entity/relation extraction requires an LLM or NER pass. That is index-time only, opt-in (`--features graph`), versioned in the manifest, and invalidates only derived edges when the extractor changes. Retrieval stays deterministic.
+- **Entity resolution is its own hard problem.** Aliases, pronouns, and the same name for two things. Expect a declared-entity convention in frontmatter before any auto-resolution.
+- **Declared beats derived.** When a user-written `supersedes` and an inferred relation disagree, the declared one wins, and both are visible.
+- **Confidence is not optional.** Every derived edge carries extractor identity, version, and confidence; agents see the difference between “the doc says” and “a model inferred”.
+
+What we deliberately do **not** do now: no empty graph tables, no entity enum, no extraction pipeline, no traversal API. Only the cheap forward-compatible choices above — generic edge kind, stable node IDs, candidate-set retrieval — which cost almost nothing and prevent a rewrite later.
+
 ---
 
 ## 9. Interfaces
@@ -835,7 +910,7 @@ Errors are `{ "ok": false, "code": "conflict", "message": "...", "hint": "..." }
 
 | Layer | Tool | What it must prove |
 |---|---|---|
-| Unit | `cargo test` | Scoring math, parsers, chunker, status gates |
+| Unit | `cargo test` | Scoring math, parsers, chunker, status gates, type-registry resolution (alias → canonical → TypeSpec, unknown types) |
 | Golden | `insta` | Frontmatter patches: input → output byte-for-byte |
 | Property | `proptest` | Patch invariants I1–I7; decay monotonicity; chunker never panics on arbitrary UTF-8, CRLF, BOM, unclosed fences, and `---` inside bodies |
 | Integration | `assert_cmd` + fixture vault | `index → search → lineage → supersede → search` end to end |
@@ -1034,6 +1109,10 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | D31 | All persisted data is vault-scoped, with a `vault_id` in the manifest, even though v1 supports one vault | Makes a future multi-vault registry additive rather than a format rewrite | No |
 | D32 | Document-level temporal relations only; no entity/relation graph | Keeps the model learnable and the index small; the high-value questions are document-shaped, and entity extraction is a different (LLM-heavy) product | Yes |
 | D33 | Path-pattern type inference is configurable and best-effort; no folder layout is ever required | The tool must work on an existing vault as-is; a future `janus scaffold` is opt-in convenience | No |
+| D34 | Add `finding` and `idea` as first-class types, and make the type set an open, config-driven registry (`TypeSpec`) rather than a closed enum | Findings (evidence) and ideas (proposals) are the two most common agents of change; `idea → decision` and `finding → finding` are the supersession chains the engine exists to track. An open registry lets domain types be added without a release | Yes (weights are config) |
+| D35 | Model document links as generic `EdgeKind` values instead of a `SupersessionGraph` type | v1 uses only `Supersedes`, but a graph extension becomes additive rather than a format rewrite (§8.9) | Yes |
+| D36 | The scorer takes an optional candidate set from day one | Graph traversal, tag filters, and “restrict to these docs” all reuse one scoring path, so a second, subtly different scorer never appears | Yes |
+| D37 | Future entity/relation extraction is opt-in, index-time, versioned, and tagged `Derived`; declared edges always win | Keeps retrieval deterministic and offline while making machine-inferred knowledge auditable and visibly distinct from the user's claims | No |
 
 ### Open questions (to resolve at the milestone in brackets)
 
@@ -1061,6 +1140,8 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 13. **[post-1.0]** Index non-Markdown text (`.txt`, `.org`, `.rst`) behind an `[index] include` list? Deferred by D27. If added, those files need a defined default type (`note`), no date unless the filename parses, and a lower authority weight.
 14. **[post-1.0]** Multi-vault: one process, many roots, a `vault_id` on every result, and cross-vault search opt-in. Data structures are scoped for it now (D31); only the config/registry and path resolution would change.
 15. **[post-1.0]** `janus scaffold`: generate an opinionated starter layout (`decisions/`, `specs/`, `principles/`, `journals/`) plus a `janus.toml` for users who don't have a vault yet. Strictly opt-in and separate from the indexing path (D33).
+16. **[post-1.0]** Entity graph: which extractor (small local LLM, NER model, or agent-supplied edges at write time)? The last option is the cheapest and most trustworthy — the agent that writes a `finding` could declare its entities via frontmatter — but it depends on agent cooperation. Deferred; §8.9 defines the contract either way.
+17. **[post-1.0]** Entity identity: normalized name + type, declared entity nodes in frontmatter, or both? Proposal: start with declared entities, add auto-resolution only with confidence and provenance.
 11. **[post-1.0]** Python wrapper: thin `subprocess` client over `janus rpc` (no bindings), or PyO3? Proposal: `janus rpc` first — it also validates the adapter design.
 
 ---
@@ -1089,21 +1170,38 @@ version = ["doc_version", "version"]
 type = "note"
 status = "active"
 
-[types]                       # normalize ad-hoc type values
+[types]                       # alias → canonical type
 adr = "decision"
 rfc = "spec"
 log = "journal"
+research = "finding"
+proposal = "idea"
 
 [authority]
 decision = 1.50
 spec = 1.35
 principle = 1.20
+finding = 1.10
 journal = 1.00
 note = 0.90
+idea = 0.85
 
 [decay]
 half_life_days = 180
 timeless_types = ["decision", "spec", "principle"]
+
+[decay.by_type]
+finding = 365
+journal = 180
+idea = 90
+
+[paths]                       # optional path-pattern → type hints
+"decisions/" = "decision"
+"specs/" = "spec"
+"principles/" = "principle"
+"research/" = "finding"
+"journals/" = "journal"
+"ideas/" = "idea"
 
 [index]
 exclude = ["archive/private/**", "**/*.draft.md"]
