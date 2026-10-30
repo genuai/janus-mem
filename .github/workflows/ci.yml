@@ -6,7 +6,26 @@ on:
       - main
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+              rust:
+                - '**/*.rs'
+                - '**/Cargo.toml'
+                - '**/Cargo.lock'
+                - '**/rust-toolchain.toml'
+                - '.github/workflows/*.yml'
+
   test:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -24,6 +43,8 @@ jobs:
 
   # soft check - windows is not supported right now
   windows-compile:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: windows-latest
     continue-on-error: true
     steps:
