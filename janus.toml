@@ -1,0 +1,108 @@
+# janus-mem corpus config
+#
+# A corpus is one directory tree with one index. This file describes how to
+# READ that tree: which frontmatter keys to trust, how to type and weight a
+# document, and what to exclude. It never describes which corpora are queried
+# together — that is a workspace's job, in a different file (SPEC §6.11).
+#
+# Merge rule: maps merge over the built-in defaults, lists replace theirs.
+# So `adr = "decision"` adds a vocabulary word, while listing `timeless_types`
+# replaces the default set outright.
+#
+# Unknown keys are tolerated and preserved: a newer janus-mem may write keys
+# this version ignores, and a downgrade must still start.
+
+index_dir = ".janus"
+
+# Declared, stable corpus identity. Participates in document identity (§6.4)
+# and in qualified cross-corpus links (`main:decisions/x.md`). Never derived
+# from a path, so moving the tree does not re-key anything.
+corpus_id = "main"
+
+[frontmatter]
+# Key aliases, first match wins. Each list replaces the built-in default.
+# An explicitly empty list disables that field entirely.
+id = ["id", "uid", "uuid", "zettel_id", "permalink"]
+title = ["title", "name"]
+author = ["author", "generated_by", "model"]
+type = ["type", "kind", "doc_type"]
+status = ["status", "state"]
+date = ["date", "created", "decided"]
+effective_from = ["effective_from", "valid_from", "effective"]
+effective_to = ["effective_to", "valid_to", "expires"]
+supersedes = ["supersedes", "superseded"]
+superseded_by = ["superseded_by", "superseded-by"]
+tags = ["tags", "keywords"]
+version = ["doc_version", "version"]
+scope = ["scope", "org", "domain"]
+shared_with = ["shared_with", "shared", "shared-with"]
+
+[defaults]
+# Applied only when frontmatter declares nothing. Never written back to a file.
+type = "note"
+status = "active"
+
+[types]
+# Alias -> canonical type. Types are an open registry, not an enum: adding a
+# domain type here never requires a code change (§6.6.1).
+adr = "decision"
+rfc = "spec"
+log = "journal"
+research = "finding"
+proposal = "idea"
+
+[authority]
+# Canonical type -> multiplier applied after relevance. Merged over defaults.
+# An unlisted type gets 0.80 (fail-low, never fail-silent).
+decision = 1.50
+spec = 1.35
+principle = 1.20
+finding = 1.10
+journal = 1.00
+note = 0.90
+idea = 0.85
+
+[decay]
+# Global half-life in days. 0 disables time decay globally.
+half_life_days = 180
+# Types that never decay. This list REPLACES the default set, so a vault that
+# wants findings to be timeless can simply add `finding` to it.
+timeless_types = ["decision", "spec", "principle"]
+
+[decay.by_type]
+# Per-type half-life overrides. Merged over defaults.
+finding = 365
+journal = 180
+idea = 90
+
+[paths]
+# Optional path hints, consulted only when frontmatter declares no type.
+# A bare `folder/` form matches that directory anywhere in the tree; patterns
+# containing a wildcard are matched as globs against the vault-relative path.
+# The most specific (longest) matching pattern wins, so nested hints work.
+"decisions/" = "decision"
+"adr/" = "decision"
+"specs/" = "spec"
+"principles/" = "principle"
+"research/" = "finding"
+"findings/" = "finding"
+"ideas/" = "idea"
+"journals/" = "journal"
+
+[index]
+# Exclusion globs against the vault-relative path, '/'-separated.
+# `.janus/` and `.git/` are always excluded and cannot be re-included.
+exclude = ["archive/private/**", "**/*.draft.md"]
+
+[chunking]
+max_chars = 1800
+overlap = 0.15
+
+[embedding]
+enabled = true
+model = "AllMiniLML6V2"
+batch_size = 32
+
+[mcp]
+allow_write = false
+max_chars = 4000

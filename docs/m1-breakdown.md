@@ -363,3 +363,25 @@ without panicking.
 5. `docs/notes/01-m1.md` exists and is honest.
 6. Suggested commit sequence: `P1 config`, `P2 walk+confinement`, `P3 frontmatter+resolution`, `P4 scan CLI`,
    `P5 fixtures+goldens+docs` — each with a real message, each green.
+
+---
+
+## 6. Implementation log — decisions settled while building Phase 1
+
+Recorded here (not in `docs/notes/01-m1.md`) so the journal stays the author's own reflection.
+
+| # | Decision | Why |
+|---|---|---|
+| I-1 | **Merge rule: maps merge, lists replace.** `[types]`, `[authority]`, `[decay.by_type]` merge over built-in defaults; `[frontmatter]` alias lists, `[paths]`, `[index] exclude`, `[decay] timeless_types` replace. | Overriding one authority weight must not silently drop the other six; but a user must be able to *remove* a default (`timeless_types = ["principle"]`). One sentence, uniformly applied. |
+| I-2 | **`Field` enum instead of string keys** for alias lookup. | Aliases are configured per field, so lookup needs a stable index; an enum turns a typo into a compile error instead of a silently-ignored alias. |
+| I-3 | **`Config::from_toml(text, origin)`** as the seam, with `load()` a thin filesystem wrapper. | Config logic is testable without touching disk, and `origin` keeps error messages pointing at a real file. |
+| I-4 | **Config requires `janus.toml`** — no implicit defaults when the file is missing. | Guessing a vault's aliases/weights would silently misread the whole corpus (D47). `.janus/` alone is not enough. |
+| I-5 | **`[paths]` hints: most specific (longest) pattern wins**, ties broken lexicographically. | `BTreeMap` ordering would put `decisions/` before `decisions/drafts/` and shadow the nested hint. Refinement of D-FM-6. |
+| I-6 | **`[paths]` bare `folder/` = path-segment match; anything with `*?[` = glob.** | Path hints answer "which folder is this in", not "does this regex match"; segment matching is allocation-free and CRLF/case-agnostic. |
+| I-7 | **`Document` carries `type_name` + `type_spec`**, not a lone `TypeSpec`. | An unknown type legitimately keeps its own name (§6.6.1); a `TypeSpec` alone loses which type it describes. |
+| I-8 | **`ConfigWarning` for interesting-but-tolerable config**, never an error. | Zero/NaN weights, negative half-lives, alias cycles and bad globs are reported and survived; refusing to start on a slightly odd config is the worse failure mode. |
+| I-9 | **`janus init` writes the full §16.1 example** (3.5 KB, heavily commented), not a one-line stub. | Aliases become discoverable; the example doubles as documentation. A test asserts the shipped file parses and warns about nothing. |
+| I-10 | **`#![warn(missing_docs)]` enabled now**, with every public item documented. | The SPEC §10 gate is cheap to satisfy incrementally and expensive to retrofit at M8. |
+| I-11 | **`blake3` keeps default features** (C/asm SIMD). Cross-checking a Windows target from macOS therefore needs `--features blake3/pure`; the CI `windows-latest` job builds natively and is unaffected. | Hashing dominates cold-index time (§13); pure-Rust blake3 trades that speed for a toolchain convenience we don't need. |
+
+**Deferred to later phases (unchanged):** carry-forward identity and `path_history` (M5), chunking (M2), and the `scan` command itself (Phase 4).
