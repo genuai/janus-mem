@@ -462,3 +462,38 @@ fn scan_rejects_an_unknown_flag_with_the_usage_exit_code() {
         .assert()
         .code(2);
 }
+
+#[test]
+fn scan_json_reports_a_derived_identity_per_document() {
+    let vault = metadata_vault();
+    let report = scan_json(vault.path(), &[]);
+    let doc = &report["docs"][0];
+
+    // Unique title + filename date, no declared id: the third rung.
+    assert_eq!(doc["id_source"], "title_date");
+    assert_eq!(doc["id"].as_str().unwrap().len(), 32, "{doc}");
+
+    let sample = sample_vault();
+    let report = scan_json(sample.path(), &[]);
+    let docs = report["docs"].as_array().unwrap();
+    let ids: Vec<&str> = docs.iter().map(|doc| doc["id"].as_str().unwrap()).collect();
+
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1], "distinct documents, distinct ids");
+    for doc in docs {
+        let source = doc["id_source"].as_str().unwrap();
+        assert!(
+            [
+                "declared_id",
+                "content_hash",
+                "title_date",
+                "title_version",
+                "title",
+                "rel_path"
+            ]
+            .contains(&source),
+            "unexpected id_source: {source}"
+        );
+        assert_eq!(doc["id"].as_str().unwrap().len(), 32);
+    }
+}

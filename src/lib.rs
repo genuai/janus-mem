@@ -17,7 +17,7 @@
 //! * [`document`] — the parsed shape of a document and its resolved metadata.
 //! * [`id`] — `DocId`, `Blake3Hash`, `ChunkId` newtypes.
 //! * [`vault`] — corpus root discovery, the directory walk, path confinement,
-//!   frontmatter isolation, and metadata resolution.
+//!   frontmatter isolation, metadata resolution, and identity derivation.
 //! * [`scan`] — the `janus scan` command (discovery report so far).
 //! * [`error`] — the single error type and its exit-code mapping.
 //! * [`cli`] — the argument surface (no behaviour).
