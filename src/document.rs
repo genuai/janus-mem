@@ -117,7 +117,7 @@ impl FrontmatterSpan {
 /// `oneyaml::Value` map through the configurable alias lists, so a single bad
 /// value (`doc_version: "2.0"`, `tags: rust`) degrades that one key instead of
 /// discarding the whole document.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(default)]
 pub struct Frontmatter {
     /// Declared identity, if the author pinned one (§6.4, rung 1).

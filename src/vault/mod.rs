@@ -36,6 +36,8 @@ use crate::config::{self, Config};
 use crate::error::JanusError;
 use crate::id::Blake3Hash;
 
+pub mod frontmatter;
+
 /// File extensions the corpus indexes. Nothing else is ever opened (§6.1, D27).
 pub const INDEXED_EXTENSIONS: [&str; 2] = ["md", "markdown"];
 
