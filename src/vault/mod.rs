@@ -92,6 +92,21 @@ pub enum SkipReason {
 }
 
 impl SkipReason {
+    /// Every rule, in report order.
+    ///
+    /// Fixed here rather than derived from the enum's declaration order, so
+    /// adding a variant cannot silently reorder output that tests and scripts
+    /// assert on.
+    pub const ORDER: [Self; 7] = [
+        Self::AlwaysExcluded,
+        Self::Hidden,
+        Self::ConfigExclude,
+        Self::NotMarkdown,
+        Self::SymlinkedDirectory,
+        Self::SymlinkEscape,
+        Self::NonUtf8Path,
+    ];
+
     /// The stable machine-readable code used in reports.
     #[must_use]
     pub const fn as_str(&self) -> &'static str {

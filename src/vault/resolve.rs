@@ -158,6 +158,27 @@ pub fn resolve(file: &DiscoveredFile, config: &Config) -> Result<Document, ReadS
     })
 }
 
+/// Resolves a whole walk's worth of files, separating documents from skips.
+///
+/// Order follows the input, which the walk has already sorted by `rel_path`, so
+/// a report can print the result without sorting it again and two scans of an
+/// unchanged tree agree exactly (§10). A file that cannot be read does not stop
+/// the batch: it is returned as a [`ReadSkip`] alongside the documents.
+#[must_use]
+pub fn resolve_all(files: &[DiscoveredFile], config: &Config) -> (Vec<Document>, Vec<ReadSkip>) {
+    let mut documents = Vec::with_capacity(files.len());
+    let mut skips = Vec::new();
+
+    for file in files {
+        match resolve(file, config) {
+            Ok(document) => documents.push(document),
+            Err(skip) => skips.push(skip),
+        }
+    }
+
+    (documents, skips)
+}
+
 /// Reads a file, translating both read failures into skips.
 fn read_bytes(file: &DiscoveredFile) -> Result<vault::FileContent, ReadSkip> {
     vault::read_consistent(&file.path).map_err(|err| ReadSkip {

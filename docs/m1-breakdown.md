@@ -438,3 +438,22 @@ identity (the §6.4 ladder over the whole document set). The seam is the functio
 | R-8 | Read failures come back as **`ReadSkip { rel_path, note }`**, not `JanusError`. | A scan is a batch: one unreadable note must not abort the corpus, and the caller already has the `DiscoveredFile` it passed in. Keeping the reason as a `DocNote` means skips and document irregularities share one vocabulary in reports. |
 | R-9 | `effective_from`/`effective_to` are **parsed only**; not derived from `date` or `mtime`. | §6.10 derives the window from the supersession chain, which is M5's job. A read must not invent valid time — that is the one field where a wrong guess changes what an agent believes was true on a date. |
 | R-10 | An unparseable frontmatter date falls through **silently** (no `InvalidDate` note). | The information is discarded inside 3a's `date_value`, so reporting it would mean re-parsing the block in 3b. `date_source` already tells a reader the frontmatter date was not used, and M5's `doctor` is the right place to promote it. Deliberately deferred, not forgotten. |
+
+## 10. Implementation log — Phase 4 (`janus scan --json`)
+
+| # | Decision | Why |
+|---|---|---|
+| J-1 | **`id` and `id_source` are not in the DTO yet**; they arrive with 3c. | 3b leaves every document on the ladder's last rung, so emitting it would tell a consumer that every document fell through to `rel_path` — a wrong answer, not a missing one. Adding two fields later is additive under the versioning policy, so omitting them costs nothing. |
+| J-2 | `--json` failures stay **`error: …` on stderr with stdout empty**; the §9.4 `{ok:false}` envelope is MCP/RPC's (M6). | An empty stdout is unambiguous ("nothing ran"), while an envelope on stdout means a consumer must inspect it before knowing whether a report exists. One error contract per surface beats two half-overlapping ones. |
+| J-3 | Config warnings moved **from stdout to stderr, in both modes**. | stdout is the results stream (§8.2); `scan --json \| jq` must parse without filtering. The existing CLI test was updated to assert stderr — the behaviour change is the point, not an accident. |
+| J-4 | `skipped` carries **all seven walk rules even at zero**, and read failures live in a separate **`read_skips`** array. | A stable shape means no consumer distinguishes "no hidden files" from "this build does not count them". Walk skips and read skips are different stages with different vocabularies (`config_exclude` vs `non_utf8_content`); merging them would make counts lie about *where* a file was lost. |
+| J-5 | The array is **`docs`**, not `results`, and carries **no scores**. | A scan report is an inventory, not a ranked result set. `results` would promise ordering and scoring that M3 owns. |
+| J-6 | JSON is **pretty-printed**; the wire format is not part of the contract. | Read by humans piping into `jq` far more often than by a parser that cares about whitespace. The version is `api`, not the indentation. |
+| J-7 | **`taken_ms` and `mtime` are the only non-deterministic fields**, and the determinism test strips exactly `taken_ms`. | Phase 5's `insta` goldens need to know precisely what to redact; naming the set here keeps them from redacting whole documents. |
+| J-8 | The human summary counts **`document(s)`, not `file(s)`**, and reports read failures on their own line. | The number is documents that resolved. A file that was admitted and then could not be decoded is not a document, and folding it into the total would hide it. |
+| J-9 | `resolve_all` lives in `resolve.rs` as the batch form of `resolve`, not in `scan.rs`. | It is resolution, not formatting: the walk yields files, resolution yields documents, and `scan.rs` only renders. Phase 3c's ladder slots between the two without touching either. |
+| J-10 | Table column widths come from the content; **paths are never truncated**. | The table exists to diagnose a corpus, and a truncated path cannot be opened. A wide table on a deep tree is the correct trade. |
+| J-11 | `--verbose` adds only `skipped_entries` (JSON) / indented skip lines (human). | The stable part of the report stays stable under a flag that is explicitly for debugging. |
+
+**Deferred to phase 5:** the `insta` golden over the committed fixture vault (the fixture does not exist yet; phase 4 asserts on
+`serde_json::Value` instead), plus the non-UTF-8 fixture file, `docs/notes/01-m1.md` and the README refresh.
