@@ -21,6 +21,25 @@ tracing = "0.1.44"
 # utilities for structured logging
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
+# deserializing
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+# config parsing
+toml = "1.1.8"
+# frontmatter parsing
+oneyaml = "1.2.0"
+# for naive dates
+chrono = { version = "0.4.45",  features = ["serde"] }
+# to traverse corpus while ignoring patterns ignored by git
+ignore = "0.4.34"
+# find files using glob patterns
+globset = "0.4.21"
+# hashing
+blake3 = "1.8.7"
+# Windows path normalization
+dunce = "1.0.5"
+
 [dev-dependencies]
 # cli integration testing
 assert_cmd = "2.2.2"
@@ -28,3 +47,5 @@ assert_cmd = "2.2.2"
 predicates = "3.1.4"
 # to create temp files/dirs
 tempfile = "3.27.0"
+# snapshot testing
+insta = "1.49.0"
