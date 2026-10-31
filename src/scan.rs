@@ -35,7 +35,7 @@ use crate::config::{CONFIG_FILE, Config};
 use crate::document::Document;
 use crate::error::JanusError;
 use crate::vault::resolve::{self, ReadSkip};
-use crate::vault::{self, SkipReason, WalkOptions, WalkResult};
+use crate::vault::{self, SkipReason, WalkOptions, WalkResult, identity};
 
 /// The version stamped into every `--json` response.
 ///
@@ -64,7 +64,9 @@ pub struct Options {
 pub fn run(root: &Path, config: &Config, options: Options) -> Result<(), JanusError> {
     let started = Instant::now();
     let walk = vault::walk(root, config, WalkOptions::default())?;
-    let (documents, read_skips) = resolve::resolve_all(&walk.files, config);
+    let (mut documents, read_skips) = resolve::resolve_all(&walk.files, config);
+    // Identity is a corpus-wide decision, so it runs after every file is parsed.
+    identity::derive_identity(&mut documents, config);
     let elapsed = started.elapsed();
 
     // Diagnostics never share a stream with results (§8.2). In human mode this
@@ -188,6 +190,8 @@ impl<'a> ScanReport<'a> {
 /// `raw_frontmatter` (§8.5).
 #[derive(Debug, Serialize)]
 struct DocumentDto<'a> {
+    id: String,
+    id_source: &'static str,
     path: String,
     rel_path: &'a str,
     title: &'a str,
@@ -217,6 +221,8 @@ struct DocumentDto<'a> {
 impl<'a> DocumentDto<'a> {
     fn new(document: &'a Document) -> Self {
         Self {
+            id: document.id.to_hex(),
+            id_source: document.id_source.as_str(),
             path: document.path.to_string_lossy().into_owned(),
             rel_path: &document.rel_path,
             title: &document.title,
@@ -452,7 +458,11 @@ mod tests {
             size: text.len() as u64,
             mtime: SystemTime::UNIX_EPOCH,
         };
-        resolve::resolve(&file, &config()).expect("resolve must succeed")
+        let config = config();
+        let mut document = resolve::resolve(&file, &config).expect("resolve must succeed");
+        // Identity is a corpus-wide pass; one document is a one-element corpus.
+        identity::derive_identity(std::slice::from_mut(&mut document), &config);
+        document
     }
 
     #[test]
@@ -577,9 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolved_identity_is_not_reported() {
-        // Phase 4 has no ladder yet; a `rel_path`-tier placeholder must not leak
-        // into a report and claim every document fell through to the last rung.
+    fn the_report_carries_the_derived_identity() {
         let documents = [document("a.md", "x")];
         let walk = WalkResult::default();
         let config = config();
@@ -595,7 +603,9 @@ mod tests {
         let json = serde_json::to_value(&report).expect("serialize");
         let doc = &json["docs"][0];
 
-        assert!(doc.get("id").is_none(), "{doc}");
-        assert!(doc.get("id_source").is_none(), "{doc}");
+        // A single undated document: the unique title is the strongest rung.
+        assert_eq!(doc["id_source"], "title");
+        assert_eq!(doc["id"].as_str().unwrap().len(), 32);
+        assert_eq!(doc["id"], documents[0].id.to_hex());
     }
 }

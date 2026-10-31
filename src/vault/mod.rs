@@ -38,6 +38,7 @@ use crate::error::JanusError;
 use crate::id::Blake3Hash;
 
 pub mod frontmatter;
+pub mod identity;
 pub mod resolve;
 
 /// File extensions the corpus indexes. Nothing else is ever opened (§6.1, D27).
