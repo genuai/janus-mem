@@ -385,3 +385,20 @@ Recorded here (not in `docs/notes/01-m1.md`) so the journal stays the author's o
 | I-11 | **`blake3` keeps default features** (C/asm SIMD). Cross-checking a Windows target from macOS therefore needs `--features blake3/pure`; the CI `windows-latest` job builds natively and is unaffected. | Hashing dominates cold-index time (§13); pure-Rust blake3 trades that speed for a toolchain convenience we don't need. |
 
 **Deferred to later phases (unchanged):** carry-forward identity and `path_history` (M5), chunking (M2), and the `scan` command itself (Phase 4).
+
+## 7. Implementation log — decisions settled while building Phase 2
+
+| # | Decision | Why |
+|---|---|---|
+| V-1 | `walk()` **canonicalizes the root itself** and compares everything against that. | Caught by a failing test: on macOS `tempfile` yields `/var/folders/…` while `canonicalize` yields `/private/var/…`, so `starts_with` failed and every symlink looked like an escape. Confinement is component-wise, so one non-canonical side silently rejects everything. Doing it at the single entry point makes it correct by construction instead of by caller discipline. |
+| V-2 | `WalkOptions` with an explicit `hermetic()` constructor. | `ignore` reads `~/.config/git/ignore` (global gitignore) and parent-directory ignore files by default. Real runs should honour those; tests must not, or a developer's dotfiles change results. A struct beats mutating process env (unsafe to do in tests, and racy across parallel test threads). |
+| V-3 | `require_git(false)`: `.gitignore` applies even without a `.git` directory. | `ignore` defaults to requiring a repo. An exported or synced corpus often has a `.gitignore` and no `.git`, and §6.1 says to respect `.gitignore` semantics, not to require git. |
+| V-4 | **Directory symlinks are refused outright** (`symlinked_directory`); **file symlinks are resolved and admitted only if the target is inside the corpus** (`symlink_escape` otherwise). | Not following directory links removes the cycle and duplicate-tree hazards. Per-file resolution keeps a legitimate `alias.md → real.md` working (which §6.9's "copies are two documents" already allows). One `stat` per symlink, not per file. |
+| V-5 | Gitignored files are counted by a **second traversal with gitignore off**, diffed against the first. | `ignore` filters gitignored paths internally and never reports them, so the most common answer to "why isn't this file searchable?" would otherwise be unanswerable. Costs one dirent pass and zero file reads; `WalkOptions::attribute_gitignore = false` disables it. |
+| V-6 | `resolve_corpus` (discovery, read commands) is separate from `config::resolve_vault` (explicit-or-cwd, `init`). | `janus init` in a subdirectory of a vault must not silently adopt the parent corpus — it should create a new one where you are. Read commands want the opposite. Two named functions make the difference visible instead of hiding it behind a flag. |
+| V-7 | `WalkError` carries only a message. | `ignore::Error` exposes `is_io`/`is_partial` and no path accessor, and its `Display` already embeds the path. A second `path` field could only disagree with it. |
+| V-8 | `FORBIDDEN_DIRS` (`.janus`, `.git` → refusal, exit 4) is separate from `ALWAYS_EXCLUDED_DIRS` (that list plus `target`, `node_modules`, `.obsidian` → skip). | Touching the sidecar or git's object database is a *policy* failure worth a distinct exit code, not a routine skip. |
+
+**Known attribution nuance:** the `ignore` crate never yields entries under `.git/`, so `.git` is excluded but never counted in either bucket. Correctness does not depend on it — `ALWAYS_EXCLUDED_DIRS` re-prunes it in the second pass — but a future `doctor` summary should say so rather than appear to have missed it.
+
+**Deferred to Phase 3/4:** reading bytes per file (`read_consistent` exists and is tested, but nothing calls it yet), frontmatter isolation, metadata resolution, identity derivation, and the `--json` DTO.

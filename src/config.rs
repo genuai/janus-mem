@@ -59,6 +59,14 @@ pub const JANUS_DIR: &str = ".janus";
 pub const ALWAYS_EXCLUDED_DIRS: [&str; 5] =
     [JANUS_DIR, ".git", "target", "node_modules", ".obsidian"];
 
+/// The two directories that are forbidden rather than merely ignored.
+///
+/// `.janus/` is janus-mem's own sidecar and `.git/` belongs to git; neither may
+/// ever be read as vault content or written to (§8.6 rule 1). The difference
+/// from [`ALWAYS_EXCLUDED_DIRS`] is severity: touching these is a refusal
+/// (exit 4), not a skip.
+pub const FORBIDDEN_DIRS: [&str; 2] = [JANUS_DIR, ".git"];
+
 /// Authority applied to a type that is not in the registry (§6.6.1):
 /// fail-low, never fail-silent.
 pub const UNKNOWN_TYPE_AUTHORITY: f64 = 0.80;
@@ -1063,6 +1071,17 @@ pub fn is_always_excluded_dir(name: &OsStr) -> bool {
     ALWAYS_EXCLUDED_DIRS
         .iter()
         .any(|excluded| name == OsStr::new(excluded))
+}
+
+/// Whether a path component belongs to janus-mem's sidecar or to git.
+///
+/// Used by path confinement: a resolved path containing one of these is a
+/// refusal, not a skip.
+#[must_use]
+pub fn is_forbidden_dir(name: &OsStr) -> bool {
+    FORBIDDEN_DIRS
+        .iter()
+        .any(|forbidden| name == OsStr::new(forbidden))
 }
 
 /// The index location resolved against a corpus root.

@@ -66,6 +66,41 @@ pub enum JanusError {
         source: io::Error,
     },
 
+    /// No corpus root could be found: no `--vault`, and no ancestor of the
+    /// working directory contains `janus.toml` or `.janus/` (§6.1).
+    #[error("no corpus found from {from}: pass --vault or run `janus init`")]
+    VaultNotFound {
+        /// The directory the search started from.
+        from: PathBuf,
+    },
+
+    /// A path could not be canonicalized, so confinement cannot be decided.
+    #[error("cannot resolve path {path}")]
+    PathResolve {
+        /// The path that failed to resolve.
+        path: PathBuf,
+        /// The underlying IO failure.
+        #[source]
+        source: io::Error,
+    },
+
+    /// A path resolved outside the corpus root, or into `.git/` / `.janus/`.
+    /// Refused rather than skipped: a caller asking for such a path is either
+    /// confused or hostile, and both deserve a clear answer (§8.5, §8.6).
+    #[error("refusing path outside the corpus: {path}")]
+    PathEscape {
+        /// The offending path, as supplied.
+        path: PathBuf,
+    },
+
+    /// A file kept changing while it was being read, so no consistent snapshot
+    /// could be taken (§6.9).
+    #[error("file changed while being read: {path}")]
+    ChangedDuringRead {
+        /// The file that would not hold still.
+        path: PathBuf,
+    },
+
     /// The path exists but is a file, a socket, etc.
     #[error("vault path is not a directory: {path}")]
     VaultNotDirectory {
@@ -109,9 +144,14 @@ impl JanusError {
             // Refusals: the command was understood and deliberately not carried
             // out. Distinguishing these from runtime failures lets a script
             // retry a transient error without retrying a policy decision.
-            Self::ConfigExists { .. } | Self::VaultNotDirectory { .. } => 4,
+            Self::ConfigExists { .. }
+            | Self::VaultNotDirectory { .. }
+            | Self::PathEscape { .. } => 4,
 
             Self::VaultResolve { .. }
+            | Self::VaultNotFound { .. }
+            | Self::PathResolve { .. }
+            | Self::ChangedDuringRead { .. }
             | Self::ConfigMissing { .. }
             | Self::ConfigRead { .. }
             | Self::ConfigParse { .. }

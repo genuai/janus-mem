@@ -36,4 +36,7 @@ pub struct Cli {
 pub enum Command {
     /// Create janus.toml and .janus/ for a vault
     Init,
+
+    /// Report which Markdown files the corpus contains and what was skipped
+    Scan,
 }
