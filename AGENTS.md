@@ -72,6 +72,60 @@ cargo check --target aarch64-pc-windows-msvc --all-targets --features blake3/pur
 (The `blake3/pure` feature is only needed when cross-checking from macOS, which
 has no MSVC C toolchain; CI's `windows-latest` job builds natively.)
 
+## Versioning
+
+Four version numbers exist and must never be conflated (SPEC §6.8, §9.5):
+
+| Number | Where | Changed by | Bumping it means |
+|---|---|---|---|
+| crate / binary version | `Cargo.toml` | us, at release | semver for the `janus` command |
+| `format_version` | `.janus/manifest.json` | us, on layout change | every existing index is rebuilt |
+| API version | every `--json` and MCP response (`"api": 1`) | us, on a breaking DTO change | a consumer must be updated |
+| `schema_version`, `doc_version` | the user's frontmatter | the user, or an explicit write | nothing, unless the user asked |
+
+Policy:
+
+- **Pre-1.0 (`0.y.z`).** A breaking change bumps `y`. Nothing is promised stable
+  except the invariants below — but do not use the pre-1.0 excuse to churn
+  formats casually; every bump costs a rebuild for every user.
+- **`format_version`** is bumped on *any* change to the on-disk layout or its
+  meaning. A mismatch triggers a rebuild with a warning; it is never an error,
+  and an index is never read across a version boundary (§8.3).
+- **Exit codes and error codes are public API** (§9.1, §9.5). Adding a code is
+  additive and fine. Changing or removing one is breaking: bump the API version
+  and say so in the commit message.
+- **Frontmatter versions belong to the user.** janus-mem never invents a
+  `doc_version`, never bumps `schema_version`, and never adopts a versioning
+  scheme for a document that lacks one (D26). `--bump-version` is an explicit
+  opt-in.
+- Release artifacts come from `cargo-dist` on a git tag (M8). Until then the
+  crate version is a label, not a contract.
+
+## Engineering principles
+
+`SPEC.md` §5.1 is the authority. The subset that actually changes day-to-day
+decisions:
+
+- **Single responsibility per module.** `vault` parses, `index` stores, `score`
+  scores, `write` writes, adapters adapt. If a function needs the word "and"
+  twice in its doc comment, split it.
+- **Dependencies arrive as arguments, never from ambient state.** A `Clock`
+  rather than `SystemTime::now()`; a `Config` rather than `std::env::var` deep in
+  the engine; an `Embedder` rather than a global model. This is precisely what
+  makes `FixedClock`, `HashEmbedder` and hermetic `WalkOptions` possible — and
+  why tests never read the wall clock or `$HOME`.
+- **DRY, with judgment.** Three similar lines beat a premature trait, especially
+  in Rust where the trait drags lifetimes into four modules. The signal to
+  extract is the third occurrence *in a different module*, not the second.
+- **TDD for rules, glue-first for plumbing.** Scoring, decay, status gating, span
+  patching, identity resolution: failing test first. CLI formatting and serde
+  structs: write them, then test the behaviour.
+- **Open for extension, closed for modification.** New intents, embedders and
+  index backends arrive as trait impls or enum variants, not as `if` branches
+  inside `score()`.
+- **No hidden globals.** No `static mut`, no ambient singletons, no `std::env`
+  reads below the boundary. Resolve once at the edge, pass it down.
+
 ## Code conventions
 
 - **No `unsafe`** (D12). No proc macros, no FFI, no custom async runtime.
