@@ -52,3 +52,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
+
+  # Enforces the PR size budget in AGENTS.md. Advisory instruction files are
+  # read once at session start and then drift; a failing required check is a
+  # fact that every session has to deal with.
+  pr-size:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Fetch base branch
+        run: git fetch --no-tags origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+      - name: Check the large-pr escape hatch
+        id: escape
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          labels=$(gh pr view "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" --json labels \
+            --jq '.labels[].name')
+          if grep -qx 'large-pr' <<< "$labels"; then
+            echo "labelled=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::PR is labelled large-pr; the size check is advisory."
+          else
+            echo "labelled=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Enforce size budget
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: |
+          if [[ "${{ steps.escape.outputs.labelled }}" == "true" ]]; then
+            ./scripts/pr-size.sh || echo "::warning::over budget, but large-pr is set"
+          else
+            ./scripts/pr-size.sh
+          fi
