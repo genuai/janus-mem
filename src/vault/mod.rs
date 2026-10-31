@@ -1,11 +1,12 @@
 //! Corpus root resolution, directory walking, and path confinement
 //! (SPEC §6.1, §8.5, §8.6, §8.7).
 //!
-//! Phase 2 of M1 is deliberately split from parsing: this module only answers
-//! *"which files are in the corpus, and which were skipped and why?"*. It reads
-//! no file contents. Content — frontmatter isolation, metadata resolution,
-//! identity — belongs to [`crate::document`] and arrives in phase 3, which
-//! consumes [`DiscoveredFile`]s and calls [`read_consistent`] per file.
+//! The walk is deliberately split from parsing: [`walk`] answers *"which files
+//! are in the corpus, and which were skipped and why?"* and reads no file
+//! contents. Content lives next door: [`frontmatter`] isolates and reads the
+//! metadata block, and [`resolve`] turns one [`DiscoveredFile`] into a resolved
+//! [`Document`](crate::document::Document) by calling [`read_consistent`] once
+//! per file.
 //!
 //! That split matters for memory: a walk of a 20k-document vault must not hold
 //! 300 MB of text in flight (§13). Dirents are cheap; bytes are not.
@@ -37,6 +38,7 @@ use crate::error::JanusError;
 use crate::id::Blake3Hash;
 
 pub mod frontmatter;
+pub mod resolve;
 
 /// File extensions the corpus indexes. Nothing else is ever opened (§6.1, D27).
 pub const INDEXED_EXTENSIONS: [&str; 2] = ["md", "markdown"];

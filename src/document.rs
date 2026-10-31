@@ -75,6 +75,12 @@ pub struct Document {
     pub effective_to: Option<NaiveDate>,
     /// Owning scope, normalised; `"global"` when absent (§6.12).
     pub scope: String,
+    /// Retrieval tags, deduplicated and trimmed, in first-seen order.
+    ///
+    /// A set for matching purposes, but a `Vec` because a set has no order to
+    /// preserve and output has to be deterministic. Never part of identity: a
+    /// document sharing a tag must not be re-keyed by adding one (§6.12 rule 2).
+    pub shared_with: Vec<String>,
     /// Everything that had to be defaulted, skipped or tolerated while
     /// producing this document.
     pub notes: Vec<DocNote>,
