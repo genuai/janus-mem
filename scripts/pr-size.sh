@@ -8,38 +8,46 @@
 # fact. Run it before opening a PR; CI runs it as well, so forgetting is not a
 # way through.
 #
+# Budget (AGENTS.md):
+#   logic   <= 600 lines
+#   tests   <= 900 lines (1.5x the logic ceiling)
+#
+# Test lines are counted separately because assertions are not what makes a PR
+# hard to review - the logic is. A file counts as tests if it lives in tests/ or
+# benches/, or if the line sits after the file's first `#[cfg(test)]`.
+#
 # Usage:
-#   scripts/pr-size.sh [--base REF] [--limit N] [--warn N] [--quiet]
+#   scripts/pr-size.sh [--base REF] [--logic N] [--tests N] [--quiet]
 #
 # Environment:
 #   BASE   ref to diff against (default: origin/main)
-#   LIMIT  hard ceiling in changed lines (default: 600)
-#   WARN   advisory threshold (default: 400)
+#   LOGIC  logic-line ceiling (default: 600)
+#   TESTS  test-line ceiling (default: 900)
 #
 # Exit codes:
-#   0  within budget (possibly with a warning)
+#   0  within budget
 #   1  over the hard ceiling
 #   2  usage or environment error
 #
-# Lockfiles are excluded: they are generated, and counting them would make the
-# budget meaningless rather than strict. Add more paths with EXTRA_EXCLUDES
-# (a git pathspec fragment, e.g. "':(exclude)tests/fixtures/**'").
+# Markdown and lockfiles are excluded from the budget and reported separately:
+# prose and generated text are not logic a reviewer has to hold in their head,
+# and both would drown the number that matters. Everything else - Rust, shell,
+# YAML, TOML - is budgeted.
 
 set -euo pipefail
 
 BASE="${BASE:-origin/main}"
-LIMIT="${LIMIT:-600}"
-WARN="${WARN:-400}"
-EXTRA_EXCLUDES="${EXTRA_EXCLUDES:-}"
+LOGIC="${LOGIC:-600}"
+TESTS="${TESTS:-900}"
 QUIET=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base) BASE="$2"; shift 2 ;;
-    --limit) LIMIT="$2"; shift 2 ;;
-    --warn) WARN="$2"; shift 2 ;;
+    --logic) LOGIC="$2"; shift 2 ;;
+    --tests) TESTS="$2"; shift 2 ;;
     --quiet) QUIET=1; shift ;;
-    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -51,51 +59,111 @@ fi
 
 # `...` (three dots) is the merge base, so a feature branch is measured by what
 # it adds, not by everything upstream did since it forked.
-#
-# The conditional is not style: bash 3.2 (still macOS's /bin/bash) errors on
-# `"${empty_array[@]}"` under `set -u`, so the extra pathspecs are only expanded
-# when there are any.
-if [[ -n "$EXTRA_EXCLUDES" ]]; then
-  read -r -a excludes <<< "$EXTRA_EXCLUDES"
-  numstat=$(git diff --numstat "${BASE}...HEAD" -- . ':(exclude)Cargo.lock' "${excludes[@]}")
-else
-  numstat=$(git diff --numstat "${BASE}...HEAD" -- . ':(exclude)Cargo.lock')
-fi
+RANGE="${BASE}...HEAD"
 
-if [[ -z "$numstat" ]]; then
+if [[ -z "$(git diff --name-only "$RANGE")" ]]; then
   echo "PR size: no changes against $BASE"
   exit 0
 fi
 
-# Sum insertions and deletions, treat binary entries ("-") as 0 lines but still
-# count the file.
-summary=$(printf '%s\n' "$numstat" | awk -F'\t' '
-  { files++; ins += ($1 == "-" ? 0 : $1); del += ($2 == "-" ? 0 : $2) }
-  END { printf "%d %d %d", files, ins, del }
-')
-read -r files insertions deletions <<< "$summary"
-total=$((insertions + deletions))
+# Per-file boundary: the first `#[cfg(test)]` line in a source file. Everything
+# from there to EOF is the test module, which is the convention every file in
+# this repo follows.
+boundaries=$(mktemp)
+trap 'rm -f "$boundaries"' EXIT
 
-# Biggest contributors, so the fix is obvious rather than a hunt.
-biggest=$(printf '%s\n' "$numstat" | awk -F'\t' '
-  { lines = ($1 == "-" ? 0 : $1) + ($2 == "-" ? 0 : $2); printf "%6d  %s\n", lines, $3 }
-' | sort -rn | head -5)
+while IFS= read -r file; do
+  [[ -f "$file" ]] || continue
+  line=$(grep -n -m1 '^#\[cfg(test)\]' "$file" 2>/dev/null | cut -d: -f1 || true)
+  printf '%s\t%s\n' "$file" "${line:-0}" >> "$boundaries"
+done < <(git diff --name-only --diff-filter=ACM "$RANGE" -- '*.rs')
+
+# Walk the diff hunk by hunk so each added line can be attributed to the right
+# side of the boundary. `-U0` means hunk bodies contain only + and - lines, so
+# new-side line numbers advance on insertions alone.
+summary=$(git diff -U0 "$RANGE" -- . ':(exclude)Cargo.lock' ':(exclude)*.md' \
+  | awk -F'\t' -v boundaries="$boundaries" '
+    function classify(path, newline, kind,   limit, bucket) {
+      if (path ~ /\.md$/ || path ~ /Cargo\.lock$/) return "docs"
+      if (path ~ /^(tests|benches)\//) return "tests"
+      if (path !~ /\.rs$/) return "logic"
+      limit = (path in bound) ? bound[path] : 0
+      if (kind == "ins" && limit > 0 && newline >= limit) return "tests"
+      return "logic"
+    }
+    BEGIN {
+      while ((getline line < boundaries) > 0) {
+        split(line, parts, "\t")
+        bound[parts[1]] = parts[2] + 0
+      }
+    }
+    /^diff --git/ { file = ""; next }
+    /^\+\+\+ / {
+      f = substr($0, 7)
+      sub(/^b\//, "", f)
+      file = (f == "/dev/null") ? "" : f
+      next
+    }
+    /^--- / { next }
+    /^@@ / {
+      # `@@ -a,b +c,d @@` -> added lines start at new-side line c
+      match($0, /\+[0-9]+/)
+      newline = substr($0, RSTART + 1, RLENGTH - 1) + 0
+      next
+    }
+    /^\+/ {
+      if (file != "") {
+        bucket = classify(file, newline, "ins")
+        count[bucket]++
+        perfile[bucket "\t" file]++
+        newline++
+      }
+      next
+    }
+    /^-/ {
+      if (file != "") {
+        bucket = classify(file, 0, "del")
+        count[bucket]++
+      }
+      next
+    }
+    END {
+      printf "%d %d %d\n", count["logic"], count["tests"], count["other"]
+      for (key in perfile) print "FILE\t" key "\t" perfile[key]
+    }
+  ')
+
+read -r logic tests other <<< "$(printf '%s\n' "$summary" | head -1)"
+total=$((logic + tests))
 
 if [[ $QUIET -eq 0 ]]; then
   echo "PR size against $BASE"
-  echo "  files       $files"
-  echo "  insertions  $insertions"
-  echo "  deletions   $deletions"
-  echo "  changed     $total  (budget: warn $WARN, limit $LIMIT)"
+  printf '  %-10s %6d / %d\n' "logic" "$logic" "$LOGIC"
+  printf '  %-10s %6d / %d\n' "tests" "$tests" "$TESTS"
+  if (( other > 0 )); then
+    printf '  %-10s %6d  (not budgeted: Markdown and lockfiles)\n' "docs" "$other"
+  fi
+  printf '  %-10s %6d / %d\n' "total" "$total" "$((LOGIC + TESTS))"
   echo
-  echo "  largest files:"
-  printf '%s\n' "$biggest" | sed 's/^/  /'
+  echo "  largest logic contributors:"
+  printf '%s\n' "$summary" \
+    | awk -F'\t' '$1 == "FILE" && $2 == "logic" { printf "%6d  %s\n", $4, $3 }' \
+    | sort -rn | head -5 | sed 's/^/  /'
   echo
 fi
 
-if (( total > LIMIT )); then
-  cat >&2 <<EOF
-✗ over budget: $total changed lines (limit $LIMIT)
+over=0
+if (( logic > LOGIC )); then
+  echo "✗ logic over budget: $logic lines (limit $LOGIC)" >&2
+  over=1
+fi
+if (( tests > TESTS )); then
+  echo "✗ tests over budget: $tests lines (limit $TESTS)" >&2
+  over=1
+fi
+
+if (( over )); then
+  cat >&2 <<'EOF'
 
 This change is too large to review well. Split it before opening the PR — see
 AGENTS.md. Usual causes:
@@ -105,14 +173,11 @@ AGENTS.md. Usual causes:
   * a behaviour change mixed with a file move
 
 If the size is genuinely unavoidable (a generated file, a mechanical rename),
-label the PR \`large-pr\` and say why in the description. CI requires that label
+label the PR `large-pr` and say why in the description. CI requires that label
 to override this check.
 EOF
   exit 1
 fi
 
-if (( total > WARN )); then
-  echo "⚠ $total changed lines (warn threshold $WARN) — consider splitting."
-fi
-
+(( logic > LOGIC * 2 / 3 )) && echo "⚠ logic at $logic lines — approaching the $LOGIC ceiling."
 exit 0

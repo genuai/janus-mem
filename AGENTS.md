@@ -18,19 +18,29 @@ plan and carries the decisions already settled (IDs like `I-5`, `V-4`).
 
 ## PR size budget — the rule that matters most
 
-**One milestone phase per PR. Hard ceiling: 600 changed lines** (insertions +
-deletions, `Cargo.lock` excluded). Warn at 400.
+**One milestone phase per PR.** The ceiling is counted in two buckets:
+
+| Bucket | Ceiling | What counts |
+|---|---|---|
+| logic | **600** | inserted + deleted lines in source: `.rs` before `#[cfg(test)]`, plus `.sh`, `.yml`, `.toml` |
+| tests | **900** (1.5×) | `tests/`, `benches/`, and everything after a file's `#[cfg(test)]` |
+| — | 1500 total | Markdown and `Cargo.lock` are reported but not budgeted |
+
+Tests get a larger allowance on purpose: assertions are not what makes a PR hard
+to review, logic is. A parser plus 40 edge-case tests is one reviewable unit; the
+same 400 lines of logic alone is not.
 
 This is enforced mechanically:
 
 ```bash
-scripts/pr-size.sh            # measures HEAD against origin/main
-BASE=origin/main LIMIT=600 scripts/pr-size.sh
+scripts/pr-size.sh                              # HEAD against origin/main
+BASE=origin/m1-scan-parse scripts/pr-size.sh    # stacked PRs
 ```
 
 CI runs the same check on every pull request and fails it when over budget,
 unless the PR carries the `large-pr` label. That label is an escape hatch for
-generated files and mechanical renames, not for "I got carried away".
+generated files and mechanical renames, not for "I got carried away" — and if
+you use it, put the numbers in the PR description.
 
 How to actually comply:
 
