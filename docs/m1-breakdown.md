@@ -402,3 +402,17 @@ Recorded here (not in `docs/notes/01-m1.md`) so the journal stays the author's o
 **Known attribution nuance:** the `ignore` crate never yields entries under `.git/`, so `.git` is excluded but never counted in either bucket. Correctness does not depend on it — `ALWAYS_EXCLUDED_DIRS` re-prunes it in the second pass — but a future `doctor` summary should say so rather than appear to have missed it.
 
 **Deferred to Phase 3/4:** reading bytes per file (`read_consistent` exists and is tested, but nothing calls it yet), frontmatter isolation, metadata resolution, identity derivation, and the `--json` DTO.
+
+## 8. Implementation log — Phase 3a (frontmatter isolation)
+
+| # | Decision | Why |
+|---|---|---|
+| F-1 | The span **excludes the BOM**, and `body` excludes it too: `text[..span.start]` is prefix, never touched. | M7 splices `span` and keeps the prefix. If the BOM were inside the span, rewriting frontmatter would move the BOM below it — invalid UTF-8 BOM placement, and a diff nobody asked for. |
+| F-2 | An **unclosed fence means body-only**, not "frontmatter to EOF". | A document whose body starts with `---` (a horizontal rule) and has another later would otherwise be swallowed into YAML. Treating the truncated block as body is the fail-safe direction: no bytes are reinterpreted. |
+| F-3 | Duplicate keys are **tolerated, last wins, warned**. | Hand-edited frontmatter hits this constantly, and refusing to read a document over it is worse than reading it and saying so. |
+| F-4 | Scalars are **coerced** to strings (`id: 123`, `doc_version: 2.0` → Number in YAML 1.2); structures are **not**. | Dropping identity evidence because someone forgot quotes would silently break move continuity. A sequence where a scalar belongs means the file said something structural, and guessing there is not kind. |
+| F-5 | A scalar in a list field becomes a **one-element list** (`supersedes: path.md`, `tags: rust`). | §6.3's own example writes `supersedes` as a scalar; rejecting it would make the engine unusable on its target vaults. |
+| F-6 | `timeless` and `schema_version` are **not aliasable**. | They are janus-adjacent keys with one agreed spelling. Aliasing them would invent a vocabulary, the opposite of §6.3's configurable-alias purpose (which exists for keys *other tools* already write). |
+| F-7 | `read()` returns borrowed views (`FrontmatterRead<'a>`), not owned copies. | The caller already owns the file bytes; copying the body and raw block per document doubles peak memory for no benefit. This is the `&str`/lifetime exercise the M1 plan asked for. |
+
+**Split note:** Phase 3 was planned as one unit but exceeds the 600-line budget, so it ships as 3a (isolate + read the block) and 3b (resolve metadata + derive identity). The seam is real: 3a is `bytes → Frontmatter`, 3b is `Frontmatter + fs facts + config → Document + DocId`.
