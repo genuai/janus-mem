@@ -54,10 +54,42 @@ pub const JANUS_DIR: &str = ".janus";
 ///
 /// `.janus/` and `.git/` are deliberately *not* configurable: an index that
 /// indexes itself, or a walk that reads git's object database, is never what
-/// anyone meant (§6.1, §8.6 rule 1). The rest are the conventional build and
-/// editor noise of a Markdown vault.
-pub const ALWAYS_EXCLUDED_DIRS: [&str; 5] =
-    [JANUS_DIR, ".git", "target", "node_modules", ".obsidian"];
+/// anyone meant (§6.1, §8.6 rule 1).
+///
+/// The list is deliberately short, and every entry has to earn its place on two
+/// counts:
+///
+/// 1. **Non-dot.** Anything dot-prefixed (`.venv`, `.next`, `.tox`,
+///    `.mypy_cache`, `.gradle`, …) is already pruned by the hidden-file rule.
+///    Listing it here would be redundant and, worse, misleading: it would look
+///    like this table is what protects it.
+/// 2. **Never a plausible home for a Markdown document.** `dist/`, `build/` and
+///    `vendor/` are *not* listed even though they are usually generated, because
+///    a vault may legitimately keep notes there and silently hiding a document is
+///    a worse failure than walking a directory. Those belong in `[index]
+///    exclude`, where the vault owner can see and change them (§6.1).
+///
+/// The remaining entries are tool caches that by construction hold no Markdown,
+/// and that can be large enough to dominate a walk.
+pub const ALWAYS_EXCLUDED_DIRS: [&str; 9] = [
+    JANUS_DIR,
+    ".git",
+    // Rust build output.
+    "target",
+    // JavaScript dependencies: the single largest directory in most trees.
+    "node_modules",
+    // Obsidian's own configuration and plugin cache.
+    ".obsidian",
+    // Python bytecode. Non-dot, so the hidden rule does not cover it, and it
+    // commonly holds thousands of small files in a tree that also holds notes.
+    "__pycache__",
+    // A virtualenv created without the leading dot.
+    "venv",
+    // Windows system directories. Not dot-prefixed, and reading them fails with
+    // permission errors that would otherwise be reported as scan noise (§8.7).
+    "System Volume Information",
+    "$RECYCLE.BIN",
+];
 
 /// The two directories that are forbidden rather than merely ignored.
 ///
@@ -1636,6 +1668,46 @@ mod tests {
         assert!(is_always_excluded_dir(OsStr::new(".git")));
         assert!(is_always_excluded_dir(OsStr::new("node_modules")));
         assert!(!is_always_excluded_dir(OsStr::new("notes")));
+    }
+
+    #[test]
+    fn always_excluded_dirs_cover_non_dot_tool_caches() {
+        for name in [
+            "__pycache__",
+            "venv",
+            "System Volume Information",
+            "$RECYCLE.BIN",
+        ] {
+            assert!(
+                is_always_excluded_dir(OsStr::new(name)),
+                "{name} can hold no Markdown and can be large"
+            );
+        }
+    }
+
+    #[test]
+    fn plausible_document_folders_are_not_hardcoded_as_excluded() {
+        // These are usually generated, but a vault may keep notes there, and
+        // silently hiding a document is worse than walking a directory. They
+        // belong in `[index] exclude`, where the owner can see them.
+        for name in ["build", "dist", "vendor", "Pods", "docs", "notes"] {
+            assert!(
+                !is_always_excluded_dir(OsStr::new(name)),
+                "{name} must stay configurable, not hardcoded"
+            );
+        }
+    }
+
+    #[test]
+    fn dot_directories_need_no_entry_in_the_exclusion_list() {
+        // `.venv`, `.next`, `.tox` and friends are pruned by the hidden-file
+        // rule; listing them here would imply the list is what protects them.
+        for name in [".venv", ".next", ".tox", ".mypy_cache", ".gradle"] {
+            assert!(
+                !is_always_excluded_dir(OsStr::new(name)),
+                "{name} is already covered by the hidden rule; do not duplicate it"
+            );
+        }
     }
 
     #[test]

@@ -91,7 +91,15 @@ idea = 90
 
 [index]
 # Exclusion globs against the vault-relative path, '/'-separated.
-# `.janus/` and `.git/` are always excluded and cannot be re-included.
+# `.janus/`, `.git/`, `target/`, `node_modules/`, `.obsidian/`, `__pycache__/`,
+# `venv/` and the two Windows system directories are always excluded and cannot
+# be re-included.
+#
+# Generated trees that are *usually* noise but could legitimately hold notes are
+# not hardcoded, because silently hiding a document is worse than walking a
+# directory. Uncomment what applies to your vault:
+#   "**/build/**", "**/dist/**", "**/vendor/**", "**/Pods/**",
+#   "**/.venv/**", "**/.next/**", "**/.gradle/**", "**/.terraform/**",
 exclude = ["archive/private/**", "**/*.draft.md"]
 
 [chunking]
