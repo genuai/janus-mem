@@ -472,3 +472,28 @@ identity (the §6.4 ladder over the whole document set). The seam is the functio
 | S-8 | `rel_path` is the **unconditional fallback and is never counted**. | It is unique by construction within one walk, so counting it would only add a map entry per document. Reaching it is the fail-closed outcome §6.4 asks for. |
 | S-9 | `derive_identity` returns `()`; the **notes carry the information**. | Nothing in M1 consumes a separate outcome list, and the tier is already on the document. `janus ids` (M5) can expose the matched key later by making `match_key` public; adding a DTO nobody reads would be dead weight now. |
 | S-10 | The `--json` report now emits **`id` and `id_source`**, fulfilling J-1. | The ladder exists, so the fields are true rather than provisional. Adding them was the promised additive change; `api` stays at 1. |
+
+## 12. Implementation log — Phase 5 (fixtures, goldens, docs, polish)
+
+The fixture lives at `tests/fixtures/vault/` and is scanned through the real CLI, not through a
+half-reimplemented harness. Two of its inputs are generated per test run, and the golden redacts a
+named set of fields rather than whole documents; both are deliberate, and both are recorded here
+because the phase-5 wording in §10 and the original plan describe a slightly different shape.
+
+| # | Decision | Why |
+|---|---|---|
+| T-1 | **The fixture is committed at `tests/fixtures/vault/` with its own `janus.toml`**, and tests copy it to a temp directory before scanning. | The fixture must be reviewable in a diff, but `scan --json` contains absolute paths, so scanning the checkout would make the golden depend on where the repo lives. A byte copy preserves the tree (including `.gitignore`) while giving the redactor one stable placeholder. |
+| T-2 | **The ~2 MB document and the non-UTF-8 `.md` are generated in `tests/common/mod.rs`, not committed.** | A committed 2 MB text file costs the repository on every clone forever, and a committed invalid-UTF-8 blob is unreviewable. Generating them keeps the diff honest and the golden still exercises both read paths. Deliberate deviation from §10/phase-5 wording. |
+| T-3 | **The mtime-sourced fixture document declares an `id`**, and the redactor replaces only its `date` with `<mtime-date>`. | `notes/undated.md` is the one case where `date_source: mtime` is the point. Without a declared id its `title_date` identity would hash the checkout date, making even `id` machine-dependent. The declared id keeps the golden's identity stable while the date is redacted. |
+| T-4 | **Case-only filenames (`README.md` + `readme.md`) are omitted from the committed fixture.** | macOS and Windows cannot check both out, so committing the pair would break the fixture on the two platforms the project targets (§8.7). Generating the pair and gating the test adds platform-specific branching for a case M5's link/move work will cover properly; noted here rather than silently dropped. |
+| T-5 | **`tests/fixtures/vault/.gitattributes` sets `* -text`.** | The fixture asserts byte-level facts (a BOM, CRLF bodies, content hashes). Without `-text`, a checkout with `core.autocrlf` would rewrite LF files and quietly change every hash the golden records. |
+| T-6 | **The `archive/private/**` and `**/*.draft.md` pair lives in `[index] exclude`; the fixture `.gitignore` carries `target/` and `scratch/`.** | §16.1 assigns exclusion globs to the config, and `.gitignore` needs a separate Markdown file to prove `ignored_by_git` attribution. Putting the pair in the config keeps the two mechanisms distinguishable in the report instead of collapsing them into one count. |
+| T-7 | **`node_modules/generated.md` was added to the fixture after `always_excluded` came back zero.** | `target/` is both gitignored and hard-excluded, and the `ignore` crate drops gitignored directories before our classifier sees them. A second always-excluded directory that is *not* gitignored makes the rule visible in the report and keeps the skip counts from lying about where the file was lost. |
+| T-8 | **`clippy.toml` sets `allow-unwrap-in-tests = true`; `src/lib.rs` enables `clippy::unwrap_used`.** | The lint is for library code (AGENTS.md); the ~200 test unwraps are assertions, not hazards. Enabling it crate-wide without the exception would either bury the real hit or force a rewrite of tests that is not this phase's job. |
+| T-9 | **No `docs/notes/01-m1.md`.** §5 item 5 is satisfied by this implementation log instead. | AGENTS.md retired that journal convention: settled decisions belong in the breakdown's phase log, and a personal reflection is the author's to write. Recorded here so the missing file is a decision, not an oversight. |
+| T-10 | **The golden uses `WalkOptions::default()`, and the test documents the global-gitignore caveat instead of adding a `--hermetic` flag.** | Real scans must honour a user's global and parent ignore files (§6.1), and CI runners have neither, so the golden is stable there. A developer with an exotic ignore file seeing a diff is information about the environment; a scan flag is M5 CLI surface, not phase-5 polish. |
+
+**Verification:** the fixture parses to 13 documents (including the generated large file), every
+document reports a `date_source`, exactly one is `mtime`, the supersession cycle and broken link are
+echoed as written, the non-UTF-8 file appears only in `read_skips`, and two scans of one temp copy
+differ only in `taken_ms`. The `insta` snapshot is `tests/snapshots/golden_scan__scan.snap`.

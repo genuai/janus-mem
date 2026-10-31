@@ -1,0 +1,2 @@
+# Asserted bytes: never let git rewrite the fixture's CRLF or BOM.
+* -text

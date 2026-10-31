@@ -1,0 +1,4 @@
+# no unwrap()/expect() in library code (AGENTS.md). Tests are the exception:
+# there an unwrap failure is the assertion doing its job, and linting ~200 of
+# them would bury the one that matters in real code.
+allow-unwrap-in-tests = true

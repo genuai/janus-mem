@@ -1,0 +1,28 @@
+# Fixture config: alias overrides, [paths] hints, [index] excludes, unknown keys.
+# A downgrade must still start, so unknown keys are present on purpose (§16.1).
+index_dir = ".janus"
+corpus_id = "fixtures"
+future_top_level_key = "tolerated"
+
+[frontmatter]
+# Lists REPLACE the defaults (I-1); unmentioned fields keep theirs. These
+# overrides prove the reader consults config, not a hardcoded vocabulary.
+title = ["title", "name"]
+type = ["type", "kind"]
+status = ["status", "state"]
+date = ["date", "created"]
+author = ["author", "written_by"]
+tags = ["tags", "labels"]
+scope = ["scope", "org"]
+future_alias = ["ignored"]
+
+[paths]
+# Consulted only when frontmatter declares no type (§6.3).
+"decisions/" = "decision"
+"specs/" = "spec"
+
+[index]
+exclude = ["archive/private/**", "**/*.draft.md"]
+
+[experimental]
+unknown_table = true
