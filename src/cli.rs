@@ -38,5 +38,13 @@ pub enum Command {
     Init,
 
     /// Report which Markdown files the corpus contains and what was skipped
-    Scan,
+    Scan {
+        /// Emit one JSON object on stdout instead of a table
+        #[arg(long)]
+        json: bool,
+
+        /// Include the per-entry skip list, not just per-rule counts
+        #[arg(long)]
+        verbose: bool,
+    },
 }

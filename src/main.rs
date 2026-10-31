@@ -42,12 +42,12 @@ fn run(cli: Cli) -> Result<(), JanusError> {
 
         // Read commands discover the corpus upwards, so `janus scan` works from
         // anywhere inside a vault (§6.1).
-        Command::Scan => {
+        Command::Scan { json, verbose } => {
             let root = vault::resolve_corpus(cli.vault)?;
             tracing::info!(vault = %root.display(), "corpus resolved");
 
             let config = Config::load(&root)?;
-            scan::run(&root, &config)
+            scan::run(&root, &config, scan::Options { json, verbose })
         }
     }
 }
