@@ -415,4 +415,26 @@ Recorded here (not in `docs/notes/01-m1.md`) so the journal stays the author's o
 | F-6 | `timeless` and `schema_version` are **not aliasable**. | They are janus-adjacent keys with one agreed spelling. Aliasing them would invent a vocabulary, the opposite of §6.3's configurable-alias purpose (which exists for keys *other tools* already write). |
 | F-7 | `read()` returns borrowed views (`FrontmatterRead<'a>`), not owned copies. | The caller already owns the file bytes; copying the body and raw block per document doubles peak memory for no benefit. This is the `&str`/lifetime exercise the M1 plan asked for. |
 
-**Split note:** Phase 3 was planned as one unit but exceeds the 600-line budget, so it ships as 3a (isolate + read the block) and 3b (resolve metadata + derive identity). The seam is real: 3a is `bytes → Frontmatter`, 3b is `Frontmatter + fs facts + config → Document + DocId`.
+**Split note:** Phase 3 was planned as one unit but exceeds the 600-line budget, so it ships in three parts: 3a
+(isolate + read the block), 3b (resolve metadata into a `Document`, §9 below) and 3c (the §6.4 identity ladder). The seam
+is real: 3a is `bytes → Frontmatter`, 3b is `&DiscoveredFile + &Config → Document`, and 3c is the second pass
+`&mut [Document]` that decides identity across the whole set.
+
+## 9. Implementation log — Phase 3b (metadata resolution)
+
+Phase 3 was split twice: 3a isolates and reads the block, **3b resolves metadata into a `Document`**, and 3c derives
+identity (the §6.4 ladder over the whole document set). The seam is the function signature: 3b is
+`&DiscoveredFile + &Config → Document`, 3c is `&mut [Document] → ()`.
+
+| # | Decision | Why |
+|---|---|---|
+| R-1 | The resolver lives in **`src/vault/resolve.rs`**, not `src/vault/document.rs`. | `Document` already lives in `src/document.rs`; the resolver is a vault-side *read* step (`vault` parses, `document` is the model), and putting it next to `frontmatter` makes the 3a → 3b pipeline visible. |
+| R-2 | **`Document.shared_with` is a new field** (deduplicated, trimmed, first-seen order). | §6.12 rule 2 defines it as a set and phase 4's DTO emits it, but the model had nowhere to put the resolved form. `Document.frontmatter` stays verbatim: the raw view records what the file said, the resolved field records what the engine concluded. |
+| R-3 | Until 3c runs, `id`/`id_source` carry the ladder's **weakest rung (`rel_path`)** — never a guess at a stronger one. | SPEC §6.2 makes `id` non-optional, so 3b must put *something* there. Rel_path is the rung the ladder itself falls back to, it is always well-defined, and 3c overwrites every document, so the provisional value can never be mistaken for a resolved ladder result in output. |
+| R-4 | A filename date requires a **separator or the end of the stem** after the ten-byte prefix. | `2024-11-02-postgres` is a date plus a slug; `2024-11-02notadate` is a version string. Treating the latter as a date would give a document a confident wrong `date_source: filename`. |
+| R-5 | A **blank** `title`/`type`/`status`/`scope` counts as absent, not as a declared empty value — and produces no note. | `title: ""` is a formatting accident, not a claim. Notes are for *survivable irregularities a reader must know about*; "the author left this blank" is the documented default path, and a note per blank field would bury the real ones. Invalid non-blank values still note (R-6). |
+| R-6 | Scope is **normalised before validation** (trim, ASCII-lowercase, collapse whitespace), so `ORG:Acme` is valid and `org acme` is not. | §6.12 rule 1 lists normalisation and validation in that order. ASCII-only folding is deliberate: the valid alphabet is ASCII, and Unicode lowercasing can turn one character into two. |
+| R-7 | `size`, `mtime` and `content_hash` come from the **read snapshot**, not from `DiscoveredFile`. | They must describe the bytes that were actually hashed and parsed. A `git checkout` between walk and read would otherwise produce a document whose hash, size and mtime disagree. |
+| R-8 | Read failures come back as **`ReadSkip { rel_path, note }`**, not `JanusError`. | A scan is a batch: one unreadable note must not abort the corpus, and the caller already has the `DiscoveredFile` it passed in. Keeping the reason as a `DocNote` means skips and document irregularities share one vocabulary in reports. |
+| R-9 | `effective_from`/`effective_to` are **parsed only**; not derived from `date` or `mtime`. | §6.10 derives the window from the supersession chain, which is M5's job. A read must not invent valid time — that is the one field where a wrong guess changes what an agent believes was true on a date. |
+| R-10 | An unparseable frontmatter date falls through **silently** (no `InvalidDate` note). | The information is discarded inside 3a's `date_value`, so reporting it would mean re-parsing the block in 3b. `date_source` already tells a reader the frontmatter date was not used, and M5's `doctor` is the right place to promote it. Deliberately deferred, not forgotten. |
