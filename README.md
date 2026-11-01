@@ -48,6 +48,7 @@ normalized text alone, so editing frontmatter or renaming a file re-keys nothing
 - [docs/m1-breakdown.md](docs/m1-breakdown.md) — the M1 phase plan and settled decisions.
 - [docs/m2-breakdown.md](docs/m2-breakdown.md) — the M2 phase plan, the chunking rules, and
   the decisions taken while building them.
+- [docs/ideas.md](docs/ideas.md) — parked ideas. Not plans, not decisions.
 
 ## Gates
 
