@@ -125,9 +125,9 @@ Newtypes per the M1 learn plan: `DocId`, `ChunkId`, plus a `Config` newtype is o
 `serde_yaml_ng` (YAML 1.1, recursive) was the initial default but was replaced by `oneyaml` 1.2 after review — zero
 `unsafe`, 402/402 conformance, iterative + bounded, YAML 1.2.2, and its lossless `Document` API is the M7 patcher's
 future home (SPEC §14 flags span-preserving patching as the project's highest-risk item). If you hit an oneyaml bug,
-record it in `docs/notes/01-m1.md` and report upstream; the fail-open contract prevents it from corrupting a scan.
+record it in the phase log below (§12) and report upstream; the fail-open contract prevents it from corrupting a scan.
 
-Record each settled decision in `docs/notes/01-m1.md` per §12.3.3 (≈10 honest lines, including “what would I do differently”).
+Record each settled decision in the phase log below (§6 onward), not in a separate journal (AGENTS.md).
 
 ---
 
@@ -166,7 +166,7 @@ tolerated, and no behavior beyond parsing.
 `docs/m1-breakdown.md` Phase 1. Read `SPEC.md` §6.6.1, §16.1, §11-M1, and `src/config.rs` first. Add serde/toml/oneyaml
 deps with one-line justifications. All structs `#[derive(…)]` + `#[serde(default)]`; no `deny_unknown_fields`; no `unwrap()`
 in lib code; `cargo clippy -- -D warnings` must pass; tests first for anything with a rule. Design conversation output goes
-to `docs/notes/01-m1.md`.”
+to the phase log in `docs/m1-breakdown.md` (§6 onward).”
 
 **Accept:** `cargo test` green; existing `tests/cli_init.rs` untouched and passing.
 
@@ -316,7 +316,7 @@ without panicking.
 
 ## Phase 5 — Fixture vault, goldens, docs, polish (½–1 day)
 
-**Goal:** committed ugly fixture vault (§10), golden tests, CI green, `docs/notes/01-m1.md`, clean clippy.
+**Goal:** committed ugly fixture vault (§10), golden tests, CI green, phase-log decisions (§12), clean clippy.
 
 **Build:**
 1. `tests/fixtures/vault/` (git-tracked, §10 requirements exactly): mixed CRLF/LF file(s), a BOM file, no-frontmatter doc,
@@ -330,7 +330,7 @@ without panicking.
 4. Polish gates: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (incl. `clippy::unwrap_used` warn per §10),
    `cargo test --all-targets`, `cargo doc` with `#![warn(missing_docs)]` on public items (SPEC §10), Windows
    `cargo check --target x86_64-pc-windows-msvc` (soft CI job exists — keep it green; install target via rustup if local).
-5. `docs/notes/01-m1.md` (§12.3.3: what was built, what confused, what now understood, what would be done differently).
+5. Record phase-5 decisions in §12 of this file (T-1…); do **not** create `docs/notes/01-m1.md` (AGENTS.md retired that journal).
 6. Update `README.md` if it claims “no code yet” (it does — M1 changes that).
 
 **Accept:** all gates green; a fresh `janus init && janus scan --json` on the fixture vault prints the expected doc list.
@@ -360,7 +360,7 @@ without panicking.
 3. `janus scan --json` is deterministic, versioned, and body-free.
 4. No index written; no vault mutation; no `unwrap`/`expect` in lib code; clippy `-D warnings` clean on macOS + Linux CI;
    Windows `cargo check` still compiles.
-5. `docs/notes/01-m1.md` exists and is honest.
+5. Phase-5 decisions and deviations are recorded in §12 of this file; no `docs/notes/01-m1.md` (AGENTS.md).
 6. Suggested commit sequence: `P1 config`, `P2 walk+confinement`, `P3 frontmatter+resolution`, `P4 scan CLI`,
    `P5 fixtures+goldens+docs` — each with a real message, each green.
 
@@ -368,7 +368,7 @@ without panicking.
 
 ## 6. Implementation log — decisions settled while building Phase 1
 
-Recorded here (not in `docs/notes/01-m1.md`) so the journal stays the author's own reflection.
+Recorded here so settled decisions stay with the phase plan, not in a separate journal.
 
 | # | Decision | Why |
 |---|---|---|
@@ -456,7 +456,7 @@ identity (the §6.4 ladder over the whole document set). The seam is the functio
 | J-11 | `--verbose` adds only `skipped_entries` (JSON) / indented skip lines (human). | The stable part of the report stays stable under a flag that is explicitly for debugging. |
 
 **Deferred to phase 5:** the `insta` golden over the committed fixture vault (the fixture does not exist yet; phase 4 asserts on
-`serde_json::Value` instead), plus the non-UTF-8 fixture file, `docs/notes/01-m1.md` and the README refresh.
+`serde_json::Value` instead), the non-UTF-8 fixture file and the README refresh. All arrived in phase 5; decisions in §12.
 
 ## 11. Implementation log — Phase 3c (identity derivation)
 
