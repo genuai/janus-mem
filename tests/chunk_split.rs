@@ -69,7 +69,11 @@ fn every_fixture_document_chunks_deterministically() {
     let chunking = chunking(&config);
     let limit = chunking.max_chars.max(1);
     let documents = documents(vault.path());
-    assert_eq!(documents.len(), 13, "fixture document count changed");
+    assert_eq!(
+        documents.len(),
+        common::FIXTURE_DOCUMENTS,
+        "fixture document count changed"
+    );
 
     for document in &documents {
         let (chunks, notes) = chunk_body(document.id, &document.body, &chunking);

@@ -32,6 +32,14 @@ pub const LARGE_REL: &str = "big/2025-03-06-large.md";
 /// Fixture document whose bytes are not valid UTF-8.
 pub const NON_UTF8_REL: &str = "notes/non-utf8.md";
 
+/// How many documents the fixture vault yields: the committed files plus the two
+/// generated ones, minus the non-UTF-8 file (a read skip) and the walk's skips.
+///
+/// One constant rather than a literal in every fixture sweep: adding a fixture is
+/// supposed to change the goldens and this number, not to fail three tests with
+/// the same assertion.
+pub const FIXTURE_DOCUMENTS: usize = 19;
+
 /// A `janus` command ready to configure.
 pub fn janus() -> Command {
     Command::cargo_bin("janus").expect("the janus binary must build for tests")

@@ -306,6 +306,13 @@ Chunk IDs are content-addressed and **do not include `doc_id`**:
 chunk_id = blake3(heading_breadcrumb ‖ 0x00 ‖ normalized_chunk_text)
 ```
 
+Written out precisely: each breadcrumb component is NUL-terminated, and the text
+is prefixed with its own byte length (K-5 in `docs/m2-breakdown.md` §8). Without
+the length prefix, `["a","b"]` + `"x"` and `["a"]` + `"b\0x"` would hash
+identically, and a body may legally contain a NUL byte. `normalized` means LF
+line endings, no trailing whitespace per line, no leading or trailing blank
+lines — nothing else, and never inside a fence (CH-9).
+
 So unchanged chunks reuse their embeddings across edits, moves, renames, and copies — no move detection is required for cache efficiency. Identical text in two documents shares one embedding by construction, which is correct: same text, same vector.
 
 ### 6.5 Chunks
@@ -326,10 +333,15 @@ pub struct Chunk {
     pub id: ChunkId,
     pub doc_id: DocId,
     pub heading_path: Vec<String>,   // interned in the index's string pool
-    pub char_span: (u32, u32),       // byte offsets into the doc body, not chars
+    pub span: (u32, u32),            // BYTE offsets into the doc body, not chars
     pub ordinal: u16,                // 0-based position within the doc; display order only
 }
 ```
+
+The field is `span`, not `char_span` (D48): it is a byte range, the writer and
+`read_document` slice with it, and a name that says "char" invites an off-by-one
+on the first non-ASCII document. `max_chars` is still counted in Unicode scalar
+values — the *limit* is characters, the *addressing* is bytes.
 
 `ordinal` is purely a rendering hint: it lets `read_document` return a document's chunks in source order and gives stable display ordering in results. It is **not** identity — `chunk_id` is the content hash — and it must never be used to match chunks across edits.
 
@@ -1002,6 +1014,8 @@ What we deliberately do **not** do now: no empty graph tables, no entity enum, n
 
 ```
 janus init [--vault PATH]                    # create janus.toml + .janus/, add to .gitignore
+janus scan [--json] [--verbose]              # corpus inventory: metadata, identity, skips
+janus chunks [PATH...] [--json] [--text] [--limit N]   # chunk report; no index, no writes
 janus index [PATHS...] [--rebuild] [--no-embeddings] [--dry-run]
 janus search <QUERY> [--intent current|history|evolution|exhaustive]
                      [--as-of DATE] [--corpus primary|all|<id>]
@@ -1328,6 +1342,8 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | D45 | Cross-scope supersession is allowed only when scopes intersect or one side is global; disjoint links are inert and reported as `doctor` errors | Acme must not be able to retire beta's facts. Refusing a likely mistake is safer than warning and applying it anyway | Yes (`allow_disjoint_supersession`) |
 | D46 | Validity windows and `effective_status` are resolved per query scope set | A global fact superseded only for one org must remain current for the others. This is the semantic cost of allowing intersecting cross-scope supersession | No |
 | D47 | Corpus-local config and workspace config are separate files with disjoint responsibilities ("one setting, one home"); no global index | A corpus must be readable standalone and with its own conventions; a workspace must never reinterpret a corpus's parsing or scoring rules | No |
+| D48 | Chunk ids are `blake3(heading_path ‖ 0x00 ‖ normalized_text)` — the document title and `doc_id` do **not** participate | The default title is the filename stem, so including it would re-key every chunk on a rename. §11-M4 requires a renamed-but-unchanged file to cost *zero* embedding work; content-addressing by text is what makes the embedding cache free across edits, moves, renames and copies | Yes (bump `format_version`, rebuild) |
+| D49 | A body `H1` never becomes the identity-bearing `title`; it enters `heading_path` instead | §6.4 rung 3 keys on the title, so promoting a body heading to the title would let an edit to `# Notes` re-key the whole document — precisely what the identity ladder forbids. The breadcrumb still gets the `H1`; identity does not | Yes |
 
 ### Open questions (to resolve at the milestone in brackets)
 

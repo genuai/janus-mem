@@ -187,6 +187,42 @@ expression: json
     {
       "chunks": [
         {
+          "chars": 160,
+          "end": 160,
+          "heading_path": [
+            "Anchor and alias"
+          ],
+          "id": "7432b006f958ae6982e3c72f2ec73df8610e0a5cef515d01c2e75dea0f4aa975",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "50c490e90f2f022c79837fbe24dcefc8",
+      "notes": [],
+      "rel_path": "notes/anchor-alias.md",
+      "title": "Anchor and alias"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 190,
+          "end": 190,
+          "heading_path": [
+            "Block sequence"
+          ],
+          "id": "9c1d59bc83debee982355924ba5072d5043b33dfb18c317efbf3b4669339d005",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "58d5215272ba7e4c0896e918205167e3",
+      "notes": [],
+      "rel_path": "notes/block-sequence.md",
+      "title": "Block sequence"
+    },
+    {
+      "chunks": [
+        {
           "chars": 88,
           "end": 88,
           "heading_path": [
@@ -201,6 +237,60 @@ expression: json
       "notes": [],
       "rel_path": "notes/bom-note.md",
       "title": "BOM note"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 192,
+          "end": 192,
+          "heading_path": [
+            "Flow mapping"
+          ],
+          "id": "3ea83155824b5ad884459c244bc66cabacb8379addbb7631311e4b22fdcfa9f6",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "016a6dfc23b4ee2be1ff8b0f0b3a8921",
+      "notes": [],
+      "rel_path": "notes/flow-mapping.md",
+      "title": "Flow mapping"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 186,
+          "end": 186,
+          "heading_path": [
+            "Multi-line scalar"
+          ],
+          "id": "ab1512a5c887b61704dc0ab828d6f6c529134cdc4827967b78b4e5dc2d944235",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "c9be92b7587d9a23fcbcb86efae8c3bd",
+      "notes": [],
+      "rel_path": "notes/multiline-scalar.md",
+      "title": "Multi-line scalar"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 170,
+          "end": 170,
+          "heading_path": [
+            "Quoted scalars"
+          ],
+          "id": "9e84e3bf3311f211e1bd26912d298c86784374608a40344120f7faa04e952b22",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "5d134c0ff5ec1f4e5053ceaced41adea",
+      "notes": [],
+      "rel_path": "notes/quoted-scalars.md",
+      "title": "Quoted: a scoped title"
     },
     {
       "chunks": [
@@ -259,6 +349,22 @@ expression: json
     {
       "chunks": [
         {
+          "chars": 295,
+          "end": 295,
+          "heading_path": [],
+          "id": "2fe52b6d0ac8b981de5a91b12f585abf18bad4ab372429f080b79c37f9ad8b62",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "52329f303e3430055fabcd6613dfa40e",
+      "notes": [],
+      "rel_path": "specs/body-starts-with-rule.md",
+      "title": "Body starts with a rule"
+    },
+    {
+      "chunks": [
+        {
           "chars": 90,
           "end": 92,
           "heading_path": [
@@ -282,6 +388,6 @@ expression: json
       "rel_path": "notes/non-utf8.md"
     }
   ],
-  "total_chunks": 15,
+  "total_chunks": 21,
   "vault": "<vault>"
 }
