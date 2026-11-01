@@ -434,6 +434,47 @@ that, the README status line and D48/D49 belong to phase 4's docs commit.
 
 ## 10. Implementation log — Phase 4 (fixtures, goldens, docs)
 
+Settled while building it: six new fixture documents under `notes/` and `specs/`, one extended (`crlf-spec.md`),
+the preservation matrix in `tests/frontmatter_preserve.rs`, both goldens regenerated, and the docs updated. The
+matrix is a **read** matrix: it asserts the contract M7's patcher will rely on and splices nothing.
+
+| # | Decision | Why |
+|---|---|---|
+| F-1 | Six fixtures, one per §7.3 shape: `notes/block-sequence.md`, `notes/flow-mapping.md`, `notes/anchor-alias.md`, `notes/multiline-scalar.md`, `notes/quoted-scalars.md`, `specs/body-starts-with-rule.md`. | Each encodes a case the patcher must splice or refuse, so the corpus doubles as the refusal matrix: block sequence and multi-line scalar are `UnsupportedPatch`, flow mapping and quoted scalar are spliceable *around*, anchor/alias must not be inlined, and the `---` body is the F-2 trap that decides where `span.end` is. |
+| F-2 | `specs/crlf-spec.md` was extended in place with a **block sequence in CRLF** rather than adding a seventh file. | CRLF was already covered; CRLF *plus indentation* was not, and that combination is what a naive `\n`-splitter gets wrong. Extending the existing file also proves the interaction in the one document that already asserts byte-preserved CRLF. |
+| F-3 | The matrix walks the filesystem, not `vault::walk`. | It must cover fixtures the walk excludes (`archive/private/secret.md`, `target/`, `node_modules/`). Exclusion from the corpus says nothing about whether those bytes would survive a patch once admitted, and the excluded files are exactly the ones no other test reads. |
+| F-4 | The central assertion is `prefix + raw + body == file`, not field-by-field equality. | That is invariant I1 in one line: if the reader accounts for every byte, a patch that replaces the raw region cannot lose text. Field checks are then only about *where* the boundaries are. |
+| F-5 | Three `proptest` properties: arbitrary text, a generated fenced block, and CRLF. All assert reconstruction; only the curated fixtures assert that frontmatter was *recognised*. | Recognition over random bytes is not a property anyone can state without defining "valid YAML", and a flaky generator would spend the shrinking budget on the wrong thing. Reconstruction is the invariant M7 depends on, and it holds for any input. |
+| F-6 | Both goldens changed, not just `scan`'s. `golden_chunks__chunks.snap` moved only in `total_chunks` (15 → 21) and gained the new documents: **not one existing chunk id changed**, including `crlf-spec.md`'s, whose frontmatter gained four lines. | Phase 3 did not exist when this phase was planned. The unchanged ids are a free, strong proof of D48/CH-5: editing frontmatter changed the document's `content_hash` and left every chunk id alone, which is exactly the embedding-cache property §11-M4 needs. Worth having in the golden rather than only in a unit test. |
+| F-7 | `SPEC.md` got four edits beyond the plan: §6.4's `chunk_id` formula now spells out the NUL-termination and length prefix (K-5), §9.1 lists `scan` as well as the new `chunks` line, and D48/D49 were added to §15. | A spec that disagrees with the code is worse than no comment: the length prefix is the kind of detail a future reader would "simplify" away. `scan` was missing from §9.1's block even though M1 shipped it, so listing only `chunks` would have implied `scan` was never built. |
+
+| F-8 | The fixture document count is now `common::FIXTURE_DOCUMENTS` instead of a literal in each sweep. | Adding six fixtures failed three tests (`fixture_scan`, `chunk_sections`, `chunk_split`) with the same assertion, which is the second time this has happened. A fixture change is supposed to move the goldens and *one* number; three literals in three crates is a maintenance tax with no value, and the constant names the arithmetic (committed + generated − read skip − walk skips) so the next fixture lands in one place. |
+
+**Deviations from the Phase 4 plan:** six new fixtures plus one extension instead of a file per shape (F-1, F-2);
+the chunks golden moved too (F-6); SPEC §6.4 and §9.1's `scan` line were corrected on top of the planned §6.5,
+§9.1 and §15 edits (F-7); three fixture sweeps needed their document count updated, now through one shared
+constant (F-8). No production code changed in this phase — the only non-test, non-doc edits are SPEC and README.
+
 ## 11. Handoff to M3
 
-<!-- What M3 inherits: chunk accessors, the pipeline seam, what is deliberately still missing. -->
+M3 (inverted index, tokenizer, BM25, `index.bin`, `janus index`) inherits:
+
+* **The chunk accessors.** [`Chunk::text`](src/chunk/split.rs) slices the body from the span,
+  `Chunk::breadcrumb` and `Chunk::embed_text` produce the §6.5-rule-4 breadcrumb (title-free in the chunk,
+  title-prefixed for indexing), and `Chunk::char_count` is the single definition of "length" the report and the
+  limit share. Do not re-derive any of them in the index.
+* **The pipeline seam.** `chunk::dump::run` is one call away from an indexer: `vault::walk` → `resolve_all` →
+  `identity::derive_identity` → `chunk_body` per document. M3 adds persistence after the last step, not a second
+  pipeline (§9.5).
+* **A stable report shape.** `--json` is `"api": 1` with no timestamps; `NoteDto`/`DocNote::dto()` is the one
+  `{code, message}` pair, shared by `scan` and `chunks`. `ReadSkipDto` is still duplicated in each report module:
+  M3 is the third occurrence and the right time to lift it into `vault::resolve` (C-2).
+* **Content-addressed chunk ids** (D48, K-5): a chunk's id depends on `heading_path` and normalized text only, so
+  frontmatter edits, renames and moves re-key nothing. The M4 embedding cache gets this for free — but only if M3
+  persists `id` and the span, and never the text (§8.3 rule 1).
+* **What is deliberately still missing:** no index, no tokenizer, no string pool, no `index.bin`, no `janus index`,
+  no scoring, no `--as-of`, no embeddings, no `read_document`, no patcher, no writes. M2 persisted nothing, so
+  `format_version` is still whatever M3 first writes.
+* **The fixture corpus is now the golden corpus.** `tests/fixtures/vault/` holds the §7.3 splice shapes and
+  `tests/frontmatter_preserve.rs` pins their read-side contract; M7 adds the write side against the same files.
+  Adding a fixture changes both goldens and `tests/fixture_scan.rs`'s list, by design (F-6).

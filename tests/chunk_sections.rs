@@ -114,7 +114,11 @@ fn assert_well_formed(document: &Document, sections: &[Section]) {
 fn every_fixture_document_scans_into_well_formed_sections() {
     let vault = common::fixture_vault();
     let documents = documents(vault.path());
-    assert_eq!(documents.len(), 13, "fixture document count changed");
+    assert_eq!(
+        documents.len(),
+        common::FIXTURE_DOCUMENTS,
+        "fixture document count changed"
+    );
 
     for document in &documents {
         let sections = sections(&document.body);

@@ -41,10 +41,16 @@ fn fixture_parses_every_ugly_case_into_the_expected_documents() {
             "decisions/2025-03-01-broken-link.md",
             "notes/2025-03-05-unknown-type.md",
             "notes/2025-03-07-no-frontmatter.md",
+            "notes/anchor-alias.md",
+            "notes/block-sequence.md",
             "notes/bom-note.md",
+            "notes/flow-mapping.md",
+            "notes/multiline-scalar.md",
+            "notes/quoted-scalars.md",
             "notes/undated.md",
             "notes/yaml-comments.md",
             "notes/überlegungen zu cache.md",
+            "specs/body-starts-with-rule.md",
             "specs/crlf-spec.md",
         ],
         "sorted by rel_path; generated large/non-UTF-8 files included:\n{report}"
@@ -197,7 +203,11 @@ fn every_document_reports_a_date_source() {
         })
         .collect();
 
-    assert_eq!(documents.len(), 13, "{report}");
+    assert_eq!(
+        documents.len(),
+        common::FIXTURE_DOCUMENTS,
+        "fixture document count changed"
+    );
     assert_eq!(
         sources.iter().filter(|source| **source == "mtime").count(),
         1,
