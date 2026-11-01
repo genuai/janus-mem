@@ -39,6 +39,7 @@ globset = "0.4.21"
 blake3 = "1.8.7"
 # Windows path normalization
 dunce = "1.0.5"
+pulldown-cmark = { version = "0.13.6", default-features = false }
 
 [dev-dependencies]
 # cli integration testing

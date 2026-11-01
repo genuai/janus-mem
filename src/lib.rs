@@ -11,8 +11,10 @@
 //!
 //! # Layout
 //!
-//! Milestone 1 implements corpus config parsing and document scanning:
+//! Milestone 1 implemented corpus config parsing and document scanning;
+//! milestone 2 adds the chunker:
 //!
+//! * [`chunk`] — the heading-aware chunker: sections with byte spans (M2).
 //! * [`config`] — `janus.toml`, alias resolution, type registry, globs, decay.
 //! * [`document`] — the parsed shape of a document and its resolved metadata.
 //! * [`id`] — `DocId`, `Blake3Hash`, `ChunkId` newtypes.
@@ -22,13 +24,14 @@
 //! * [`error`] — the single error type and its exit-code mapping.
 //! * [`cli`] — the argument surface (no behaviour).
 //!
-//! See `SPEC.md` for the domain model and `docs/m1-breakdown.md` for the phase
-//! plan.
+//! See `SPEC.md` for the domain model, `docs/m1-breakdown.md` and
+//! `docs/m2-breakdown.md` for the phase plans.
 
 #![warn(missing_docs)]
 // Library code must not panic on recoverable errors; tests may unwrap (clippy.toml).
 #![warn(clippy::unwrap_used)]
 
+pub mod chunk;
 pub mod cli;
 pub mod config;
 pub mod document;
