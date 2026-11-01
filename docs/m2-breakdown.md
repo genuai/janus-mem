@@ -364,7 +364,23 @@ SPEC's three conditions, made checkable:
 
 ## 7. Implementation log — Phase 1 (event scan)
 
-<!-- Filled while building. Same shape as docs/m1-breakdown.md §§6–12: one row per decision, with *why*. -->
+Settled while building it: the scanner is `src/chunk/{mod,blocks}.rs` as planned, and the acceptance test
+is `tests/chunk_sections.rs`, which runs the real pipeline (walk → resolve → sections) over the committed
+fixture vault rather than over hand-written strings.
+
+| # | Decision | Why |
+|---|---|---|
+| E-1 | Spans come straight from `pulldown-cmark`'s own `Start`/`End` offsets; the planned “extend to end of line” step is **dropped**. | Verified against 0.13.6: every block kind's event range already covers the closing fence, the last table row and the trailing newline. Re-deriving the end by scanning for a newline would be a second implementation of the parser's block boundaries, and its failure mode — an end after the last content line but *before* the closing fence — is exactly the “fence is split” bug this milestone forbids. |
+| E-2 | A heading opens a section only when **no block is open**; a heading inside a quote or a list item does not. | §6.5 rule 1 says “split by ATX headings”, but the intent is document sections. `> # Quoted` is a quote's content, and promoting it to an H1 would make everything after the quote its child. `pulldown-cmark` already refuses to see a fenced `#` as a heading, so nesting is the only structural rule left for us to enforce. |
+| E-3 | Span type is `Range<usize>` internally; `Chunk.span` stays `(u32, u32)`. | Internal code slices and compares, where `.start`/`.end` beats `.0`/`.1`, and nothing internal is serialized. The chunk tuple is the persisted/DTO shape that must match §6.5, so the conversion happens once at the boundary. |
+| E-4 | Containers that are never emitted (items, footnote definitions, nested headings) push a `Frame::Nested` marker. | The stack must stay balanced so each block-level `End` pops exactly one frame. A separate depth counter would be a second thing to keep in sync; `Nested` carries no state beyond being a frame. |
+| E-5 | Heading text is flattened and whitespace-collapsed (`split_whitespace().join(" ")`). | A heading's text is a breadcrumb component, not rendered content: inline code and emphasis must not leak markup (`` # `a` *b* `` → `a b`), and a heading wrapped across lines must not put two spaces in a breadcrumb. |
+| E-6 | Setext headings are sections, and `text` followed by `---` is an H2, not a thematic break. | The event stream yields them as `Heading`, so ignoring them would mis-scope every section below. CH-3 is confirmed by a test rather than assumed — and it is the same `---` ambiguity F-2 resolves at offset 0. |
+| E-7 | Sections with no blocks are dropped in `finish()`, not by the splitter. | §6.5 rule 3 drops chunks with no text; doing it one layer earlier means no consumer has to special-case `blocks.is_empty()`. A heading that only names its children still reaches their `heading_path`, because the path is built before the drop. |
+| E-8 | `IndentedCode` is its own `BlockKind` and is atomic, like a fenced block. | Indented code has no closing marker, so it needs no fence *protection* — but a chunk starting mid-block is still a fragment with no context. Keeping the kind distinct preserves the parser's own distinction (it costs nothing) while `is_atomic` answers the splitter's only question. |
+
+**Deviations from the Phase 1 plan:** only E-1 and E-3, both narrowings rather than widenings; the planned
+`extend_to_line_end` helper does not exist because it turned out to be unnecessary.
 
 ## 8. Implementation log — Phase 2 (splitting + ids)
 
