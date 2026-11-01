@@ -1,0 +1,4 @@
+# target/ is also hard-excluded by the walk; .gitignore must work too (§6.1).
+target/
+# A gitignored Markdown file must be counted as ignored_by_git.
+scratch/

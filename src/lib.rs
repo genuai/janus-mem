@@ -26,6 +26,8 @@
 //! plan.
 
 #![warn(missing_docs)]
+// Library code must not panic on recoverable errors; tests may unwrap (clippy.toml).
+#![warn(clippy::unwrap_used)]
 
 pub mod cli;
 pub mod config;
