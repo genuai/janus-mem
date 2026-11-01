@@ -158,6 +158,13 @@ retired; nobody read them. Long-lived, project-level decisions belong in
 - Commit email must stay the noreply address; it is pinned in local git config.
 - A local `pre-commit` hook runs fmt + clippy. It lives in `.git/hooks` and is
   not cloned, so CI is the real gate.
+- **Delete the branch when the PR merges**, on GitHub and locally:
+  `gh pr merge <n> --merge --delete-branch`, then `git fetch --prune`. The remote
+  keeps `main` and open PR branches only — a merged branch is a stale ref, and this
+  repository already had six of them. Check out `main` and pull afterwards so the
+  next phase branches from merged code.
+- Never delete a branch whose commits are not in `main`; check with
+  `git merge-base --is-ancestor origin/<branch> origin/main`.
 
 ## Hard "never" list
 
