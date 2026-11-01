@@ -408,6 +408,30 @@ limit) and K-7 (a third note variant). No public shape changed.
 
 ## 9. Implementation log — Phase 3 (`janus chunks`)
 
+Settled while building it: the command is `src/chunk/dump.rs`, with the surface tests in `tests/cli_chunks.rs` and
+an `insta` golden in `tests/golden_chunks.rs` over the committed fixture vault. `scan`, `chunks` and every later
+report now share `document::NoteDto` instead of each defining the same `{code, message}` pair.
+
+| # | Decision | Why |
+|---|---|---|
+| C-1 | The report's `api` is `scan::API_VERSION`, imported rather than re-declared. | AGENTS.md's versioning table has **one** API version for every `--json` response, not one per command. Two constants in two modules are two things to forget to bump together. |
+| C-2 | `NoteDto` and `DocNote::dto()` live in `document.rs`; `scan` was switched to them and its private copy deleted. `ReadSkipDto` was **left duplicated** on purpose. | This is the second occurrence in a different module and M3 would be the third, which is exactly the signal AGENTS.md's DRY rule names. §9.5 asks for one DTO module; putting the pair on the note type itself is the smallest version of that, and shape and field order are unchanged, so M1's `scan` golden did not move. `ReadSkipDto` was attempted the same way and reverted: it is ten lines that would have to be *deleted* from `scan` and re-added in `vault::resolve`, and the PR-size script counts a deleted line as a logic line, so the move cost ~40 budget lines for a ten-line saving. The third occurrence (M3) is the point to do it, with the budget to match. |
+| C-3 | `total_chunks` counts chunks **emitted**, and `truncated` appears only where `--limit` actually hid chunks (a `false` flag is omitted). | A consumer sums `docs[*].chunks` for its own total; a report-level number that counted hidden chunks would disagree with the rows right above it. Omitting `false` keeps an untruncated report free of a key nobody needs. |
+| C-4 | Chunk notes go on the **document** entry, after the resolve/identity notes; the per-chunk `"notes"` in the phase-2 sketch of the DTO does not exist. | CH-13 already settled this: “this document contains an indivisible 3 000-character fence” is a property of the document. One flat list also means `janus chunks` shows *everything* odd about a document in one place instead of splitting irregularity across two levels. |
+| C-5 | `chars` comes from a new `Chunk::char_count`, which shares `count_chars` with the splitter; the renderer never recounts on its own. | A report that counted the `\r` of a CRLF pair would show `chars = 1801` against `max_chars = 1800` for a document that is merely checked out with `autocrlf` — a limit violation that is not one. The rule lives once, in `split`. |
+| C-6 | A `PATH` argument is confined first, then matched by `rel_path`. A relative path is read **twice** — against the working directory, then against the corpus root — and the escape refusal (exit 4) outranks “no document” (exit 1, new `JanusError::DocumentNotInCorpus`). | Both readings are things a caller means: `janus chunks notes/undated.md` from inside `decisions/` wants the working directory, while a `rel_path` copied out of a report wants the corpus root. Both spellings are confined, so neither is a way out. Naming the corpus-root reading is what keeps the “excluded” answer (`archive/private/secret.md`, exit 1) distinct from the “escape” answer (exit 4). Matching by `rel_path` rather than by absolute path also keeps a document reached through a symlink addressable by the link's path, which is how M1's walk identifies it. |
+| C-7 | `read_skips` is in the DTO, although the phase plan's sketch omitted it. | Phase 3's own test — “the non-UTF-8 fixture still appears only as a read skip and never reaches the chunker” — is only assertable if the report carries the skip. It is also the difference a caller needs: a file that was admitted then failed to decode is a different problem from one the walk excluded. |
+| C-8 | The golden redacts exactly one field, the absolute `vault` root of the temporary fixture copy. | The plan said “redacting nothing”, and for ids, spans, ordinals and ordering that holds — the snapshot is a real golden, not a shape check. The corpus root cannot be machine-independent, and redacting more (doc ids, titles) would stop the snapshot noticing a real change (J-7). |
+| C-9 | `--text` renders a preview with whitespace collapsed to single spaces and capped at 120 characters plus `…`; human rows are `ordinal id[..8] bytes chars breadcrumb`, with `-` for the preamble's empty breadcrumb, and notes print as `! code: message` under the document. | One chunk then occupies one terminal row, and the cap is **marked**: a silent cut would misreport the text, while an uncapped one lets a 3 000-character fence flood a shell. The `-` matters because an empty column reads like a rendering bug, and the preamble chunk is the only chunk with no heading. |
+| C-10 | `chunking` reports the values **as configured in `janus.toml`**, not the clamped values the splitter used. | It answers “what did the config say”, which is what a reader checking a surprising `oversized_block` needs. A clamped run still says so loudly through a note on the document, and inventing a second “effective config” DTO for a case a note already covers would be a contract to version for nothing. |
+
+**Deviations from the Phase 3 plan:** the DTO gained `read_skips` (C-7) and lost the per-chunk `notes` (C-4); the
+`vault` field is redacted in the golden (C-8); `NoteDto` moved to `document.rs` (C-2); `Chunk::char_count` and
+`count_chars` were extracted (C-5); `PATH` resolution reads a relative path twice (C-6); and the human
+“unreadable” line is per file (`unreadable: <rel_path> (<code>)`) instead of `scan`'s per-code counts, because
+here the question is which document is missing, not how many. `janus chunks` is not listed in SPEC §9.1 yet —
+that, the README status line and D48/D49 belong to phase 4's docs commit.
+
 ## 10. Implementation log — Phase 4 (fixtures, goldens, docs)
 
 ## 11. Handoff to M3

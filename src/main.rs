@@ -10,7 +10,7 @@ use clap::Parser;
 use janus_mem::cli::{Cli, Command};
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
-use janus_mem::{scan, vault};
+use janus_mem::{chunk, scan, vault};
 use tracing_subscriber::EnvFilter;
 
 fn init_tracing() {
@@ -48,6 +48,30 @@ fn run(cli: Cli) -> Result<(), JanusError> {
 
             let config = Config::load(&root)?;
             scan::run(&root, &config, scan::Options { json, verbose })
+        }
+
+        // Chunking is a read command too: it shares the discovery, resolution and
+        // identity pipeline with `scan` and stops one step later (M2 phase 3).
+        Command::Chunks {
+            json,
+            text,
+            limit,
+            paths,
+        } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let config = Config::load(&root)?;
+            chunk::dump::run(
+                &root,
+                &config,
+                chunk::dump::Options {
+                    json,
+                    text,
+                    limit,
+                    paths,
+                },
+            )
         }
     }
 }

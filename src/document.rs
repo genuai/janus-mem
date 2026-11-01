@@ -455,6 +455,32 @@ impl fmt::Display for DocNote {
     }
 }
 
+/// A [`DocNote`] in the shape every `--json` report emits: a stable machine code
+/// plus one human sentence (§9.4).
+///
+/// Deliberately one type rather than one per command. Notes are the engine's
+/// shared vocabulary for tolerated irregularities (K-7), so `scan`, `chunks` and
+/// every later report label them identically and a consumer switches on `code`
+/// once (C-2 in `docs/m2-breakdown.md`).
+#[derive(Debug, Serialize)]
+pub struct NoteDto {
+    /// Stable machine-readable code; never localized, never reworded.
+    pub code: &'static str,
+    /// One human sentence, naming the offending value where there is one.
+    pub message: String,
+}
+
+impl DocNote {
+    /// Renders this note for a report.
+    #[must_use]
+    pub fn dto(&self) -> NoteDto {
+        NoteDto {
+            code: self.code(),
+            message: self.message(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

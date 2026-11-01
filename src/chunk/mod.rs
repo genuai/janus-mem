@@ -8,6 +8,8 @@
 //!   heading tree with **byte** spans (milestone 2 phase 1).
 //! * [`split`] turns sections into [`split::Chunk`]s, applying the size limit,
 //!   overlap and the content-addressed chunk id (milestone 2 phase 2).
+//! * [`dump`] is the `janus chunks` command, which runs the pipeline and prints
+//!   the chunk metadata (milestone 2 phase 3).
 //!
 //! Splitting the parser layer from the policy layer is what keeps the borrowing
 //! tractable: the event stream borrows from the body, and it is consumed once,
@@ -16,6 +18,7 @@
 //! slice, compare and reorder freely.
 
 pub mod blocks;
+pub mod dump;
 pub mod split;
 
 pub use blocks::{BlockKind, BlockSpan, Section, sections};

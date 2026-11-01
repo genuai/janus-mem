@@ -82,6 +82,16 @@ impl Chunk {
         body.get(start..end).unwrap_or_default()
     }
 
+    /// The chunk's length in characters, counted exactly as the splitter counts
+    /// it: the CR of a CRLF pair is not content (§6.5, CH-9).
+    ///
+    /// This is what `janus chunks` reports as `chars`, so a chunk can be compared
+    /// against `max_chars` without re-deriving the rule in the renderer.
+    #[must_use]
+    pub fn char_count(&self, body: &str) -> usize {
+        count_chars(self.text(body))
+    }
+
     /// The heading path as one string, e.g. `"Architecture › Caching"`.
     ///
     /// Display-friendly and title-free: the title is prepended by
@@ -349,10 +359,17 @@ fn trim_span(body: &str, span: Range<usize>) -> Option<Range<usize>> {
 /// vault checked out with `autocrlf` chunk exactly like one with LF, which in
 /// turn makes chunk ids and boundaries identical across the two (CH-9, §8.7).
 fn chars_in(body: &str, span: &Range<usize>) -> usize {
-    body[span.clone()]
-        .chars()
-        .filter(|character| *character != '\r')
-        .count()
+    count_chars(&body[span.clone()])
+}
+
+/// Characters in `text`, not counting the CR of a CRLF pair.
+///
+/// The single definition of "chunk length", shared by the splitter and by
+/// [`Chunk::char_count`]: if a report counted carriage returns the limit would
+/// appear to be violated by a document that is merely checked out with
+/// `autocrlf`.
+fn count_chars(text: &str) -> usize {
+    text.chars().filter(|character| *character != '\r').count()
 }
 
 /// Packs one section's atoms into chunks, appending to `chunks`.

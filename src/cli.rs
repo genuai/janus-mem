@@ -47,4 +47,23 @@ pub enum Command {
         #[arg(long)]
         verbose: bool,
     },
+
+    /// Report the chunks the corpus produces, without building an index
+    Chunks {
+        /// Emit one JSON object on stdout instead of the table
+        #[arg(long)]
+        json: bool,
+
+        /// Append a truncated preview of each chunk's text
+        #[arg(long)]
+        text: bool,
+
+        /// Cap the chunks reported per document
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+
+        /// Restrict the report to these corpus paths
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
 }

@@ -1,0 +1,287 @@
+---
+source: tests/golden_chunks.rs
+expression: json
+---
+{
+  "api": 1,
+  "chunking": {
+    "max_chars": 1800,
+    "overlap": 0.15
+  },
+  "corpus_id": "fixtures",
+  "docs": [
+    {
+      "chunks": [
+        {
+          "chars": 105,
+          "end": 105,
+          "heading_path": [
+            "Corpus notes"
+          ],
+          "id": "0811f38cf16a439e30ab7d6a64b4600f7a568a0dbdb6a80150aeebdffe3c57c6",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "2a4fe14a1122d5d726c6d12e5656e935",
+      "notes": [],
+      "rel_path": "2025-01-05-corpus-notes.md",
+      "title": "Corpus notes"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 1732,
+          "end": 1733,
+          "heading_path": [
+            "Large document"
+          ],
+          "id": "66a7ab8f6631b0cba307e2d9ac8bff6b7427a12fef2004cf9c9369542be1646a",
+          "ordinal": 0,
+          "start": 1
+        },
+        {
+          "chars": 1714,
+          "end": 3053,
+          "heading_path": [
+            "Large document"
+          ],
+          "id": "bb423140f95df972fee8110b67f80df9d1c2b4bc26d12f52db2494434f6bcc92",
+          "ordinal": 1,
+          "start": 1339
+        },
+        {
+          "chars": 1714,
+          "end": 4373,
+          "heading_path": [
+            "Large document"
+          ],
+          "id": "bb423140f95df972fee8110b67f80df9d1c2b4bc26d12f52db2494434f6bcc92",
+          "ordinal": 2,
+          "start": 2659
+        }
+      ],
+      "id": "09d01188d4ad18caca871caaeb0618d2",
+      "notes": [],
+      "rel_path": "big/2025-03-06-large.md",
+      "title": "Large document",
+      "truncated": true
+    },
+    {
+      "chunks": [
+        {
+          "chars": 114,
+          "end": 114,
+          "heading_path": [
+            "Postgres cache"
+          ],
+          "id": "854fee3dccd0d87d80df9a0f2b11aef4f6d9e2f6edd27ac58de59b7aa2ee01ca",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "2e85ad7f373d6a46959b68701c2fba40",
+      "notes": [],
+      "rel_path": "decisions/2024-11-02-postgres-cache.md",
+      "title": "Postgres cache"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 40,
+          "end": 40,
+          "heading_path": [
+            "Redis cache"
+          ],
+          "id": "4a607daa43c0441fe93858621648ca907843e34c3f0c56844f14372a71ef4624",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "d97e653f4a2dd60ea5d426b27d260e63",
+      "notes": [],
+      "rel_path": "decisions/2024-12-01-redis-cache.md",
+      "title": "Redis cache"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 81,
+          "end": 81,
+          "heading_path": [
+            "Cache revisited"
+          ],
+          "id": "c6bcc6719b62c49c66e8dc99fc4c3cf22b6f15c1b3fe3f1f27e5e4d788a75396",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "c64418894b25cfc133c800f916942b66",
+      "notes": [],
+      "rel_path": "decisions/2025-02-01-cache-revisited.md",
+      "title": "Cache revisited"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 60,
+          "end": 60,
+          "heading_path": [
+            "Broken link"
+          ],
+          "id": "ad1976ffd8df6e2da531eb034f708fb09da44ab9b8cfd16d4c7405f688884bda",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "820044991ccc5b759670c9a4ac7b0e34",
+      "notes": [],
+      "rel_path": "decisions/2025-03-01-broken-link.md",
+      "title": "Broken link"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 183,
+          "end": 183,
+          "heading_path": [
+            "Unknown type"
+          ],
+          "id": "5c1f84eb783c1f041e4265b3f9e490409027d067b9e524aa840baa4c6dcba57c",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "58348ba891d48e66b6266adb712e8e2b",
+      "notes": [
+        {
+          "code": "unknown_type",
+          "message": "unknown type `speculative`; using the fallback weight 0.80"
+        },
+        {
+          "code": "unknown_status",
+          "message": "unknown status `frozen`; using the fallback factor 0.8"
+        }
+      ],
+      "rel_path": "notes/2025-03-05-unknown-type.md",
+      "title": "Unknown type"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 94,
+          "end": 94,
+          "heading_path": [
+            "No frontmatter"
+          ],
+          "id": "0987218af5af71762e15b1ad55353565fb3c77cb519ecdeaad9d672ed8a546ad",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "8280bfc9a69199ba7f2274ab53ad6085",
+      "notes": [],
+      "rel_path": "notes/2025-03-07-no-frontmatter.md",
+      "title": "2025-03-07-no-frontmatter"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 88,
+          "end": 88,
+          "heading_path": [
+            "BOM note"
+          ],
+          "id": "3825a1aae8f78fd43295a5fb1a93bca5d90e3bb3a47ee777c82bf73f1591bf05",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "8ba81b1ad4f14148351aa6c5f08941e9",
+      "notes": [],
+      "rel_path": "notes/bom-note.md",
+      "title": "BOM note"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 216,
+          "end": 216,
+          "heading_path": [
+            "Undated note"
+          ],
+          "id": "5e81884a48b13362fe97bb847f27b96eec2dc119dd8061cdcb49b13f8d1af921",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "46a3c52228dd60c4e334e1f8ac92480b",
+      "notes": [],
+      "rel_path": "notes/undated.md",
+      "title": "Undated note"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 104,
+          "end": 104,
+          "heading_path": [
+            "YAML comments"
+          ],
+          "id": "2a2345ba63209a3f656bb7632295f756311f87b4d1af32a82b84f409ebceaac4",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "7a24b1ff1a4963776b0f300fde68d4a8",
+      "notes": [],
+      "rel_path": "notes/yaml-comments.md",
+      "title": "YAML comments"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 117,
+          "end": 118,
+          "heading_path": [
+            "Überlegungen zu Cache"
+          ],
+          "id": "9d82a572d0bd03a49bc4106ff1b590185c3a978c03d159e401b1aed3150e3c66",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "c880c35f324b0c0dd5f242f086ac77d3",
+      "notes": [],
+      "rel_path": "notes/überlegungen zu cache.md",
+      "title": "überlegungen zu cache"
+    },
+    {
+      "chunks": [
+        {
+          "chars": 90,
+          "end": 92,
+          "heading_path": [
+            "CRLF spec"
+          ],
+          "id": "e450641137545c584871b6c0bf3bfc21be3bd4f5fef623698014c4491bb2ae3d",
+          "ordinal": 0,
+          "start": 0
+        }
+      ],
+      "id": "fe4582ebaf16653b9d6c5f91c214cadc",
+      "notes": [],
+      "rel_path": "specs/crlf-spec.md",
+      "title": "CRLF line endings"
+    }
+  ],
+  "read_skips": [
+    {
+      "message": "file is not valid UTF-8; skipped",
+      "reason": "non_utf8_content",
+      "rel_path": "notes/non-utf8.md"
+    }
+  ],
+  "total_chunks": 15,
+  "vault": "<vault>"
+}

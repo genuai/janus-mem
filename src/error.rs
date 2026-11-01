@@ -118,6 +118,17 @@ pub enum JanusError {
         source: io::Error,
     },
 
+    /// A `PATH` argument resolved inside the corpus but matched no admitted
+    /// document: it is excluded by config, hidden, not Markdown, or could not be
+    /// read. Not a refusal — the path is legal and the vault is untouched — so
+    /// it is a runtime error that names the path, which is the only way a caller
+    /// can tell "excluded" from "typo".
+    #[error("no document at {path} in this corpus (excluded, hidden, not Markdown, or unreadable)")]
+    DocumentNotInCorpus {
+        /// The path as the user supplied it.
+        path: PathBuf,
+    },
+
     /// A file could not be written.
     #[error("failed to write {path}")]
     Write {
@@ -151,6 +162,7 @@ impl JanusError {
             Self::VaultResolve { .. }
             | Self::VaultNotFound { .. }
             | Self::PathResolve { .. }
+            | Self::DocumentNotInCorpus { .. }
             | Self::ChangedDuringRead { .. }
             | Self::ConfigMissing { .. }
             | Self::ConfigRead { .. }
