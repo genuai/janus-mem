@@ -384,6 +384,28 @@ fixture vault rather than over hand-written strings.
 
 ## 8. Implementation log — Phase 2 (splitting + ids)
 
+Settled while building it: the splitter is `src/chunk/split.rs`, with the rule tests in its `#[cfg(test)]`
+module, the invariants in `tests/chunk_properties.rs` (proptest) and the fixture sweep in
+`tests/chunk_split.rs`. The two shrunk proptest inputs live in `tests/chunk_properties.proptest-regressions`
+and stay committed even though they now pass.
+
+| # | Decision | Why |
+|---|---|---|
+| K-1 | **The heading line is an atom**, prepended to the section's blocks before packing. | `Section.blocks` deliberately starts *after* the heading (phase 1), so without this the first chunk of every section would silently lose the `## Decision` line that CH-4 promises. A test caught it immediately; the fix is one span, not a change to `Section`. |
+| K-2 | Atom kinds: **heading / whole block / list item / sentence / word / character**, in that order of preference. | Splitting is only *allowed* at an atom boundary, so "never inside a fence, table or item" is a property of the data rather than a check in the loop. Paragraphs get the finer atoms only when they are already too large, which keeps ordinary documents at one chunk per section. |
+| K-3 | **Bug (found by running the property tests):** `overlap_start` returned the chunk's own first atom when the chunk consisted of exactly one atom, so a document with an oversized fence followed by any content looped forever. Fixed by an `earliest = first + 1` floor, and pinned by `an_oversized_chunk_with_overlap_still_advances`. | The plan predicted this class of bug ("a bug here loops forever"); the guard was written for the multi-atom case only. A hang is the worst failure mode a scanner can have, so the floor is now unconditional and the regression test is the *second* atom after a single-atom chunk — the exact shape that hung. |
+| K-4 | The limit and the boundary search **ignore the CR of a CRLF pair** (`chars_in`, `char_slices`). | A carriage return is line-ending noise, not content. Counting it made an `autocrlf` checkout split at different sentences than an LF checkout, which changed chunk ids for identical documents — precisely what CH-9 exists to prevent. The property test `crlf_bodies_produce_the_same_chunk_ids` is the guard. |
+| K-5 | `chunk_id` NUL-terminates each path component and **length-prefixes the text**. | Without the length prefix, `heading_path = ["a","b"]` with text `"x"` and `["a"]` with text `"b\0x"` hash identically — and a body may legally contain a NUL byte. The prefix costs eight bytes and removes the ambiguity by construction. |
+| K-6 | `normalize` returns `Cow<str>`, borrowing when the text is already clean. | The common case is the borrow (chunks are trimmed and most files are LF), and the M2 learn list names `Cow` explicitly. The slow path is two allocations and only runs for CRLF or trailing whitespace. |
+| K-7 | `DocNote` gained a **third** variant, `TooManyChunks`, beyond CH-13's two. | Ordinal saturation past 65 535 chunks is reachable with a tiny `max_chars`, and silently reusing `u16::MAX` would hide an ordering collapse. One note per document, not per chunk, so it cannot bury the real ones. |
+| K-8 | `OversizedBlock { chars }` reports the **measured chunk length**, and notes are appended in chunk order. | The count is what a reader needs to judge the config; document order keeps the report deterministic. Only an indivisible atom can trigger it, because paragraphs are split down to single characters first — the note is never a rounding error. |
+| K-9 | `embed_text` drops **any** heading equal to the title, not just a first-level one. | `Section.heading_path` stores names, not levels, and levels are not needed for identity — `Undated › Undated` is the thing being avoided, and equality is the property that produces it. A level-based rule would have required a parallel `levels` vector on every `Section` for one display nicety. |
+| K-10 | The 4 GiB check is `body_size_note(len)`, a free function on a length. | The branch is otherwise untestable without allocating four gigabytes; splitting it from `chunk_body` lets `an_oversized_body_is_refused_by_length_not_by_allocation` prove the boundary at `u32::MAX`. |
+
+**Deviations from the Phase 2 plan:** the "unit" concept is called an *atom* (the plan used "unit"), and the
+paragraph splitter prefers sentences before words — both naming-level. Real additions: K-4 (ignoring `\r` in the
+limit) and K-7 (a third note variant). No public shape changed.
+
 ## 9. Implementation log — Phase 3 (`janus chunks`)
 
 ## 10. Implementation log — Phase 4 (fixtures, goldens, docs)

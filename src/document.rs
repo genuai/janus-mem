@@ -362,6 +362,21 @@ pub enum DocNote {
         /// The ambiguous key, rendered for humans.
         key: String,
     },
+    /// One block could not be split and is larger than the configured chunk
+    /// limit (§6.5 rule 2). A fence, table, quote or single list item bigger
+    /// than `max_chars` becomes one oversized chunk; cutting it would corrupt
+    /// what the text means, so the exception is reported instead (CH-6).
+    OversizedBlock {
+        /// The chunk's length in characters.
+        chars: usize,
+    },
+    /// The body is larger than `u32::MAX` bytes, so its chunk spans cannot be
+    /// represented in the §6.5 shape. No Markdown document is that large; the
+    /// note exists so the conversion is a decision, not a truncation.
+    BodyTooLarge,
+    /// The document produced more than `u16::MAX` chunks, so chunk ordinals
+    /// saturate. Ordering stays stable; the last chunks share an ordinal.
+    TooManyChunks,
 }
 
 impl DocNote {
@@ -381,6 +396,9 @@ impl DocNote {
             Self::ChangedDuringRead => "changed_during_read",
             Self::SymlinkEscape { .. } => "symlink_escape",
             Self::DuplicateIdentity { .. } => "duplicate_identity",
+            Self::OversizedBlock { .. } => "oversized_block",
+            Self::BodyTooLarge => "body_too_large",
+            Self::TooManyChunks => "too_many_chunks",
         }
     }
 
@@ -416,6 +434,16 @@ impl DocNote {
             }
             Self::DuplicateIdentity { key } => {
                 format!("identity key `{key}` was ambiguous; fell through to a weaker key")
+            }
+            Self::OversizedBlock { chars } => format!(
+                "a block of {chars} characters could not be split; kept as one oversized chunk"
+            ),
+            Self::BodyTooLarge => {
+                "body is larger than 4 GiB; chunk spans cannot address it, so it was not chunked"
+                    .to_owned()
+            }
+            Self::TooManyChunks => {
+                "more than 65535 chunks; ordinals saturate at the maximum".to_owned()
             }
         }
     }
