@@ -48,6 +48,8 @@ normalized text alone, so editing frontmatter or renaming a file re-keys nothing
 - [docs/m1-breakdown.md](docs/m1-breakdown.md) — the M1 phase plan and settled decisions.
 - [docs/m2-breakdown.md](docs/m2-breakdown.md) — the M2 phase plan, the chunking rules, and
   the decisions taken while building them.
+- [docs/m3-breakdown.md](docs/m3-breakdown.md) — the M3 phase plan: tokenizer, BM25, scoring,
+  the index format, and the retrieval eval.
 
 ## Gates
 
