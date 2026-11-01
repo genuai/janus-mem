@@ -32,7 +32,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
 use crate::config::{CONFIG_FILE, Config};
-use crate::document::Document;
+use crate::document::{DocNote, Document, NoteDto};
 use crate::error::JanusError;
 use crate::vault::resolve::{self, ReadSkip};
 use crate::vault::{self, SkipReason, WalkOptions, WalkResult, identity};
@@ -245,23 +245,9 @@ impl<'a> DocumentDto<'a> {
             size: document.size,
             mtime: rfc3339(document.mtime),
             has_frontmatter: document.raw_frontmatter.is_some(),
-            notes: document
-                .notes
-                .iter()
-                .map(|note| NoteDto {
-                    code: note.code(),
-                    message: note.message(),
-                })
-                .collect(),
+            notes: document.notes.iter().map(DocNote::dto).collect(),
         }
     }
-}
-
-/// A tolerated irregularity: machine code plus a human sentence, never content.
-#[derive(Debug, Serialize)]
-struct NoteDto {
-    code: &'static str,
-    message: String,
 }
 
 /// One walk skip, for `--verbose`.

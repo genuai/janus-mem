@@ -73,6 +73,31 @@ pub fn scan_json(root: &Path, extra: &[&str]) -> Value {
     })
 }
 
+/// Runs `janus --vault <root> chunks --json` and returns the parsed report.
+pub fn chunks_json(root: &Path, extra: &[&str]) -> Value {
+    let output = janus()
+        .arg("--vault")
+        .arg(root)
+        .arg("chunks")
+        .arg("--json")
+        .args(extra)
+        .output()
+        .expect("run janus chunks --json");
+
+    assert!(
+        output.status.success(),
+        "chunks failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|err| {
+        panic!(
+            "stdout is not JSON ({err}):\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
 /// Replaces every field that legitimately differs between machines and clones.
 ///
 /// The set is deliberately narrow: only `taken_ms`, the absolute paths, and the
