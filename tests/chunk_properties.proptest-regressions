@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 306f34498e268670f2985f7b10a2c1bf7357df9bd757c9bb4c81a5bee24d3576 # shrinks to body = "```rust\nfn main() { println!(\"hi\"); }\n```\n\n> a quoted paragraph\n> over two lines"
+cc 3cbac949622da928f4deb2989ce8fc4f9fb23fb393e01039adb61331643df2e4 # shrinks to body = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n# Heading\n\nA sentence with a few words.", max_chars = 1, overlap = 0.0
+cc 704f8f70720a70e6f9579f6da4e6d65dfd1bd2154927d2643a23ce0067c2fcdd # shrinks to body = "\t0 AA0 ¡\0¡\u{e000}¡¡\n \"\0¡ A A ¡", max_chars = 1, overlap = 0.0
+cc 3bddf530464c968cb19ca7b752efbcd526c1199aa61bd5e77ec82be3e5b1cd87 # shrinks to body = "¡ A\0¡¡A a00\r  ¡aA¡ ¡¡¡0¡¡A¡a0 ¡¡¡¡¡¡¡A A0Aa¡\0¡¡a¡A0¡¡0 0¡ \0a¡ 0¡0¡ ¡ 0 ¡¡\u{e000}¡0a\tA", max_chars = 65, overlap = 0.0

@@ -50,3 +50,4 @@ predicates = "3.1.4"
 tempfile = "3.27.0"
 # snapshot testing
 insta = "1.49.0"
+proptest = "1"
