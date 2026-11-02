@@ -358,15 +358,18 @@ property of the query instead of a magic constant.
 bm25(t, c) = idf(t) · tf · (k1 + 1) / (tf + k1 · (1 − b + b · dl / avgdl))
 idf(t)     = ln(1 + (N − df(t) + 0.5) / (df(t) + 0.5))     always > 0
 s          = Σ over query terms of bm25(t, c)
-s_ref      = Σ over query terms of idf(t)                  the reference score
+s_ref      = Σ over query terms that exist in the index of idf(t)   the reference score
 lexical    = s / (s + s_ref)      ≡ logistic(ln(s / s_ref))
 ```
 
 `s_ref` is the score a document earns for matching **every query term exactly once
 at average length** (`dl == avgdl` makes the length factor `tf·(k1+1)/(tf+k1) = 1`
-at `tf = 1`). So `lexical = 0.5` means “an average match for *this* query”, 0.75
-means “three times the reference”, and the value does not depend on corpus size —
-which a fixed midpoint cannot offer, because `idf` grows like `ln N`:
+at `tf = 1`). It sums only terms that exist in the index: an absent term has no
+`idf`, and folding an invented value in would rescale every score for a single
+typo. An absent term therefore contributes to neither `s` nor `s_ref`. So
+`lexical = 0.5` means “an average match for *this* query”, 0.75 means “three times
+the reference”, and the value does not depend on corpus size — which a fixed
+midpoint cannot offer, because `idf` grows like `ln N`:
 
 | corpus | `df = 1` (N = 40) | `df = 1` (N = 20 000) |
 |---|---|---|
@@ -831,7 +834,10 @@ property (fix N, df, avgdl, dl), and get the length directions right: decreasing
 `dl`, **increasing** in `avgdl` — the draft had the second one backwards, which
 correct BM25 would have failed.”
 
-**Accept:** tests green; building over the fixture vault (≈40 docs) < 10 ms debug.
+**Accept:** tests green; building over the current fixture vault (18 documents,
+18 chunks) is ≈0.4 ms median in a debug build. The old “≈40 docs, < 10 ms” figure
+was never measured and the fixture is not 40 documents; §11 records the method and
+the measured distribution.
 
 ---
 
@@ -1232,6 +1238,96 @@ forces a rebuild (S-2a). The CJK limitation — one term per run, no segmenter �
 the module docs and pinned by a test; changing it is a tokenizer-version change.
 
 ## 11. Implementation log — Phase 2 (BM25)
+
+Branch: `bb/m3-phase-2-bm25-index-thr_zy5ycze2pt` (the bb worktree branch, based on
+`main` at `910f7df`); the phase name in §5 is descriptive, not a branch name. Scope
+is exactly `src/index/mod.rs` (new), `src/index/lexical.rs` (new), and
+`pub mod index;` in `src/lib.rs`. Deliberately absent: persistence, `bincode`,
+`serde`, the manifest, the CLI, a `Cargo.toml` change, an `Index` trait, a generic
+scorer, and any cache beyond the derived `avgdl`. Phase 3 consumes this module;
+phase 4 persists its layout.
+
+### Decisions taken
+
+- **B-1 — `build` takes the indexed text as `&[&str]`, one element per chunk.**
+  Phase 2 has no `DocMeta` or `ChunkMeta`, and `Chunk::embed_text(body, title)`
+  needs both the body and the document title. Taking the already-built strings is
+  therefore the smallest contract that still exercises S-3: the caller passes
+  exactly the string the index is defined to see. This is a clarification of
+  “some chunk view”, not a new abstraction; phase 3/4 map chunks to these strings
+  without touching the scoring path.
+- **B-2 — `StringPool` and `StringId` are deliberately minimal.** They support
+  `intern`, `lookup`, `get`, `len`, and `is_empty` only. Ids are dense and assigned
+  in first-intern order; `StringId(0)` is `terms[0]`. The reverse index is a
+  `BTreeMap` so no hash iteration can leak into output. Each string is stored
+  twice (insertion-order `Vec` plus map key) to keep the code free of aliasing and
+  `unsafe`; the vocabulary is a cache-sized set, not a document body. Serialization
+  is phase 4's job and is not started here.
+- **B-3 — Determinism is structural, not incidental.** During the build each chunk's
+  term frequencies are counted in a `BTreeMap` keyed by term id, appended to one
+  `Vec<Posting>` bucket per term id in chunk order, and the buckets are flattened in
+  term-id order. Term ids follow first appearance while chunks are scanned in input
+  order. The only `BTreeMap` iteration is over ids within one chunk; the result is
+  the same for every run and independent of hash seeds. `TermMeta.postings` ranges
+  are therefore ascending and disjoint, ready for phase 4 to serialize as-is.
+- **B-4 — The idf accessor derives from the stored `df`; no separate idf array is
+  stored.** §2 fixes `TermMeta` to `{ df, postings }`, and phase 4 will persist that
+  shape. Caching an `idfs: Vec<f64>` in memory would be a second representation that
+  phase 4 has to rebuild at load anyway. `idf(df)` is the always-positive
+  `ln(1 + (N - df + 0.5) / (df + 0.5))`, with `N` the chunk count and `df` clamped
+  to `N` only to keep the public accessor total for an impossible input. The
+  literal table in the tests is independent of this method.
+- **B-5 — `score_query` returns raw BM25 plus `s_ref`; `squash` is separate.** The
+  returned `Vec<f64>` is `s` per chunk, not `lexical`, because the plan's second
+  value is explicitly `s_ref` and phase 3 composes the normalized value itself.
+  `squash(s, s_ref)` is `s / (s + s_ref)` for positive inputs and `0.0` otherwise,
+  which makes `lexical(0) = 0` total and maps a `NaN` input to zero rather than
+  propagating it. A candidate with a match always has `s > 0` and `s_ref > 0`.
+- **B-6 — An absent query term is skipped from both the score and `s_ref`.** It
+  cannot be part of the reference match, so adding an idf for it would mean inventing
+  a value. A query with no term in the index returns all-zero scores and `s_ref = 0`;
+  `squash` then returns zero for every chunk.
+- **B-7 — The tokenizer is constructed inside `build`; its fingerprint is not stored
+  here.** `Tokenizer::new()` is `"v1"` with `Stemmer::None`, and query terms arrive
+  already tokenized by the same type. The fingerprint belongs to the phase-4
+  manifest and reuse key (S-2a, S-3); storing it on this value now would be an unused
+  field. `score_query` deliberately does not tokenize or fold its `terms` argument.
+- **B-8 — The tests use literal expectations and state every precondition.** The idf
+  table, the tf-saturation ratios (`1.0`, `1.571428…`, `1.964285…`), the two length
+  directions (`1.0` vs `1.257142…` for `avgdl`; `1.0` vs `0.709677…` for `dl`), the
+  squash table, and the three-document fixture are hand-derived constants, not calls
+  back into the scorer. Document-tf saturation and query-term repetition are separate
+  tests because one saturates and the other is exactly linear. The monotonicity
+  properties hold only under the stated preconditions (`N`, `df`, `avgdl`, `dl` fixed
+  one axis at a time; `tf >= 1`, `dl >= 1`, `avgdl > 0`; no claim across documents of
+  different length). The proptest strategy derives valid fixtures directly, so it
+  does not spend its budget on rejected cases; its second property checks finiteness
+  and posting-range containment.
+- **B-9 — Overflow paths stop the build instead of wrapping.** Chunk indices, term
+  ids, posting ranges, and `dl` all narrow to `u32`; every conversion failure ends
+  the build (or saturates the length) rather than producing a wrapped or
+  out-of-range index. These branches are unreachable for a corpus that fits in
+  memory, but they keep the library panic-free without `unwrap`. The same rule is
+  why `Tokens::iter` and the postings lookups use `get`: a panic in a cache build
+  would be a bug, not a recovery.
+- **B-10 — Phase 2's Accept number is measured, not assumed.** The earlier
+  “≈40 docs, < 10 ms debug” line named a document count the fixture never had. A
+  one-off example built the index from real chunks: `Config::load` on
+  `tests/fixtures/vault`, a hermetic `vault::walk`, `resolve::resolve_all`,
+  `chunk_body` with the loaded `ChunkingConfig`, `Chunk::embed_text` per chunk,
+  then 100 measured `LexicalIndex::build` calls after one warm-up. The fixture is
+  18 documents and 18 chunks (~6 KB); debug builds measured min 333 µs, median
+  ≈0.40 ms, mean ≈0.40 ms, max ≈0.54 ms across repeated runs. The example was
+  removed after measuring; no timing is asserted in a test. The Accept line now
+  states those numbers.
+
+### Tests and gates
+
+`cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test --all-targets`, `cargo doc --no-deps`, the Windows cross-check, and
+`scripts/pr-size.sh` are green. The size numbers and the exact gate commands are in
+the PR body. The phase's build target is the B-10 measurement, not a test assertion.
+
 
 ## 12. Implementation log — Phase 3 (scoring)
 
