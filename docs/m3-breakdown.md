@@ -1013,7 +1013,9 @@ floor inside `cargo test`. Reuse `src/scan.rs` and `src/chunk/dump.rs` for the r
 shape.”
 
 **Accept:** `janus index && janus search cache --json | jq .` works on the fixture
-vault; `scripts/eval.sh` prints `active-top-1 0.xx (n/m)`; exit codes match §9.1.
+vault; `scripts/eval.sh` prints `active-top-1 0.xx (n/m)`; `--scope-only` without
+`--scope` exits `2` with a message and writes nothing (§9 gap 10); exit codes match
+§9.1.
 
 ## 6. Cross-cutting requirements
 
@@ -1164,6 +1166,21 @@ should close. They are listed so nothing is silently overridden.
    never says what a newly included `superseded` document scores; §3.2 fixes it at
    1.0 with decay unchanged, and explicitly excludes `deprecated` from the override.
    **Proposed SPEC edit:** one sentence in §7.1.
+9. **`--decay-half-life` vs the `timeless` exemption is undefined.** §7.1 lists the
+   flag as one of the parameters a caller can override; §6.6 says the type's own
+   setting always wins, and a half-life is not an exemption. **The plan's rule:**
+   the flag overrides the half-life *parameter* and never the `timeless`
+   exemption — a caller must not silently start ageing a timeless principle by
+   passing a number. Implemented in §12 C-6; if the opposite behaviour is ever
+   wanted it needs its own flag, not a reinterpretation of this one. **Proposed
+   SPEC edit:** one sentence under §7.1's flag list.
+10. **`--scope-only` without `--scope` is undefined.** §6.12 rule 4 says
+    `--scope-only` *additionally* excludes `global` and shared-only matches, which
+    presumes a query scope set; with none there is nothing to narrow to. **The
+    plan's rule:** a usage error (exit `2`), never a silent no-op — a no-op would
+    tell the caller their filter applied when it did not. Implemented in §12 C-8
+    and carried as an explicit case in Phase 6's acceptance list. **Proposed SPEC
+    edit:** one sentence in §6.12 rule 4.
 
 ## 10. Implementation log — Phase 1 (tokenizer)
 
@@ -1391,7 +1408,8 @@ is a predicate rather than the `current` gate.
   `--decay-half-life` is `Option<f64>`: `Some(0.0)` or negative disables decay,
   `Some(x)` overrides the type's half-life, and `timeless` still wins over the
   flag — a timeless type is exempt by type, and §6.6 says the type's own setting
-  wins. `effective_from` is the anchor when present, `date` otherwise (§7.2).
+  wins (§9 gap 9). `effective_from` is the anchor when present, `date` otherwise
+  (§7.2).
 - **C-7 — Scope normalisation is duplicated from `vault::resolve`, with a note.**
   `vault::resolve::normalise_scope` is private and phase 3 must not modify M1
   code, so `score::normalise_scope` repeats trim → lowercase → collapse
@@ -1406,7 +1424,7 @@ is a predicate rather than the `current` gate.
   `global`". A shared tag never satisfies `--scope-only`; that is exactly the
   "shared-only" exclusion. With no `--scope` the filter is a no-op (rule 3:
   nothing silently hidden); phase 6 rejects `--scope-only` without `--scope` as a
-  usage error instead of guessing.
+  usage error (exit `2`) instead of guessing (§9 gap 10).
 - **C-9 — The comparator is §3.1's five keys with `total_cmp`.** `final` desc,
   `date` desc with missing dates last, argmax `chunk_id` asc, `DocId` asc,
   `rel_path` asc. Within one document the argmax is `total_cmp` on `final`, then
