@@ -25,7 +25,6 @@ use crate::config::{self, Config};
 use crate::document::Document;
 use crate::error::JanusError;
 use crate::id::DocId;
-use crate::index::Snapshot;
 use crate::index::build::{self, BuildPlan};
 use crate::index::embed::Embedder;
 use crate::index::store::{self, INDEX_FILE, Publication};
@@ -72,9 +71,13 @@ pub fn run(
     let previous = if options.rebuild {
         None
     } else {
-        previous_snapshot(&dir)
+        store::previous_generation(&dir)
     };
-    let plan = build::plan_forced(config, &documents, previous.as_ref(), &forced, embedder)?;
+    let plan = if options.dry_run {
+        build::plan_forced_dry_run(config, &documents, previous.as_ref(), &forced, embedder)?
+    } else {
+        build::plan_forced(config, &documents, previous.as_ref(), &forced, embedder)?
+    };
 
     let written = if options.dry_run {
         None
@@ -86,6 +89,7 @@ pub fn run(
             snapshot: &plan.snapshot,
             chunker: plan.chunker,
             vectors: plan.vectors.as_ref(),
+            vectors_dropped: plan.vectors_dropped,
             built_at: &built_at,
         })?)
     };
@@ -108,6 +112,10 @@ pub fn run(
             rebuilt: plan.stats.rebuilt_documents,
             reused: plan.stats.reused_documents,
             retokenized: plan.stats.retokenized_chunks,
+            dim: plan.vector_id.as_ref().map(|id| id.dim),
+            embedded: plan.stats.embedded_chunks,
+            reused_vectors: plan.stats.reused_vector_chunks,
+            vectors_bytes: plan.vectors_bytes(),
             taken_ms,
             index_sha: written.as_ref().map(|manifest| manifest.index_sha.clone()),
         };
@@ -127,13 +135,6 @@ pub fn run(
         );
     }
     Ok(())
-}
-
-/// The previous generation if its bytes still decode: reuse needs tokens, not a
-/// manifest (P-7). A corrupt file is simply not a reuse source.
-fn previous_snapshot(dir: &Path) -> Option<Snapshot> {
-    let bytes = std::fs::read(dir.join(INDEX_FILE)).ok()?;
-    Snapshot::from_bytes(&bytes).ok()
 }
 
 /// Resolves `PATHS` to the documents they name, for a targeted re-tokenization.
@@ -195,6 +196,14 @@ struct Receipt {
     rebuilt: usize,
     reused: usize,
     retokenized: usize,
+    /// The row width of the published (or, on a dry run, planned) payload.
+    dim: Option<u32>,
+    /// Chunks that went through the embedder; zero on a full reuse.
+    embedded: usize,
+    /// Rows copied from the previous generation.
+    reused_vectors: usize,
+    /// The byte length `vectors.f32` has (or would have).
+    vectors_bytes: Option<u64>,
     taken_ms: u64,
     /// The published generation id; absent on `--dry-run`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -225,6 +234,11 @@ fn write_human(
         out,
         "rebuilt {}, reused {}, retokenized {} chunk(s)",
         plan.stats.rebuilt_documents, plan.stats.reused_documents, plan.stats.retokenized_chunks
+    );
+    let _ = writeln!(
+        out,
+        "embedded {}, reused {} vector row(s)",
+        plan.stats.embedded_chunks, plan.stats.reused_vector_chunks
     );
     match written {
         Some(manifest) => {

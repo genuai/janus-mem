@@ -127,35 +127,68 @@ fn facts_reports_a_zero_alpha_and_stays_authority_ordered() {
     }
 }
 
+/// Patches only the manifest's corpus id, forcing a stale generation without
+/// changing any document's identity (which a config edit would do).
+fn patch_manifest_corpus(root: &std::path::Path, corpus_id: &str) {
+    let path = root.join(".janus/manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&path).expect("read manifest")).expect("manifest JSON");
+    manifest["corpus_id"] = serde_json::json!(corpus_id);
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&manifest).expect("encode manifest"),
+    )
+    .expect("patch manifest");
+}
+
 #[test]
-fn a_no_embeddings_rebuild_publishes_a_lexical_generation_and_drops_the_payload() {
+fn a_no_embeddings_rebuild_carries_unchanged_rows_and_drops_changed_ones() {
     let vault = fixture_vault();
     index(vault.path());
     let vectors = vault.path().join(".janus/vectors.f32");
-    assert!(vectors.exists(), "the fixture's hash model writes vectors");
+    let before = fs::read(&vectors).expect("the fixture's hash model writes vectors");
 
-    // Force the read-triggered rebuild without touching the embedding config.
-    let config_path = vault.path().join("janus.toml");
-    let config = fs::read_to_string(&config_path).expect("read config");
-    let renamed = config.replace("corpus_id = \"fixtures\"", "corpus_id = \"renamed\"");
-    assert_ne!(config, renamed, "fixture config must carry a corpus_id");
-    fs::write(&config_path, renamed).expect("write config");
-
+    patch_manifest_corpus(vault.path(), "renamed");
     let report = search_json(vault.path(), &["cache", "--no-embeddings"]);
     assert_eq!(report["alpha"], 0.0, "{report}");
     assert!(
-        !vectors.exists(),
-        "P1b has no carry-forward: a lexical rebuild drops vectors.f32"
+        vectors.exists(),
+        "nothing changed, so a degraded rebuild carries the rows"
+    );
+    assert_eq!(
+        fs::read(&vectors).expect("read carried vectors"),
+        before,
+        "a carried payload is byte-identical"
     );
     let manifest: Value = serde_json::from_str(
         &fs::read_to_string(vault.path().join(".janus/manifest.json")).expect("manifest"),
     )
     .expect("manifest is JSON");
     assert_eq!(
-        manifest["embedder"],
-        Value::Null,
-        "the manifest must describe the lexical generation it just wrote"
+        manifest["embedder"]["name"], "hash-64",
+        "the manifest describes the file that is still there"
     );
+    assert!(manifest["vectors_sha"].is_string(), "{manifest}");
+
+    // One body edit changes a row, and this build cannot produce a replacement.
+    let note = vault.path().join("2025-01-05-corpus-notes.md");
+    let text = fs::read_to_string(&note).expect("read a fixture document");
+    fs::write(&note, format!("{text}\n\nchanged body\n")).expect("append to the document");
+    patch_manifest_corpus(vault.path(), "renamed-again");
+
+    let report = search_json(vault.path(), &["cache", "--no-embeddings"]);
+    assert_eq!(report["alpha"], 0.0, "{report}");
+    assert!(
+        !vectors.exists(),
+        "one changed document makes the rows uncarryable, so they go"
+    );
+    let manifest: Value = serde_json::from_str(
+        &fs::read_to_string(vault.path().join(".janus/manifest.json")).expect("manifest"),
+    )
+    .expect("manifest is JSON");
+    assert!(manifest["embedder"].is_null(), "{manifest}");
+    assert!(manifest["vectors_sha"].is_null(), "{manifest}");
+    assert!(manifest["vectors_len"].is_null(), "{manifest}");
 }
 
 #[test]
