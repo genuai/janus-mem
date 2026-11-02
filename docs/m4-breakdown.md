@@ -60,17 +60,19 @@ claims inherited from the brief are not what the code does, and the difference c
    "costs zero embedding work" (M4). No `path_history`, no file-hash comparison and no move
    detection is built in M4.
 
-**Status: revised four times after review; awaiting round 5.** No implementation exists. Every
-phase log in §10–§14 is empty on purpose.
+**Status: reviewed and closed (five rounds, 17 findings, none rejected). Ready for P1a.** No
+implementation exists. Every phase log in §10–§14 is empty on purpose.
 
-**Revision note.** Four rounds of independent review, 15 findings, none rejected. Round 1 found
+**Revision note.** Five rounds of independent review, 17 findings, none rejected. Round 1 found
 three blockers, two of them defects in **shipped M3 code** this plan was about to copy. Round 2
 found three fixes locally right and globally inconsistent. Round 3 found two of those incomplete —
 a title-only change slipped past the drop trigger, and `body_hash` was landing in a phase that
 would need a second `format_version` bump. Round 4 found that round 3's solution had made the plan
 contradict its own Phase 2: the phase that owns the hybrid golden needs a CLI-produced
 `vectors.f32`, which only exists once the embedder is wired into the build. P1b now owns that
-wiring; P4 owns reuse and carry-forward. Every finding and its resolution is in §9.0.
+wiring; P4 owns reuse and carry-forward. Round 5 confirmed the two claims that mattered
+(no golden moves; `HashEmbedder` is deterministic) and closed the door on two stale estimates.
+Every finding and its resolution is in §9.0.
 
 ## 0. Scope
 
@@ -353,6 +355,13 @@ and platforms (blake3 + integer arithmetic only); `cos(a, a) == 1.0` within `1e-
 It is a bag of tokens, so its cosine tracks BM25 almost exactly. That makes it excellent for
 plumbing tests and worthless for calibration; **no quality number in this milestone may be produced
 with `HashEmbedder`**, and §3.5 says what replaces it.
+
+**Why "a second build is byte-identical" holds, and what would break it.** Accumulation is
+**integer-valued counts** in an `f32` array, exact below 2²⁴, so summation order cannot change a
+bit; the norm is a single pass over `0..dim` with IEEE-correctly-rounded `sqrt` and divide; buckets
+and signs come from `blake3(term)`. The invariant to preserve: **if a later change adds weights**
+(tf-idf, position decay, sublinear scaling), the counts stop being exact and the byte-identical
+claim in P1b's Accept silently becomes false. That is a comment in the code, not a hope.
 
 **No network at runtime, and no download (§10).** `resolve` reads a model from disk. It does not
 open a socket, and it does not block. If the files are not there, `resolve` returns `Degraded` with
@@ -884,11 +893,12 @@ and `model_dir`), `src/lib.rs`, `src/main.rs` (`ModelDirs`), `tests/publish.rs`,
    validate `vectors.f32` when wanted; the retry/refuse outcomes of V-3 with the file name in the
    message; row 6 of §3.6 (vectors-bearing generation, no embedder) never rebuilds.
 7. **P1b.** `build::plan` **embeds every chunk on every build** through the resolved embedder — no
-   reuse, no predicate, ~15 lines — so a real CLI build produces `vectors.f32` and Phase 2 has
-   something to rank. `Publication.vectors`; `BuildStats` counters default to zero;
-   `tests/fixtures/vault/janus.toml` gains `[embedding] model = "hash-64"` (no golden moves, because
-   scoring still passes `semantic = 0.0, alpha = 0.0` until P2); `main.rs` builds `ModelDirs` and
-   resolves the embedder **once**; the CLI gains `--no-embeddings` on `index` only (V-14,
+   reuse, no predicate — so a real CLI build produces `vectors.f32` and Phase 2 has something to
+   rank. **`plan` becomes fallible here** (the embedder can fail) and every caller updates in this
+   PR; P4 only adds the reuse decision. `Publication.vectors`; `BuildStats` counters default to
+   zero; `tests/fixtures/vault/janus.toml` gains `[embedding] model = "hash-64"` (no golden moves,
+   because scoring still passes `semantic = 0.0, alpha = 0.0` until P2); `main.rs` builds `ModelDirs`
+   and resolves the embedder **once**; the CLI gains `--no-embeddings` on `index` only (V-14,
    `search`/`facts` in P2).
 
 **Tests (~380 lines):** `Vectors` round-trip and validation (wrong length, non-multiple-of-4,
@@ -1039,16 +1049,15 @@ checkable numbers rather than claims.
 previous vectors), `src/index/cmd.rs` (receipt, `--dry-run` planning), `src/search/mod.rs`
 (`LoadOptions` plumbing), `tests/cli_index.rs`, `tests/incremental.rs` (new).
 
-**Build (~280 logic lines):** `EmbedderId::to_bytes` feed into `vec_key` (V-22); the switch of both
+**Build (~320 logic lines):** `EmbedderId::to_bytes` feed into `vec_key` (V-22); the switch of both
 predicates to the `body_hash` field P1b already lays out (V-26); the reuse predicate of §3.4 —
 `body_hash`, `vec_key`, and the **chunk-id sequence** (V-23, V-24); row
 copying into the new positions; **row 3's carry-forward branch** of §3.6, i.e. the same predicate
 evaluated with the manifest's embedder id substituted when this build cannot embed (a title change
-must drop, not carry); `embedded_chunks`/`reused_vector_chunks`; `plan` becomes fallible
-(the embedder can fail) and every caller updates; `--dry-run` computes the reuse decision and
-reports `would_embed` **without calling the embedder**; the receipt gains `dim`, `embedded`,
-`reused_vectors`, `vectors_bytes`; `--rebuild` drops the previous vectors as well as the previous
-snapshot.
+must drop, not carry); `embedded_chunks`/`reused_vector_chunks`; `--dry-run` computes the reuse
+decision and reports `would_embed` **without calling the embedder**; the receipt gains `dim`,
+`embedded`, `reused_vectors`, `vectors_bytes`; `--rebuild` drops the previous vectors as well as the
+previous snapshot.
 
 **Tests (~380 lines):** the **eleven** acceptance cases of §3.4, each comparing incremental against
 a clean rebuild (snapshot equality after normalising `built_at`, byte equality of `vectors.f32`, and
@@ -1304,10 +1313,23 @@ self-contradictory, and one of the contradictions reached back into Phase 2.
 | R4-4 | DoD 9's row-3 wording | **Fixed, no action.** |
 | R4-5 | §8's P1b row still listed carry-forward, and the ~320 was justified with that work inside it | **Accepted.** The row names the embed wiring instead, and P4 rises to ~320 for the carry-forward it now owns. |
 
+#### Review round 5 — verdict: closed
+
+Five findings, all confirmations except two of the same mechanical class:
+
+| # | Round-5 finding | Resolution |
+|---|---|---|
+| R5-1 | The fixture's `hash-64` move does not move a golden | **Confirmed.** `search::query` still passes `semantic = 0.0, alpha = 0.0`, so the snapshot is untouched; the only churn is `tests/publish.rs`'s `dir_snapshot`, which now sees a third file, plus the `Publication` literal and `clean_plan`'s call site. |
+| R5-2 | `HashEmbedder` determinism holds | **Confirmed, with one condition recorded:** the counts must stay integer-valued, or "the second build is byte-identical" silently stops holding. Written into §3.2 as a code comment requirement. |
+| R5-3 | §5's P4 header said ~280 against §8's ~320 — the identical staleness R4-3 fixed for P1b | **Accepted.** Re-based to ~320. |
+| R5-4 | P4's build list claimed `plan` becomes fallible, which P1b now owns | **Accepted.** Moved into P1b item 7, which is where the signature change happens. |
+
+The verdict is **closed**. Nothing is rejected across five rounds; 17 findings in total.
+
 That is fifteen findings across three rounds on a plan whose first draft called itself done. The
 pattern is consistent: each fix was right about the mechanism and wrong about the boundary — which
-input, which branch, which phase. Naming boundaries as carefully as formulas is the thing this
-review loop is producing.
+input, which branch, which phase. Round 4 added the sixth, and round 5 closed it. Naming boundaries
+as carefully as formulas is the thing this review loop produced.
 
 ### 9.1 SPEC corrections and gaps
 
