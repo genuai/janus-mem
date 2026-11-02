@@ -133,6 +133,42 @@ pub fn redact(report: &mut Value) {
     }
 }
 
+/// Runs `janus --vault <root> <args>` with tracing silenced.
+///
+/// Silencing `RUST_LOG` is what lets a test assert that stderr carries exactly
+/// one diagnostic line: the tracing INFO line is not part of the contract.
+pub fn run(root: &Path, args: &[&str]) -> std::process::Output {
+    janus()
+        .env("RUST_LOG", "off")
+        .arg("--vault")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("run janus")
+}
+
+/// Runs a command that must succeed, returning its stdout as text.
+pub fn run_ok(root: &Path, args: &[&str]) -> String {
+    let output = run(root, args);
+    assert!(
+        output.status.success(),
+        "janus {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout is UTF-8")
+}
+
+/// Builds the index and asserts it succeeded.
+pub fn index(root: &Path) {
+    run_ok(root, &["index"]);
+}
+
+/// Parses a command's stdout as JSON, asserting success first.
+pub fn json_ok(root: &Path, args: &[&str]) -> Value {
+    let text = run_ok(root, args);
+    serde_json::from_str(&text).unwrap_or_else(|err| panic!("stdout is not JSON ({err}):\n{text}"))
+}
+
 /// Recursively copies `from` to `to`, byte-for-byte.
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::create_dir_all(to)?;

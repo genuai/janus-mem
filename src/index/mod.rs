@@ -26,6 +26,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::id::{Blake3Hash, ChunkId, DocId};
 
 pub mod build;
+pub mod cmd;
 mod lexical;
 pub mod store;
 
