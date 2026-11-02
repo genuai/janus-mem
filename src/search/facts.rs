@@ -44,6 +44,10 @@ pub struct Options {
     pub limit: usize,
     /// Refuse instead of rebuilding; a read stays a read (S-8).
     pub no_rebuild: bool,
+    /// Run lexically without resolving or loading a model (V-14).
+    pub no_embeddings: bool,
+    /// Why the adapter could not resolve an embedder, when it tried.
+    pub embedding_reason: Option<String>,
     /// Emit one JSON object on stdout instead of the table.
     pub json: bool,
 }
@@ -65,7 +69,27 @@ pub fn run(
     let started = Instant::now();
     require_scope(options.scope_only, &options.scopes)?;
 
-    let prepared = prepare(root, config, clock, embedder, options.no_rebuild)?;
+    let load_embedder = if options.no_embeddings {
+        None
+    } else {
+        embedder
+    };
+    let prepared = prepare(
+        root,
+        config,
+        clock,
+        load_embedder,
+        false,
+        options.no_rebuild,
+    )?;
+    let mut degraded = super::degraded_reasons(
+        options.no_embeddings,
+        load_embedder.is_some(),
+        options.embedding_reason.as_deref(),
+    );
+    if !options.no_embeddings && load_embedder.is_some() {
+        degraded.push("facts: lexical only (V-15)".to_owned());
+    }
     let rows = super::doc_rows(&prepared.snapshot, config);
     let filter = Filter::new(
         config,
@@ -113,6 +137,8 @@ pub fn run(
         query: options.query.as_deref(),
         intent: None,
         limit: options.limit,
+        alpha: 0.0,
+        degraded,
         notes,
     })
 }

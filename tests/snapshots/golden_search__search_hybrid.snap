@@ -1,17 +1,16 @@
 ---
 source: tests/golden_search.rs
-expression: json
+expression: snapshot_json(&text)
 ---
 {
+  "alpha": 0.65,
   "api": 1,
   "corpus_id": "fixtures",
-  "degraded": [
-    "lexical only; embeddings arrive in M4"
-  ],
+  "degraded": [],
   "intent": "history",
   "limit": 3,
   "notes": [
-    "1 more document(s) matched; raise --limit to see them"
+    "1 more document(s) have relevance > 0; raise --limit to see them"
   ],
   "query": "cache",
   "results": [
@@ -31,10 +30,10 @@ expression: json
       "scores": {
         "authority": 1.5,
         "decay": 1.0,
-        "final": 0.9807165151145152,
+        "final": 0.8840834711846841,
         "lexical": 0.6538110100763435,
-        "relevance": 0.6538110100763435,
-        "semantic": 0.0,
+        "relevance": 0.5893889807897894,
+        "semantic": 0.5547001957893372,
         "status_factor": 1.0,
         "type_authority": 1.5
       },
@@ -51,40 +50,6 @@ expression: json
     },
     {
       "breadcrumb": [
-        "Cache revisited"
-      ],
-      "chunk_id": "c6bcc6719b62c49c66e8dc99fc4c3cf22b6f15c1b3fe3f1f27e5e4d788a75396",
-      "date": "2025-02-01",
-      "effective_from": null,
-      "id": "c64418894b25cfc133c800f916942b66",
-      "ordinal": 0,
-      "path": "<vault>/decisions/2025-02-01-cache-revisited.md",
-      "rank": 2,
-      "rel_path": "decisions/2025-02-01-cache-revisited.md",
-      "scope": "global",
-      "scores": {
-        "authority": 1.5,
-        "decay": 1.0,
-        "final": 0.9778324675164126,
-        "lexical": 0.6518883116776084,
-        "relevance": 0.6518883116776084,
-        "semantic": 0.0,
-        "status_factor": 1.0,
-        "type_authority": 1.5
-      },
-      "shared_with": [],
-      "span": [
-        0,
-        81
-      ],
-      "status": "superseded",
-      "tags": [],
-      "title": "Cache revisited",
-      "tokens": 15,
-      "type": "decision"
-    },
-    {
-      "breadcrumb": [
         "Postgres cache"
       ],
       "chunk_id": "854fee3dccd0d87d80df9a0f2b11aef4f6d9e2f6edd27ac58de59b7aa2ee01ca",
@@ -93,16 +58,16 @@ expression: json
       "id": "2e85ad7f373d6a46959b68701c2fba40",
       "ordinal": 0,
       "path": "<vault>/decisions/2024-11-02-postgres-cache.md",
-      "rank": 3,
+      "rank": 2,
       "rel_path": "decisions/2024-11-02-postgres-cache.md",
       "scope": "global",
       "scores": {
         "authority": 1.5,
         "decay": 1.0,
-        "final": 0.9754420203514008,
+        "final": 0.8584765756022422,
         "lexical": 0.6502946802342672,
-        "relevance": 0.6502946802342672,
-        "semantic": 0.0,
+        "relevance": 0.5723177170681615,
+        "semantic": 0.5303301215171814,
         "status_factor": 1.0,
         "type_authority": 1.5
       },
@@ -116,6 +81,43 @@ expression: json
       "title": "Postgres cache",
       "tokens": 20,
       "type": "decision"
+    },
+    {
+      "breadcrumb": [
+        "Überlegungen zu Cache"
+      ],
+      "chunk_id": "9d82a572d0bd03a49bc4106ff1b590185c3a978c03d159e401b1aed3150e3c66",
+      "date": "2025-03-04",
+      "effective_from": null,
+      "id": "c880c35f324b0c0dd5f242f086ac77d3",
+      "ordinal": 0,
+      "path": "<vault>/notes/überlegungen zu cache.md",
+      "rank": 3,
+      "rel_path": "notes/überlegungen zu cache.md",
+      "scope": "global",
+      "scores": {
+        "authority": 0.9,
+        "decay": 1.0,
+        "final": 0.44271295591456106,
+        "lexical": 0.6609244819438775,
+        "relevance": 0.49190328434951225,
+        "semantic": 0.40089187026023865,
+        "status_factor": 1.0,
+        "type_authority": 0.9
+      },
+      "shared_with": [],
+      "span": [
+        0,
+        118
+      ],
+      "status": "active",
+      "tags": [
+        "unicode",
+        "spaces"
+      ],
+      "title": "überlegungen zu cache",
+      "tokens": 26,
+      "type": "note"
     }
   ],
   "taken_ms": 0,

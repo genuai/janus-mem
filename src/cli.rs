@@ -132,6 +132,10 @@ pub enum Command {
         #[arg(long)]
         no_rebuild: bool,
 
+        /// Rank lexically without resolving or loading an embedding model
+        #[arg(long)]
+        no_embeddings: bool,
+
         /// Emit one JSON object on stdout instead of the table
         #[arg(long)]
         json: bool,
@@ -162,6 +166,10 @@ pub enum Command {
         /// Refuse instead of building or rebuilding; a read stays a read
         #[arg(long)]
         no_rebuild: bool,
+
+        /// List lexically without resolving or loading an embedding model
+        #[arg(long)]
+        no_embeddings: bool,
 
         /// Emit one JSON object on stdout instead of the table
         #[arg(long)]

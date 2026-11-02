@@ -6,8 +6,8 @@
 //!
 //! ```text
 //! lexical   = squash(s, s_ref)                          §3.3, phase 2
-//! semantic  = 0.0                                       M3 has no vectors
-//! relevance = alpha * semantic + (1 - alpha) * lexical   alpha = 0.0 in M3
+//! semantic  = clamp(dot(query, chunk), 0, 1)             §3.3, M4
+//! relevance = alpha * semantic + (1 - alpha) * lexical   §7.2, alpha = 0.0 lexically
 //! authority = type_authority * status_factor            §6.6, §7.2
 //! decay     = exp(-ln2 * age_days / half_life_days)     or 1.0
 //! final     = relevance * authority * decay
@@ -224,7 +224,7 @@ impl IntentPolicy {
 /// Every factor of one chunk's score, reported separately (§3.2).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Breakdown {
-    /// Semantic similarity; always `0.0` in M3.
+    /// Semantic similarity, `clamp(cosine, 0, 1)`; `0.0` without an embedder.
     pub semantic: f64,
     /// Normalised BM25 value from phase 2 (§3.3).
     pub lexical: f64,
@@ -250,11 +250,11 @@ pub struct ScoreInput<'a> {
     pub doc: &'a ScoreDoc<'a>,
     /// Normalised lexical value, `[0, 1]` (§3.3).
     pub lexical: f64,
-    /// Semantic similarity, `0.0` in M3 (§7.2).
+    /// Semantic similarity, `clamp(cosine, 0, 1)` (§7.2).
     pub semantic: f64,
     /// Query intent; selects the decay and inclusion row.
     pub intent: Intent,
-    /// Semantic weight, `0.0` in M3 (§7.2).
+    /// Semantic weight in `[0, 1]`; `0.0` is exactly the lexical path (§7.2).
     pub alpha: f64,
     /// `--decay-half-life` override; `None` uses the document's type.
     pub half_life_days: Option<f64>,
@@ -787,6 +787,46 @@ mod tests {
         for (alpha, expected) in [(0.0, 0.5), (1.0, 0.25), (0.5, 0.375)] {
             input.alpha = alpha;
             assert_eq!(score(&clock(), &input).relevance, expected);
+        }
+    }
+
+    #[test]
+    fn the_alpha_table_matches_hand_computed_relevance() {
+        let doc = doc(1, Status::Active);
+        let mut input = input(&doc, Intent::History, false);
+        input.alpha = 0.65;
+
+        // §3.3's table at α = 0.65: relevance = 0.65·semantic + 0.35·lexical.
+        // Row 5 is 0.65·0.4 + 0.35·1.0 = 0.26 + 0.35 = 0.61 (the plan's first
+        // draft printed 0.480; P2 corrects it in §3.3 as well).
+        for (semantic, lexical, expected) in [
+            (0.5, 0.5, 0.500_f64),
+            (0.0, 1.0, 0.350),
+            (1.0, 0.0, 0.650),
+            (0.4, 0.0, 0.260),
+            (0.4, 1.0, 0.610),
+        ] {
+            input.semantic = semantic;
+            input.lexical = lexical;
+            let relevance = score(&clock(), &input).relevance;
+            assert!(
+                (relevance - expected).abs() < 1e-12,
+                "semantic {semantic}, lexical {lexical}: expected {expected}, got {relevance}"
+            );
+        }
+
+        // The endpoint and midpoint identities, checked separately because the
+        // table only exercises the default weight.
+        for (alpha, semantic, lexical) in [(0.0, 0.4, 0.7), (1.0, 0.4, 0.7), (0.35, 0.4, 0.7)] {
+            input.alpha = alpha;
+            input.semantic = semantic;
+            input.lexical = lexical;
+            let expected = alpha * semantic + (1.0 - alpha) * lexical;
+            let relevance = score(&clock(), &input).relevance;
+            assert!(
+                (relevance - expected).abs() < 1e-12,
+                "alpha {alpha}: expected {expected}, got {relevance}"
+            );
         }
     }
 
