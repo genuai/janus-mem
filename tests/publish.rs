@@ -496,8 +496,56 @@ fn embedder() -> HashEmbedder {
     HashEmbedder::new(64).expect("64 is a valid dimension")
 }
 
+fn read_manifest(root: &Path) -> store::Manifest {
+    let path = index_dir(root).join(MANIFEST_FILE);
+    serde_json::from_slice(&fs::read(&path).expect("read the manifest"))
+        .expect("the manifest is JSON")
+}
+
+/// Rewrites `manifest.json` in place, so a corrupt generation can be built
+/// directly instead of staged by a race.
+fn patch_manifest(root: &Path, patch: impl FnOnce(&mut serde_json::Value)) {
+    let path = index_dir(root).join(MANIFEST_FILE);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read the manifest"))
+            .expect("manifest JSON");
+    patch(&mut manifest);
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&manifest).expect("encode the manifest"),
+    )
+    .expect("patch the manifest");
+}
+
 fn vectors_path(root: &Path) -> PathBuf {
     index_dir(root).join(VECTORS_FILE)
+}
+
+/// One read, with the two §3.1 switches a caller controls.
+fn load_with(
+    root: &Path,
+    want_vectors: bool,
+    embedder: Option<&dyn Embedder>,
+) -> Result<Load, JanusError> {
+    let config = config(root);
+    let mut options = LoadOptions::new(root, &config, BUILT_AT);
+    options.want_vectors = want_vectors;
+    options.embedder = embedder;
+    store::load(&options)
+}
+
+/// Writes only the new payload: the durable state a crash between the vectors
+/// rename and the index rename leaves (§3.1 row 2).
+fn crash_after_vectors_rename(root: &Path, next: &BuildPlan) {
+    let rows = next.vectors.as_ref().expect("the plan has vectors").rows();
+    fs::write(vectors_path(root), rows.encode()).expect("write new vectors");
+}
+
+/// Writes the new payload *and* the new index: the state a crash between the
+/// index rename and the manifest rename leaves (§3.1 row 3).
+fn crash_after_index_rename(root: &Path, next: &BuildPlan) {
+    crash_after_vectors_rename(root, next);
+    fs::write(index_dir(root).join(INDEX_FILE), encoded(&next.snapshot)).expect("write new index");
 }
 
 #[test]
@@ -593,6 +641,352 @@ fn the_vectors_rename_precedes_the_index_and_manifest_renames() {
         ],
         "vectors first, index next, manifest (the commit record) last"
     );
+}
+
+#[test]
+fn a_complete_generation_loads_in_both_read_modes() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    let first = plan_with(&root, Some(&embedder));
+    publish(&root, &first);
+    let dir = index_dir(&root);
+
+    // Row 4: the new triple loads.
+    let before = dir_snapshot(&dir);
+    let lexical = load_with(&root, false, Some(&embedder)).expect("load");
+    assert!(!lexical.rebuilt);
+    assert!(lexical.stale.is_none());
+    assert!(lexical.vectors.is_none(), "a lexical read gets no rows");
+
+    let wanting = load_with(&root, true, Some(&embedder)).expect("load");
+    assert!(!wanting.rebuilt);
+    assert_eq!(
+        wanting.vectors.as_ref(),
+        first.vectors.as_ref().map(|set| set.rows()),
+        "the reader gets the rows the writer wrote"
+    );
+    assert_eq!(dir_snapshot(&dir), before, "reading writes nothing");
+
+    // Row 6: no embedder resolved, vectors-bearing generation. It loads, keeps
+    // the payload, and reports no staleness: strictly more information than
+    // this process reads is never a reason to destroy it (V-21).
+    let degraded = load_with(&root, false, None).expect("load");
+    assert!(!degraded.rebuilt);
+    assert!(degraded.stale.is_none());
+    assert_eq!(degraded.manifest.embedder.as_ref(), Some(embedder.id()));
+    assert_eq!(dir_snapshot(&dir), before, "row 6 leaves .janus/ identical");
+
+    // Row 1: the previous triple is also a complete one. A second publish then a
+    // read sees a complete generation again.
+    write_doc(&root, "b.md", "Beta", "alpha store body");
+    let second = plan_with(&root, Some(&embedder));
+    publish(&root, &second);
+    let after = dir_snapshot(&dir);
+    let lexical = load_with(&root, false, None).expect("load");
+    assert!(!lexical.rebuilt);
+    assert!(lexical.stale.is_none());
+    let wanting = load_with(&root, true, Some(&embedder)).expect("load");
+    assert!(!wanting.rebuilt);
+    assert_eq!(wanting.manifest.chunks, 2);
+    assert_eq!(dir_snapshot(&dir), after);
+}
+
+#[test]
+fn a_new_vectors_old_index_pair_rebuilds_only_for_a_reader_that_wants_vectors() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    publish(&root, &plan_with(&root, Some(&embedder)));
+
+    write_doc(&root, "b.md", "Beta", "alpha store body");
+    let next = plan_with(&root, Some(&embedder));
+    let dir = index_dir(&root);
+    crash_after_vectors_rename(&root, &next);
+    let crashed = dir_snapshot(&dir);
+
+    // The same read, lexical only: the pair it validated agrees with itself, so
+    // it loads and never looks at the payload it declined to read (V-4).
+    let lexical = load_with(&root, false, Some(&embedder)).expect("load");
+    assert!(!lexical.rebuilt, "row 2's lexical path must not rebuild");
+    assert!(lexical.stale.is_none());
+    assert!(lexical.vectors.is_none());
+    assert_eq!(dir_snapshot(&dir), crashed, "a lexical read writes nothing");
+
+    // `--no-rebuild` on the wanting path refuses and names the payload.
+    let config = config(&root);
+    let mut refuse = LoadOptions::new(&root, &config, BUILT_AT);
+    refuse.want_vectors = true;
+    refuse.embedder = Some(&embedder);
+    refuse.policy = Policy::Refuse;
+    let error = store::load(&refuse).expect_err("a mismatch must refuse");
+    assert!(
+        matches!(error, JanusError::IndexUnstable { .. }),
+        "got {error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains(&path_text(&dir.join(VECTORS_FILE))),
+        "the refusal must name the payload: {error}"
+    );
+    assert_eq!(
+        dir_snapshot(&dir),
+        crashed,
+        "a refusal leaves .janus/ byte-identical"
+    );
+
+    // The wanting read rebuilds and publishes a complete pair.
+    let rebuilt = load_with(&root, true, Some(&embedder)).expect("load");
+    assert!(rebuilt.rebuilt);
+    let stale = rebuilt.stale.expect("the cause is reported");
+    assert!(stale.contains(VECTORS_FILE), "{stale}");
+    assert!(stale.contains("manifest.vectors_sha"), "{stale}");
+    assert_eq!(
+        rebuilt.snapshot.chunks.len(),
+        next.snapshot.chunks.len(),
+        "the rebuild saw the new document"
+    );
+    assert_eq!(
+        fs::read(vectors_path(&root)).expect("payload"),
+        next.vectors.as_ref().expect("vectors").rows().encode(),
+        "the rebuilt payload equals a clean build's"
+    );
+}
+
+#[test]
+fn a_new_index_old_manifest_pair_rebuilds_in_both_read_modes() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    publish(&root, &plan_with(&root, Some(&embedder)));
+    let dir = index_dir(&root);
+    let old_manifest = fs::read(dir.join(MANIFEST_FILE)).expect("read the old manifest");
+
+    write_doc(&root, "b.md", "Beta", "alpha store body");
+    let next = plan_with(&root, Some(&embedder));
+    crash_after_index_rename(&root, &next);
+    let crashed = dir_snapshot(&dir);
+
+    let config = config(&root);
+    for want in [false, true] {
+        let mut options = LoadOptions::new(&root, &config, BUILT_AT);
+        options.want_vectors = want;
+        options.embedder = Some(&embedder);
+        options.policy = Policy::Refuse;
+        let error = store::load(&options).expect_err("a mismatch must refuse");
+        assert!(
+            error
+                .to_string()
+                .contains(&path_text(&dir.join(INDEX_FILE))),
+            "want_vectors={want}: the refusal must name the index: {error}"
+        );
+        assert_eq!(dir_snapshot(&dir), crashed);
+    }
+
+    for want in [false, true] {
+        // Each mode starts from the crashed state, because the first rebuild
+        // publishes a generation the second read would rightly adopt.
+        crash_after_index_rename(&root, &next);
+        fs::write(dir.join(MANIFEST_FILE), &old_manifest).expect("restore the old manifest");
+        let rebuilt = load_with(&root, want, Some(&embedder)).expect("load");
+        assert!(rebuilt.rebuilt, "want_vectors={want}: row 3 rebuilds");
+        let stale = rebuilt.stale.expect("the cause is reported");
+        assert!(stale.contains(INDEX_FILE), "{stale}");
+        assert!(stale.contains("manifest.index_sha"), "{stale}");
+        assert_eq!(
+            rebuilt.vectors.is_some(),
+            want,
+            "want_vectors={want}: rows come back only when asked for"
+        );
+    }
+}
+
+#[test]
+fn a_lexical_read_never_opens_the_vectors_file() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    publish(&root, &plan_with(&root, Some(&embedder)));
+
+    // The manifest still names a payload that is gone: harmless to a read that
+    // will not use one, fatal to a read that will (V-4).
+    fs::remove_file(vectors_path(&root)).expect("remove the payload");
+    let lexical = load_with(&root, false, Some(&embedder)).expect("load");
+    assert!(!lexical.rebuilt);
+    assert!(lexical.stale.is_none());
+
+    let wanting = load_with(&root, true, Some(&embedder)).expect("load");
+    assert!(wanting.rebuilt, "a missing payload rebuilds");
+    assert!(
+        wanting
+            .stale
+            .expect("cause")
+            .contains(&path_text(&vectors_path(&root))),
+        "the cause names the payload"
+    );
+}
+
+#[test]
+fn a_corrupt_payload_rebuilds_and_never_misaligns_a_row() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    publish(&root, &plan_with(&root, Some(&embedder)));
+    let good = fs::read(vectors_path(&root)).expect("payload");
+
+    let corruptions: [Corruption; 3] = [
+        ("flip one byte", |bytes| {
+            let middle = bytes.len() / 2;
+            bytes[middle] ^= 1;
+        }),
+        ("truncate", |bytes| bytes.truncate(bytes.len() / 2)),
+        ("zero the file", |bytes| bytes.fill(0)),
+    ];
+    for (name, corrupt) in corruptions {
+        let mut bytes = good.clone();
+        corrupt(&mut bytes);
+        fs::write(vectors_path(&root), &bytes).expect("corrupt the payload");
+
+        let load = load_with(&root, true, Some(&embedder)).expect("load");
+        assert!(load.rebuilt, "{name}: corruption must rebuild");
+        assert!(
+            load.stale.expect("cause").contains(VECTORS_FILE),
+            "{name}: the cause names the payload"
+        );
+        assert_eq!(
+            fs::read(vectors_path(&root)).expect("payload"),
+            good,
+            "{name}: a rebuild equals a clean build"
+        );
+    }
+}
+
+#[test]
+fn a_payload_whose_manifest_shape_disagrees_rebuilds() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    publish(&root, &plan_with(&root, Some(&embedder)));
+
+    // One extra (all-zero) row: the bytes and the manifest agree with each
+    // other, but the row count disagrees with the snapshot.
+    let mut bytes = fs::read(vectors_path(&root)).expect("payload");
+    bytes.extend_from_slice(&vec![0u8; 64 * 4]);
+    fs::write(vectors_path(&root), &bytes).expect("append a row");
+    let sha = blake3::hash(&bytes).to_hex().to_string();
+    let len = bytes.len() as u64;
+    patch_manifest(&root, |manifest| {
+        manifest["vectors_sha"] = serde_json::json!(sha);
+        manifest["vectors_len"] = serde_json::json!(len);
+    });
+
+    let load = load_with(&root, true, Some(&embedder)).expect("load");
+    assert!(load.rebuilt);
+    let stale = load.stale.expect("cause");
+    assert!(stale.contains(VECTORS_FILE), "{stale}");
+    assert!(stale.contains("does not match"), "{stale}");
+}
+
+#[test]
+fn a_format_version_1_manifest_is_stale_and_the_rebuild_writes_version_2() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    publish(&root, &clean_plan(&root));
+    patch_manifest(&root, |manifest| {
+        manifest["format_version"] = serde_json::json!(1)
+    });
+
+    let load = load_with(&root, false, None).expect("load");
+    assert!(load.rebuilt, "an M3 index is refused and rebuilt");
+    let stale = load.stale.expect("cause");
+    assert!(stale.contains("format_version 1 != 2"), "{stale}");
+    assert_eq!(
+        read_manifest(&root).format_version,
+        janus_mem::index::FORMAT_VERSION
+    );
+}
+
+#[test]
+fn a_manifest_holding_two_of_three_vector_fields_is_corrupt() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    publish(&root, &plan_with(&root, Some(&embedder)));
+    patch_manifest(&root, |manifest| {
+        manifest["vectors_sha"] = serde_json::Value::Null
+    });
+
+    let load = load_with(&root, false, None).expect("load");
+    assert!(load.rebuilt);
+    let stale = load.stale.expect("cause");
+    assert!(stale.contains("vector fields disagree"), "{stale}");
+    assert!(stale.contains("vectors_sha absent"), "{stale}");
+}
+
+#[test]
+fn a_vectors_less_generation_is_stale_for_a_process_that_can_embed() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    publish(&root, &clean_plan(&root));
+    assert!(!vectors_path(&root).exists());
+    let dir = index_dir(&root);
+
+    // `--no-rebuild` refuses without touching the generation.
+    let before = dir_snapshot(&dir);
+    let embedder = embedder();
+    let config = config(&root);
+    let mut refuse = LoadOptions::new(&root, &config, BUILT_AT);
+    refuse.embedder = Some(&embedder);
+    refuse.policy = Policy::Refuse;
+    let error = store::load(&refuse).expect_err("row 5 must refuse without a rebuild");
+    assert!(matches!(error, JanusError::IndexUnstable { .. }));
+    assert_eq!(dir_snapshot(&dir), before);
+
+    // Allowed to rebuild: one build, then the generation has vectors.
+    let load = load_with(&root, true, Some(&embedder)).expect("load");
+    assert!(load.rebuilt);
+    let stale = load.stale.expect("cause");
+    assert!(stale.contains("no vectors"), "{stale}");
+    assert_eq!(read_manifest(&root).embedder.as_ref(), Some(embedder.id()));
+    assert!(vectors_path(&root).exists());
+
+    // …and it is stable: the next read adopts it.
+    let again = load_with(&root, true, Some(&embedder)).expect("load");
+    assert!(!again.rebuilt);
+    assert!(again.stale.is_none());
+}
+
+#[test]
+fn a_degraded_publish_drops_the_payload_and_the_next_lexical_read_loads() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    publish(&root, &plan_with(&root, Some(&embedder)));
+    assert!(vectors_path(&root).exists());
+
+    publish(&root, &clean_plan(&root));
+    assert!(
+        !vectors_path(&root).exists(),
+        "a build without an embedder cannot describe the rows, so they go"
+    );
+    let manifest = read_manifest(&root);
+    assert!(manifest.embedder.is_none());
+    assert!(manifest.vectors_sha.is_none());
+    assert!(manifest.vectors_len.is_none());
+
+    // The next read with no embedder resolves to `embedder: None` and loads,
+    // under `--no-rebuild` too: nothing is stale.
+    let load = load_with(&root, false, None).expect("load");
+    assert!(!load.rebuilt);
+    assert!(load.stale.is_none());
+    assert!(load.manifest.embedder.is_none());
+
+    let config = config(&root);
+    let mut refuse = LoadOptions::new(&root, &config, BUILT_AT);
+    refuse.policy = Policy::Refuse;
+    let load = store::load(&refuse).expect("a vectors-less generation is not stale for us");
+    assert!(!load.rebuilt);
 }
 
 /// The embedder name the on-disk manifest currently records, if any.

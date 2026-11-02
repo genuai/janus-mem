@@ -84,7 +84,8 @@ fn report_active_top1_and_ndcg() {
         .collect();
 
     // One exhaustive pass with an empty query: no hits, every row and status.
-    let all = search::query(root, &config, &clock, &options("", "exhaustive"))
+    // Lexical only: the report is the M3 baseline, not a hybrid measurement.
+    let all = search::query(root, &config, &clock, None, &options("", "exhaustive"))
         .expect("the eval corpus indexes");
     let status: BTreeMap<&str, Status> = all
         .rows
@@ -97,8 +98,14 @@ fn report_active_top1_and_ndcg() {
     let mut misses = Vec::new();
 
     for query in &queries {
-        let outcome = search::query(root, &config, &clock, &options(&query.query, &query.intent))
-            .unwrap_or_else(|err| panic!("query {:?} failed: {err}", query.query));
+        let outcome = search::query(
+            root,
+            &config,
+            &clock,
+            None,
+            &options(&query.query, &query.intent),
+        )
+        .unwrap_or_else(|err| panic!("query {:?} failed: {err}", query.query));
         let ranked: Vec<&str> = outcome
             .hits
             .iter()

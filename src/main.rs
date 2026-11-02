@@ -12,7 +12,7 @@ use janus_mem::cli::{Cli, Command};
 use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
-use janus_mem::index::embed::{self, ModelDirs, Resolved};
+use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
 use janus_mem::{chunk, index, scan, search, vault};
 use tracing_subscriber::EnvFilter;
 
@@ -50,6 +50,18 @@ fn model_cache() -> PathBuf {
 /// line at all.
 fn resolve_embedder(config: &Config) -> Resolved {
     embed::resolve(config, &model_dirs(config))
+}
+
+/// The embedder when resolution succeeded, with no output.
+///
+/// A read stays silent about a degraded resolution: P2's `degraded` field is
+/// where that reason belongs, and printing it twice would make the response and
+/// stderr disagree about the same fact.
+fn embedder_only(resolved: Resolved) -> Option<Box<dyn Embedder>> {
+    match resolved {
+        Resolved::Ready(embedder) => Some(embedder),
+        Resolved::Degraded(..) => None,
+    }
 }
 
 fn init_tracing() {
@@ -173,10 +185,15 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             tracing::info!(vault = %root.display(), "corpus resolved");
 
             let config = Config::load(&root)?;
+            // A read passes the embedder so a rebuild it triggers still produces
+            // the generation this process would build (V-21 row 5); it does not
+            // ask for the rows, because α is 0 until P2.
+            let embedder = embedder_only(resolve_embedder(&config));
             search::run(
                 &root,
                 &config,
                 &SystemClock,
+                embedder.as_deref(),
                 search::Options {
                     query,
                     intent,
@@ -206,10 +223,12 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             tracing::info!(vault = %root.display(), "corpus resolved");
 
             let config = Config::load(&root)?;
+            let embedder = embedder_only(resolve_embedder(&config));
             search::facts::run(
                 &root,
                 &config,
                 &SystemClock,
+                embedder.as_deref(),
                 &search::facts::Options {
                     query,
                     tags,

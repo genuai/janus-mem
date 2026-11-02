@@ -1482,6 +1482,26 @@ against P1b (`BASE=origin/<p1b branch>`).
 | P1b-10 | **Review fix.** The degraded drop runs after the manifest rename and its directory sync, and reports itself through a ninth stage, `Stage::VectorsDropped`, which fires last and only when a file was actually removed. | Dropping with the other payload work left the old manifest naming a file that was already gone: a concurrent reader with `want_vectors = true` saw `is missing`, retried, then rebuilt a state it should never have observed — and a publish that failed after the drop had destroyed a good payload for nothing. After the commit record changes, the new manifest says `embedder: None`, so no reader opens the file, and an orphan from a crash between the two steps is unreachable and overwritten by the next vectors-bearing publish. `a_degraded_publish_drops_the_payload_after_the_commit_record` asserts the payload outlives every pre-commit stage and fails on the old order. |
 | P1b-11 | **Review fix.** `janus index` prints one `embeddings unavailable (<reason>): <detail>; lexical only` line when resolution degrades, and nothing when `--no-embeddings` was passed. `resolve_embedder` returns `Resolved` so each caller decides; only the `index` arm announces. | §3.6 row 1 promises one line for a lexical build, and the `index` receipt has no `degraded` field, so without this line a wrong `model_dir` or a missing feature produced a silent lexical generation. The flag is an explicit choice, so it stays quiet. A read still says nothing here: P2's `degraded` field is its channel. |
 
+### P1c — the two-file generation, reader half
+
+Branch: `bb/m4-p1c-two-file-read-thr_q2fyy3ptxm`, stacked on P1b (measured against it, not against
+`main`). Scope is `Expected`'s V-21 ordering and the three-way manifest check, `LoadOptions`'s
+`want_vectors`/`embedder`, the payload read/hash/decode path, `Load.vectors`, the retry cause's file
+name, every row of §3.1's table asserted in both read modes, and (review fix P1c-8) the read-side
+embedder threading that keeps a read-triggered rebuild from dropping the payload. No writer, scoring,
+CLI-flag or feature change.
+
+| ID | decision | why |
+|---|---|---|
+| P1c-1 | `Attempt::Retry` carries the path that failed, so `--no-rebuild` names `.janus/vectors.f32` on row 2 and `.janus/index.bin` on row 3. A **stale** manifest still refuses naming `index.bin`, as M3 did. | The table's refusal column names the file the reader actually rejected. Keeping the stale-manifest answer unchanged is why no shipped assertion in `tests/cli_search.rs` had to move. |
+| P1c-2 | The three-way vector-field consistency check lives in `Expected::check` and returns `Stale`, not `Retry`. | It costs no file open, a retry cannot fix it, and a hand-edited manifest is a rebuild condition, not a transient publication window. |
+| P1c-3 | `read_vectors` returns `Result<Option<Vectors>, (PathBuf, String)>`: `None` is "this generation has no vectors", the inner `Err` is a mismatch with its cause. | It keeps "not wanted" and "wanted but wrong" distinguishable without a second error enum; the caller turns the inner error into a retry cause, exactly like an index mismatch. |
+| P1c-4 | `want_vectors = true` with no embedder resolved still decodes the payload, using `manifest.embedder.dim` and `snapshot.chunks.len()`. | The manifest carries the whole shape, so a reader needs no model to validate rows. It also makes V-4 about `want_vectors` alone rather than about the embedder. Row 6 loads in both forms and never rebuilds. |
+| P1c-5 | `Load.vectors` is `None` for a read that did not ask for them, even when that read's own rebuild wrote them. | `None` means "you did not want them" (§2's data model), and returning rows a caller's α = 0 path would ignore invites an accidental use. |
+| P1c-6 | `LoadOptions::new` defaults `want_vectors: false` and `embedder: None`; `Debug` is hand-written because `&dyn Embedder` is not `Debug` and prints the id instead. | Every M3 call site keeps its exact behaviour, and the derived `Debug` would not compile. |
+| P1c-7 | ~~`search`/`facts` pass `embedder: None` and `want_vectors: false`~~ — superseded by P1c-8. | The reasoning ("P2 owns the read-side embedder") was right about α and wrong about the rebuild: a read that must rebuild is a writer, and a writer without an embedder drops the payload. |
+| P1c-8 | **Review fix.** Read commands resolve the embedder in `main` (`embedder_only`) and thread it through `search::run`/`query`/`prepare` and `facts::run`, keeping `want_vectors: false`. Only `index` prints the degraded-resolution line. | Without it, a read that had to rebuild published a lexical generation and **dropped** `vectors.f32`: `janus index`, a chunking change, then `janus search` cost 60 s of embedding work to a read. With it the rebuild produces the generation this process would have built, which is V-21 row 5 applied honestly. Stated consequence: a vectors-less generation is now row 5 for a search too, so `--no-rebuild` refuses it; the brief's "the next read loads with `embedder: None`" holds for a process that cannot embed (`enabled = false`), which is what the row-6 half of the CLI test asserts. α stays 0.0 and `semantic` stays 0.0; `tests/eval_quality.rs` passes `None`. |
+
 ## 11. Implementation log — Phase 2 (hybrid scoring)
 
 _Nothing recorded yet._
