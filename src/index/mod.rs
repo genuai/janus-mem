@@ -37,7 +37,11 @@ pub mod vectors;
 pub use lexical::{LexicalIndex, squash};
 
 /// The on-disk snapshot layout; a mismatch is a rebuild, never an error (S-6, §8.3).
-pub const FORMAT_VERSION: u16 = 1;
+///
+/// Version 2 (M4 V-1) adds `DocMeta::body_hash` to the snapshot and the
+/// `vectors.f32` payload with its three manifest fields. An M3 index is refused
+/// by `Expected::check` and rebuilt with one warning, never misread.
+pub const FORMAT_VERSION: u16 = 2;
 
 /// The compact persisted status (§3.2); the resolver's `Status` is reused.
 pub use crate::document::Status as StatusCode;
@@ -103,6 +107,13 @@ pub struct DocMeta {
     pub timeless: bool,
     /// Hash of the full file bytes.
     pub content_hash: Blake3Hash,
+    /// blake3 of `Document.body` **raw**, never a normalised body (V-26).
+    ///
+    /// The reuse witness both caches key on: a frontmatter edit that leaves the
+    /// body alone must not re-embed or re-tokenize, and normalising the body
+    /// here would fold line endings and reopen the hole V-23 closes.
+    /// `content_hash` stays as the whole-file fact M5's move detection wants.
+    pub body_hash: Blake3Hash,
     /// Identity of the indexed input (§3.4, S-9).
     pub lex_key: [u8; 32],
     /// Half-open range of this document's chunk occurrences.

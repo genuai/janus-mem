@@ -21,6 +21,8 @@ use crate::tokenize::{Stemmer, Tokenizer, TokenizerFingerprint};
 use crate::vault::{self, WalkOptions, identity, resolve};
 
 use super::build::{self, BuildPlan, BuildStats};
+use super::embed::EmbedderId;
+use super::vectors::{VECTORS_FILE, Vectors};
 use super::{ChunkMeta, ChunkingFingerprint, DocMeta, FORMAT_VERSION, LexicalIndex, Snapshot};
 
 macro_rules! corrupt {
@@ -87,8 +89,103 @@ pub struct Manifest {
     pub tokenizer: TokenizerFingerprint,
     /// The chunker parameters the index was built with.
     pub chunker: ChunkingFingerprint,
-    /// The embedder id; `None` in M3.
-    pub embedder: Option<String>,
+    /// The embedder that produced `vectors.f32`; `None` when there are no vectors.
+    ///
+    /// The three vector fields below are one fact (§3.1): they are all `Some`
+    /// together or all `None` together, and a manifest holding two of three is
+    /// corrupt. The shape lives here, never in the payload file.
+    pub embedder: Option<EmbedderId>,
+    /// blake3 of the bytes in `vectors.f32`.
+    pub vectors_sha: Option<String>,
+    /// Byte length of `vectors.f32`, checked against `chunks × dim × 4`.
+    pub vectors_len: Option<u64>,
+}
+
+/// The hashes and lengths of the payload files one publication wrote (§3.1).
+///
+/// `Manifest::new` takes this rather than loose fields so the three vector facts
+/// cannot be built half-populated: one [`VectorArtifact`] is one writer's whole
+/// claim about `vectors.f32`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Payloads {
+    /// blake3 of `index.bin`.
+    pub index_sha: String,
+    /// Byte length of `index.bin`.
+    pub index_len: u64,
+    /// The vectors payload, when this build wrote one.
+    pub vectors: Option<VectorArtifact>,
+}
+
+/// What the manifest records about `vectors.f32` (§3.1): which embedder, which
+/// bytes, and how many.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorArtifact {
+    /// The embedder that produced the rows.
+    pub id: EmbedderId,
+    /// blake3 of the bytes actually written.
+    pub sha: String,
+    /// Byte length of those bytes.
+    pub len: u64,
+}
+
+/// One build's rows together with the identity that produced them (§3.1).
+///
+/// [`Vectors`] deliberately carries no identity — it validates the shape it is
+/// given — so a writer must hold the id and the rows at once: rows without an
+/// id cannot be described in the manifest, and an id without rows describes
+/// nothing. Construction refuses a width mismatch, so the dim the manifest
+/// records is always the dim the payload has.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VectorSet {
+    id: EmbedderId,
+    rows: Vectors,
+}
+
+impl VectorSet {
+    /// Pairs validated rows with the embedder that produced them.
+    ///
+    /// # Errors
+    ///
+    /// [`Corrupt`] when `rows.dim()` is not `id.dim`: the manifest would then
+    /// describe a shape the payload does not have.
+    pub fn new(id: EmbedderId, rows: Vectors) -> Result<Self, Corrupt> {
+        if rows.dim() != id.dim as usize {
+            corrupt!(
+                "embedder `{}` has dim {} but the rows have dim {}",
+                id.name,
+                id.dim,
+                rows.dim()
+            );
+        }
+        Ok(Self { id, rows })
+    }
+
+    /// The embedder that produced the rows.
+    #[must_use]
+    pub fn id(&self) -> &EmbedderId {
+        &self.id
+    }
+
+    /// The validated rows, one per snapshot chunk.
+    #[must_use]
+    pub fn rows(&self) -> &Vectors {
+        &self.rows
+    }
+
+    /// The payload bytes and the manifest fields that describe them.
+    ///
+    /// The caller hashes exactly these bytes into `vectors_sha` (§3.1), so the
+    /// manifest never names a file it did not write.
+    #[must_use]
+    pub fn artifact(&self) -> (Vec<u8>, VectorArtifact) {
+        let bytes = self.rows.encode();
+        let artifact = VectorArtifact {
+            id: self.id.clone(),
+            sha: blake3::hash(&bytes).to_hex().to_string(),
+            len: bytes.len() as u64,
+        };
+        (bytes, artifact)
+    }
 }
 
 impl Manifest {
@@ -98,10 +195,13 @@ impl Manifest {
         root: &Path,
         snapshot: &Snapshot,
         chunker: ChunkingFingerprint,
-        index_sha: String,
-        index_len: u64,
+        payloads: Payloads,
         built_at: &str,
     ) -> Self {
+        let (embedder, vectors_sha, vectors_len) = match payloads.vectors {
+            Some(artifact) => (Some(artifact.id), Some(artifact.sha), Some(artifact.len)),
+            None => (None, None, None),
+        };
         Self {
             format_version: snapshot.format_version,
             schema_version: 1,
@@ -113,11 +213,13 @@ impl Manifest {
             terms: snapshot.terms.len(),
             postings: snapshot.postings.len(),
             avgdl: snapshot.avgdl,
-            index_sha,
-            index_len,
+            index_sha: payloads.index_sha,
+            index_len: payloads.index_len,
             tokenizer: snapshot.tokenizer,
             chunker,
-            embedder: None,
+            embedder,
+            vectors_sha,
+            vectors_len,
         }
     }
 }
@@ -130,10 +232,25 @@ pub struct Corrupt {
 }
 
 impl Corrupt {
-    fn new(reason: impl Into<String>) -> Self {
+    /// A build or validation failure that names the file or value that failed.
+    ///
+    /// `pub(crate)` because `build::plan` reports an embedder that broke its
+    /// contract through this one type rather than a second vocabulary.
+    pub(crate) fn new(reason: impl Into<String>) -> Self {
         Self {
             reason: reason.into(),
         }
+    }
+}
+
+/// The bridge from the payload format's typed errors (§3.1, P1b).
+///
+/// `vectors::Corrupt` names the offending value in a `thiserror` message; this
+/// impl carries that text into the store's single corruption vocabulary rather
+/// than duplicating the enum here or losing the detail.
+impl From<super::vectors::Corrupt> for Corrupt {
+    fn from(corrupt: super::vectors::Corrupt) -> Self {
+        Self::new(corrupt.to_string())
     }
 }
 
@@ -358,10 +475,18 @@ impl Drop for Lock {
     }
 }
 
-/// The six stages of a publication (S-17), the seam behind [`publish_with_hook`].
+/// The nine stages of a publication (S-17, V-3), the seam behind
+/// [`publish_with_hook`].
+///
+/// The three vectors stages fire only when the build wrote a payload; a
+/// degraded publish has three index and three manifest stages and drops any
+/// existing `vectors.f32` instead.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
+    VectorsWritten,
+    VectorsRenamed,
+    VectorsDirSynced,
     IndexWritten,
     IndexRenamed,
     IndexDirSynced,
@@ -381,6 +506,8 @@ pub struct Publication<'a> {
     pub snapshot: &'a Snapshot,
     /// The chunker fingerprint the manifest records.
     pub chunker: ChunkingFingerprint,
+    /// The rows to write to `vectors.f32`, or `None` for a lexical generation.
+    pub vectors: Option<&'a VectorSet>,
     /// Injected build time; no library path invents one (I-3).
     pub built_at: &'a str,
 }
@@ -395,7 +522,7 @@ pub fn publish(publication: &Publication<'_>) -> Result<Manifest, JanusError> {
     publish_with_hook(publication, &mut |_| {})
 }
 
-/// [`publish`] with a callback at each of the six [`Stage`]s: the §3.5 test seam.
+/// [`publish`] with a callback at each [`Stage`]: the §3.5 test seam.
 /// Errors are exactly [`publish`]'s.
 #[doc(hidden)]
 pub fn publish_with_hook(
@@ -406,7 +533,12 @@ pub fn publish_with_hook(
     publish_locked(publication, hook, &lock)
 }
 
-/// The six-stage write. `_lock` is a witness that the caller holds the lock.
+/// The write, stage by stage. `_lock` is a witness that the caller holds it.
+///
+/// Order is vectors, index, manifest (§3.1, V-3). The manifest is last because
+/// it is the commit record; the largest payload goes first so the window in
+/// which the commit record lags its payload is as short as possible. That order
+/// is not atomic and does not pretend to be: recovery is a rebuild.
 fn publish_locked(
     publication: &Publication<'_>,
     hook: &mut dyn FnMut(Stage),
@@ -416,9 +548,30 @@ fn publish_locked(
     // Only writers create temp files, so a leftover one is a crashed writer's.
     sweep_temps(dir)?;
 
-    let bytes = publication.snapshot.to_bytes()?;
+    // Encode the snapshot before touching either payload: an invalid snapshot
+    // must fail the publish with the previous generation untouched.
+    let index_bytes = publication.snapshot.to_bytes()?;
+
+    let vectors = match publication.vectors {
+        Some(set) => {
+            let (bytes, artifact) = set.artifact();
+            let path = dir.join(VECTORS_FILE);
+            let temp = write_temp(dir, &bytes)?;
+            hook(Stage::VectorsWritten);
+            persist(temp, &path)?;
+            hook(Stage::VectorsRenamed);
+            sync_dir(dir)?;
+            hook(Stage::VectorsDirSynced);
+            Some(artifact)
+        }
+        None => {
+            drop_vectors(dir)?;
+            None
+        }
+    };
+
     let index_path = dir.join(INDEX_FILE);
-    let temp = write_temp(dir, &bytes)?;
+    let temp = write_temp(dir, &index_bytes)?;
     hook(Stage::IndexWritten);
     persist(temp, &index_path)?;
     hook(Stage::IndexRenamed);
@@ -429,8 +582,11 @@ fn publish_locked(
         publication.root,
         publication.snapshot,
         publication.chunker,
-        blake3::hash(&bytes).to_hex().to_string(),
-        bytes.len() as u64,
+        Payloads {
+            index_sha: blake3::hash(&index_bytes).to_hex().to_string(),
+            index_len: index_bytes.len() as u64,
+            vectors,
+        },
         publication.built_at,
     );
     let manifest_path = dir.join(MANIFEST_FILE);
@@ -445,6 +601,27 @@ fn publish_locked(
     sync_dir(dir)?;
     hook(Stage::ManifestDirSynced);
     Ok(manifest)
+}
+
+/// Removes a previous `vectors.f32` when this build cannot write one (§3.6).
+///
+/// P1b has no reuse predicate, so a degraded build cannot carry a row forward
+/// and must drop the file rather than leave rows the next manifest does not
+/// describe. P4 replaces this branch with the carry-forward rule; until then the
+/// removal is unconditional and announced on exactly one line.
+fn drop_vectors(dir: &Path) -> Result<(), JanusError> {
+    let path = dir.join(VECTORS_FILE);
+    match fs::remove_file(&path) {
+        Ok(()) => {
+            sync_dir(dir)?;
+            tracing::warn!(
+                "vectors dropped: this build has no embedder, so {VECTORS_FILE} cannot be rebuilt"
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(io_error(&path, source)),
+    }
 }
 
 /// Writes `bytes` to a uniquely named temp file in `dir` and syncs it.
@@ -766,6 +943,7 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
         root: options.root,
         snapshot: &plan.snapshot,
         chunker: plan.chunker,
+        vectors: plan.vectors.as_ref(),
         built_at: options.built_at,
     };
     let manifest = publish_locked(&publication, &mut |_| {}, &lock)?;
@@ -784,7 +962,7 @@ fn rebuild_plan(root: &Path, config: &Config, dir: &Path) -> Result<BuildPlan, J
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
     identity::derive_identity(&mut documents, config);
     let previous = previous_snapshot(dir);
-    Ok(build::plan(config, &documents, previous.as_ref()))
+    Ok(build::plan(config, &documents, previous.as_ref(), None)?)
 }
 
 /// The old snapshot if its bytes still decode: reuse needs tokens, not a manifest.
@@ -844,6 +1022,7 @@ mod tests {
             effective_from: None,
             timeless: false,
             content_hash: Blake3Hash::of_bytes(b"body"),
+            body_hash: Blake3Hash::of_bytes(b"body"),
             lex_key: [0; 32],
             chunk_range: (0, 2),
         };
@@ -947,6 +1126,7 @@ mod tests {
                 max_chars: 1800,
                 overlap: 0.15,
             },
+            vectors: None,
             built_at: "2025-04-01T00:00:00Z",
         };
         let manifest = publish(&publication).expect("publish");
@@ -961,6 +1141,21 @@ mod tests {
 
         let read = fs::read(index_dir.join("index.bin")).expect("read index");
         assert_eq!(Snapshot::from_bytes(&read).expect("decode"), snapshot);
+    }
+
+    #[test]
+    fn a_vector_set_refuses_rows_whose_width_disagrees_with_the_embedder() {
+        let id = EmbedderId {
+            name: "hash-4".to_owned(),
+            dim: 4,
+            dtype: "f32".to_owned(),
+            normalisation: "l2".to_owned(),
+        };
+        let rows = Vectors::new(2, vec![1.0, 0.0]).expect("one unit row of width 2");
+        let error = VectorSet::new(id, rows).expect_err("the widths disagree");
+
+        assert!(error.reason.contains("hash-4"), "{}", error.reason);
+        assert!(error.reason.contains("dim"), "{}", error.reason);
     }
 
     proptest! {
@@ -990,6 +1185,7 @@ mod tests {
                 effective_from: None,
                 timeless: false,
                 content_hash: Blake3Hash::of_bytes(b"body"),
+                body_hash: Blake3Hash::of_bytes(b"body"),
                 lex_key: [0; 32],
                 chunk_range: (0, index.len() as u32),
             }];

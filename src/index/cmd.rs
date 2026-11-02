@@ -27,6 +27,7 @@ use crate::error::JanusError;
 use crate::id::DocId;
 use crate::index::Snapshot;
 use crate::index::build::{self, BuildPlan};
+use crate::index::embed::Embedder;
 use crate::index::store::{self, INDEX_FILE, Publication};
 use crate::scan::API_VERSION;
 use crate::vault::{self, WalkOptions, identity, resolve};
@@ -46,14 +47,19 @@ pub struct Options {
 
 /// Runs `janus index`.
 ///
+/// `embedder` is the one resolved at the binary edge (V-25): `None` publishes a
+/// lexical generation and drops any existing payload, and every chunk of every
+/// document is embedded when it is `Some` (P1b has no reuse; P4 adds it).
+///
 /// # Errors
 ///
-/// Propagates corpus, config, walk, path and publication failures. A file that
-/// cannot be read is a skip, not an error, exactly as in `janus scan`.
+/// Propagates corpus, config, walk, path, embedding and publication failures. A
+/// file that cannot be read is a skip, not an error, exactly as in `janus scan`.
 pub fn run(
     root: &Path,
     config: &Config,
     clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
     options: &Options,
 ) -> Result<(), JanusError> {
     let started = Instant::now();
@@ -68,7 +74,7 @@ pub fn run(
     } else {
         previous_snapshot(&dir)
     };
-    let plan = build::plan_forced(config, &documents, previous.as_ref(), &forced);
+    let plan = build::plan_forced(config, &documents, previous.as_ref(), &forced, embedder)?;
 
     let written = if options.dry_run {
         None
@@ -79,6 +85,7 @@ pub fn run(
             root,
             snapshot: &plan.snapshot,
             chunker: plan.chunker,
+            vectors: plan.vectors.as_ref(),
             built_at: &built_at,
         })?)
     };

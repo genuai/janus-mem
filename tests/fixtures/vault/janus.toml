@@ -24,5 +24,10 @@ future_alias = ["ignored"]
 [index]
 exclude = ["archive/private/**", "**/*.draft.md"]
 
+[embedding]
+# The deterministic test double: the fixture needs a real payload without a
+# model file, and `janus index` on it must write `vectors.f32` (§5 P1b item 7).
+model = "hash-64"
+
 [experimental]
 unknown_table = true

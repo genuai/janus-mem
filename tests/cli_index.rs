@@ -8,7 +8,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use common::{fixture_vault, index, run, run_ok};
+use common::{fixture_vault, index, janus, run, run_ok};
 
 fn receipt(root: &Path, args: &[&str]) -> serde_json::Value {
     let mut all = vec!["index"];
@@ -137,4 +137,179 @@ fn an_empty_corpus_indexes_to_an_empty_generation() {
     let report = receipt(dir.path(), &["--json"]);
     assert_eq!(report["reused"], 0, "{report}");
     assert_eq!(report["docs"], 0, "{report}");
+}
+
+// ─────────────────── the two-file generation through the CLI ───────────────
+
+/// Every file in `.janus/`, so "wrote nothing" can be asserted byte-for-byte.
+fn dir_snapshot(dir: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    for entry in fs::read_dir(dir).expect("the index directory exists") {
+        let entry = entry.expect("index directory entry");
+        files.insert(
+            entry.file_name().to_string_lossy().into_owned(),
+            fs::read(entry.path()).expect("read an index directory file"),
+        );
+    }
+    files
+}
+
+fn manifest(root: &Path) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(root.join(".janus/manifest.json")).expect("read manifest"))
+        .expect("the manifest is JSON")
+}
+
+/// Rewrites `manifest.json`, so a stale or corrupt generation is built directly.
+fn patch_manifest(root: &Path, patch: impl FnOnce(&mut serde_json::Value)) {
+    let path = root.join(".janus/manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read manifest")).expect("manifest JSON");
+    patch(&mut manifest);
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&manifest).expect("encode manifest"),
+    )
+    .expect("patch manifest");
+}
+
+#[test]
+fn index_writes_vectors_f32_that_match_the_manifest() {
+    let vault = fixture_vault();
+    let report = receipt(vault.path(), &["--json"]);
+    let manifest = manifest(vault.path());
+
+    let bytes = fs::read(vault.path().join(".janus/vectors.f32")).expect("the payload exists");
+    let chunks = report["chunks"].as_u64().expect("chunks");
+    assert_eq!(manifest["format_version"], 2);
+    assert_eq!(manifest["embedder"]["name"], "hash-64");
+    assert_eq!(manifest["embedder"]["dim"], 64);
+    assert_eq!(manifest["vectors_len"], bytes.len() as u64);
+    assert_eq!(
+        manifest["vectors_sha"],
+        blake3::hash(&bytes).to_hex().to_string()
+    );
+    // 64 f32 values per row, one row per chunk occurrence.
+    assert_eq!(bytes.len() as u64, chunks * 64 * 4);
+    assert_eq!(manifest["chunks"], chunks);
+}
+
+#[test]
+fn a_second_index_produces_byte_identical_payloads() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let first_index = fs::read(vault.path().join(".janus/index.bin")).unwrap();
+    let first_vectors = fs::read(vault.path().join(".janus/vectors.f32")).unwrap();
+    let first_sha = manifest(vault.path())["vectors_sha"].clone();
+
+    index(vault.path());
+
+    assert_eq!(
+        fs::read(vault.path().join(".janus/index.bin")).unwrap(),
+        first_index,
+        "the second build reuses tokens and reproduces the snapshot"
+    );
+    assert_eq!(
+        fs::read(vault.path().join(".janus/vectors.f32")).unwrap(),
+        first_vectors,
+        "the embedder is deterministic, so re-embedding everything is byte-identical"
+    );
+    assert_eq!(manifest(vault.path())["vectors_sha"], first_sha);
+}
+
+#[test]
+fn no_embeddings_drops_the_payload_with_one_line_and_the_next_read_loads() {
+    let vault = fixture_vault();
+    index(vault.path());
+    assert!(vault.path().join(".janus/vectors.f32").exists());
+
+    // Default tracing on purpose: the drop is a diagnostic, and silencing it
+    // would make "says so" unverifiable.
+    let output = janus()
+        .arg("--vault")
+        .arg(vault.path())
+        .args(["index", "--no-embeddings"])
+        .output()
+        .expect("run janus index --no-embeddings");
+    assert!(
+        output.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!vault.path().join(".janus/vectors.f32").exists());
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let about_vectors: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("vectors"))
+        .collect();
+    assert_eq!(
+        about_vectors.len(),
+        1,
+        "expected exactly one line about the dropped payload: {stderr:?}"
+    );
+    assert!(about_vectors[0].contains("dropped"), "{stderr:?}");
+
+    let manifest = manifest(vault.path());
+    assert!(manifest["embedder"].is_null(), "{manifest}");
+    assert!(manifest["vectors_sha"].is_null(), "{manifest}");
+    assert!(manifest["vectors_len"].is_null(), "{manifest}");
+
+    // The next read resolves to `embedder: None`, so nothing is stale and
+    // `--no-rebuild` loads the generation unchanged.
+    let before = dir_snapshot(&vault.path().join(".janus"));
+    let output = run(vault.path(), &["search", "cache", "--no-rebuild", "--json"]);
+    assert!(
+        output.status.success(),
+        "a vectors-less generation must load: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+    assert_eq!(dir_snapshot(&vault.path().join(".janus")), before);
+}
+
+#[test]
+fn indexing_again_after_no_embeddings_restores_the_payload() {
+    let vault = fixture_vault();
+    index(vault.path());
+    run_ok(vault.path(), &["index", "--no-embeddings"]);
+    assert!(!vault.path().join(".janus/vectors.f32").exists());
+
+    index(vault.path());
+    assert!(vault.path().join(".janus/vectors.f32").exists());
+    assert_eq!(manifest(vault.path())["embedder"]["name"], "hash-64");
+}
+
+#[test]
+fn a_format_version_1_manifest_is_refused_with_a_warning_and_rebuilt() {
+    let vault = fixture_vault();
+    index(vault.path());
+    patch_manifest(vault.path(), |manifest| {
+        manifest["format_version"] = serde_json::json!(1)
+    });
+
+    let output = run(vault.path(), &["search", "cache"]);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stale: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("stale:"))
+        .collect();
+    assert_eq!(stale.len(), 1, "expected one stale line, got {stderr:?}");
+    assert!(stale[0].contains("format_version 1 != 2"), "{stale:?}");
+    assert_eq!(manifest(vault.path())["format_version"], 2);
+
+    // `--no-rebuild` refuses the same state without writing.
+    patch_manifest(vault.path(), |manifest| {
+        manifest["format_version"] = serde_json::json!(1)
+    });
+    let before = dir_snapshot(&vault.path().join(".janus"));
+    let output = run(vault.path(), &["search", "cache", "--no-rebuild"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains(".janus/index.bin"),
+        "the refusal names the generation it could not use"
+    );
+    assert_eq!(dir_snapshot(&vault.path().join(".janus")), before);
 }

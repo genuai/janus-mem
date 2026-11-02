@@ -73,6 +73,10 @@ pub enum Command {
         #[arg(long)]
         rebuild: bool,
 
+        /// Index lexically and drop any vectors, even when a model resolves
+        #[arg(long)]
+        no_embeddings: bool,
+
         /// Report the receipt without writing anything
         #[arg(long)]
         dry_run: bool,
