@@ -1435,7 +1435,7 @@ is a predicate rather than the `current` gate.
 
 ### Tests and gates
 
-31 unit tests in `src/score.rs` plus one integration test in
+27 unit tests in `src/score.rs` plus one integration test in
 `tests/no_wall_clock.rs`: the 25-cell intent table, the numeric `0.7×`/`0.8×`
 penalties, inclusion through `rank_documents` under all four intents and the
 override, decay monotonicity over 720 days and the five `1.0` short-circuits,
@@ -1447,10 +1447,19 @@ conversion, and the proptest above.
 
 `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test --all-targets`, `cargo doc --no-deps`, the Windows cross-check and
-`scripts/pr-size.sh` are green; the numbers and exact commands are in the PR
-body. No timing is asserted. `LexicalIndex` and `squash` are consumed as-is: no
-BM25 value is recomputed here, and `rank_documents` takes finished `Breakdown`s
-rather than scoring.
+`scripts/pr-size.sh` are green. `LexicalIndex` and `squash` are consumed as-is:
+no BM25 value is recomputed here, and `rank_documents` takes finished
+`Breakdown`s rather than scoring. No timing is asserted.
+
+**Size: 583 logic / 859 tests against the hard ceilings 600 / 900.** That is
+above §5's rough estimate (≈310 / ≈420) and the reason is recorded rather than
+hidden: the estimate assumed terse docs, while `#![warn(missing_docs)]` requires
+a doc line per public field (11 on `ScoreDoc`, 8 on `Breakdown`, 7 on
+`ScoreInput`), the §3.2 table is 55 lines of literal data, and the test side
+carries one hand-derived assertion per `(intent, status)` cell plus the §3.1
+tie-break cases. Nothing was dropped to hit the estimate, and the hard ceilings
+hold. `Intent` deliberately has no `as_str`/`Display` yet: JSON rendering is
+phase 6's DTO concern and the enum is not user-visible in phase 3.
 
 ## 13. Implementation log — Phase 4 (snapshot + incremental)
 
