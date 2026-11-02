@@ -266,3 +266,256 @@ fn an_unknown_intent_is_a_usage_error() {
     assert!(stderr.contains("unknown intent"), "{stderr}");
     assert!(stderr.contains("history"), "{stderr}");
 }
+
+/// A vault with four documents covering owning scopes, `shared_with`, and global.
+fn scope_vault() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"scopes\"\n",
+    )
+    .unwrap();
+
+    let docs = [
+        ("acme.md", "title: Acme\nscope: org:acme", "scope probe"),
+        ("beta.md", "title: Beta\nscope: org:beta", "scope probe"),
+        ("global.md", "title: Global", "scope probe"),
+        (
+            "shared.md",
+            "title: Shared\nscope: org:beta\nshared_with: [shared:finance]",
+            "scope probe",
+        ),
+    ];
+    for (path, front, body) in docs {
+        fs::write(
+            root.join(path),
+            format!("---\n{front}\n---\n\n# {path}\n\n{body}\n"),
+        )
+        .unwrap();
+    }
+    dir
+}
+
+/// A vault where status, type and decay disagree, all dated for determinism.
+fn status_vault() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"statuses\"\n",
+    )
+    .unwrap();
+
+    let docs = [
+        (
+            "draft-decision.md",
+            "type: decision\nstatus: draft\ndate: 2024-06-01",
+        ),
+        (
+            "active-decision.md",
+            "type: decision\nstatus: active\ndate: 2024-06-01",
+        ),
+        (
+            "frozen-spec.md",
+            "type: spec\nstatus: frozen\ndate: 2024-06-01",
+        ),
+        (
+            "retired-principle.md",
+            "type: principle\nstatus: deprecated\ndate: 2024-06-01",
+        ),
+        (
+            "active-note.md",
+            "type: note\nstatus: active\ndate: 2024-06-01",
+        ),
+    ];
+    for (path, front) in docs {
+        fs::write(
+            root.join(path),
+            format!("---\ntitle: {path}\n{front}\n---\n\n# {path}\n\nquorum rules.\n"),
+        )
+        .unwrap();
+    }
+    dir
+}
+
+fn paths(report: &Value) -> std::collections::BTreeSet<String> {
+    result_paths(report).into_iter().collect()
+}
+
+#[test]
+fn types_and_tags_filter_from_the_published_snapshot() {
+    let vault = fixture_vault();
+    index(vault.path());
+
+    let by_alias = search_json(
+        vault.path(),
+        &["cache", "--intent", "history", "--types", "adr"],
+    );
+    assert_eq!(result_paths(&by_alias).len(), 3, "{by_alias}");
+    for hit in by_alias["results"].as_array().unwrap() {
+        assert_eq!(hit["type"], "decision", "{hit}");
+    }
+
+    let specs = search_json(vault.path(), &["crlf", "--types", "spec"]);
+    assert!(!result_paths(&specs).is_empty(), "{specs}");
+    for hit in specs["results"].as_array().unwrap() {
+        assert_eq!(hit["type"], "spec", "{hit}");
+    }
+
+    let tagged = search_json(vault.path(), &["yaml", "--tags", "comments"]);
+    assert_eq!(
+        result_paths(&tagged),
+        vec!["notes/yaml-comments.md".to_owned()],
+        "{tagged}"
+    );
+
+    // Tag matching folds case; the frontmatter tag is `yaml`.
+    let folded = search_json(vault.path(), &["yaml", "--tags", "YAML"]);
+    assert_eq!(
+        result_paths(&folded),
+        vec!["notes/yaml-comments.md".to_owned()]
+    );
+
+    let excluded = search_json(
+        vault.path(),
+        &["yaml", "--tags", "comments", "--types", "spec"],
+    );
+    assert!(result_paths(&excluded).is_empty(), "{excluded}");
+}
+
+#[test]
+fn scopes_filter_end_to_end() {
+    let vault = scope_vault();
+    index(vault.path());
+
+    assert_eq!(paths(&search_json(vault.path(), &["probe"])).len(), 4);
+    assert_eq!(
+        paths(&search_json(
+            vault.path(),
+            &["probe", "--scope", "org:acme"]
+        )),
+        std::collections::BTreeSet::from(["acme.md".to_owned(), "global.md".to_owned()])
+    );
+    assert_eq!(
+        paths(&search_json(
+            vault.path(),
+            &["probe", "--scope", "org:beta"]
+        )),
+        std::collections::BTreeSet::from([
+            "beta.md".to_owned(),
+            "global.md".to_owned(),
+            "shared.md".to_owned(),
+        ])
+    );
+    assert_eq!(
+        paths(&search_json(
+            vault.path(),
+            &["probe", "--scope", "shared:finance"]
+        )),
+        std::collections::BTreeSet::from(["global.md".to_owned(), "shared.md".to_owned()])
+    );
+    assert_eq!(
+        paths(&search_json(
+            vault.path(),
+            &["probe", "--scope", "org:acme", "--scope-only"]
+        )),
+        std::collections::BTreeSet::from(["acme.md".to_owned()])
+    );
+}
+
+#[test]
+fn scope_only_without_scope_is_a_usage_error() {
+    let vault = scope_vault();
+    index(vault.path());
+    let output = run(vault.path(), &["search", "probe", "--scope-only"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--scope-only"), "{stderr}");
+    assert!(stderr.contains("--scope"), "{stderr}");
+}
+
+#[test]
+fn include_superseded_widens_current_and_nothing_else() {
+    let vault = fixture_vault();
+    index(vault.path());
+
+    let default = search_json(vault.path(), &["cache", "--limit", "20"]);
+    assert!(
+        default["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hit| hit["status"] != "superseded"),
+        "{default}"
+    );
+
+    let flagged = search_json(
+        vault.path(),
+        &["cache", "--include-superseded", "--limit", "20"],
+    );
+    let superseded: Vec<&Value> = flagged["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|hit| hit["status"] == "superseded")
+        .collect();
+    assert_eq!(superseded.len(), 3, "{flagged}");
+    for hit in &superseded {
+        assert_eq!(hit["scores"]["status_factor"], 1.0, "{hit}");
+    }
+
+    // Same chunk, same span, same breadcrumb as the history view.
+    let history = search_json(
+        vault.path(),
+        &["cache", "--intent", "history", "--limit", "20"],
+    );
+    let by_path: std::collections::BTreeMap<String, &Value> = history["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| (hit["rel_path"].as_str().unwrap().to_owned(), hit))
+        .collect();
+    for hit in &superseded {
+        let reference = by_path[hit["rel_path"].as_str().unwrap()];
+        assert_eq!(hit["chunk_id"], reference["chunk_id"], "{hit}");
+        assert_eq!(hit["span"], reference["span"], "{hit}");
+        assert_eq!(hit["breadcrumb"], reference["breadcrumb"], "{hit}");
+    }
+}
+
+#[test]
+fn a_decay_override_changes_the_score_but_not_a_timeless_type() {
+    let vault = status_vault();
+    index(vault.path());
+
+    // `decision`/`spec`/`principle` are timeless in the shipped config, so a
+    // half-life override changes their decay not at all (§9 gap 9: the flag
+    // overrides the parameter, never the exemption). A `note` does decay, and
+    // decays harder with a one-day half-life.
+    let plain = search_json(vault.path(), &["quorum", "--intent", "current"]);
+    let overridden = search_json(
+        vault.path(),
+        &["quorum", "--intent", "current", "--decay-half-life", "1"],
+    );
+    let decay = |report: &Value, path: &str| -> f64 {
+        report["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["rel_path"] == path)
+            .unwrap_or_else(|| panic!("no hit for {path}: {report}"))["scores"]["decay"]
+            .as_f64()
+            .unwrap()
+    };
+    let note_plain = decay(&plain, "active-note.md");
+    let note_overridden = decay(&overridden, "active-note.md");
+    assert!(note_plain < 1.0, "{plain}");
+    assert!(note_overridden < note_plain, "{overridden}");
+    for hit in overridden["results"].as_array().unwrap() {
+        if hit["type"] != "note" {
+            assert_eq!(hit["scores"]["decay"], 1.0, "{hit}");
+        }
+    }
+}

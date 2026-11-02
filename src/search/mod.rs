@@ -28,7 +28,7 @@ use crate::id::{ChunkId, DocId};
 use crate::index::store::{self, LoadOptions, Policy};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
 use crate::scan::API_VERSION;
-use crate::score::{self, Breakdown, Intent, ScoreDoc, ScoreInput};
+use crate::score::{self, Breakdown, Intent, ScopeFilter, ScoreDoc, ScoreInput};
 use crate::tokenize::Tokenizer;
 
 /// The `--limit` default: ten documents (§3.1, S-16).
@@ -41,8 +41,20 @@ pub struct Options {
     pub query: String,
     /// Ranking intent name; `None` means `current`.
     pub intent: Option<String>,
+    /// The query scope set; repeated `--scope` unions (§6.12 rule 4).
+    pub scopes: Vec<String>,
+    /// Exclude `global` and shared-only matches; requires a scope (§9 gap 10).
+    pub scope_only: bool,
     /// Maximum documents returned, after grouping (§3.1 step 5).
     pub limit: usize,
+    /// Canonical type names or configured aliases.
+    pub types: Vec<String>,
+    /// Frontmatter tags; a document matches any one of them.
+    pub tags: Vec<String>,
+    /// `--decay-half-life`; overrides the parameter, never `timeless` (§9 gap 9).
+    pub decay_half_life: Option<f64>,
+    /// Adds declared-`superseded` to `current`, at factor 1.0 (§3.2, S-19).
+    pub include_superseded: bool,
     /// Refuse instead of rebuilding; a read stays a read (S-8).
     pub no_rebuild: bool,
     /// Emit one JSON object on stdout instead of the table.
@@ -64,37 +76,45 @@ pub fn run(
 ) -> Result<(), JanusError> {
     let started = Instant::now();
     let intent = parse_intent(options.intent.as_deref())?;
+    require_scope(options.scope_only, &options.scopes)?;
 
     let prepared = prepare(root, config, clock, options.no_rebuild)?;
     let rows = doc_rows(&prepared.snapshot, config);
-    let docs: Vec<ScoreDoc<'_>> = rows.iter().map(|row| row.score_doc()).collect();
-    let selected: Vec<&DocRow> = rows.iter().collect();
+    let filter = Filter::new(
+        config,
+        &options.types,
+        &options.tags,
+        &options.scopes,
+        options.scope_only,
+    );
+    let (selected, map) = select(&rows, |row| filter.matches(row));
+    let docs: Vec<ScoreDoc<'_>> = selected.iter().map(|row| row.score_doc()).collect();
 
     let (scores, reference) = query_scores(&prepared.index, &options.query);
-    let policy = score::policy(intent, false);
+    let policy = score::policy(intent, options.include_superseded);
     let mut ordinals = vec![0_u32; docs.len()];
     let mut occurrences: Vec<Vec<(ChunkId, u32, usize)>> = vec![Vec::new(); docs.len()];
     let mut hidden = BTreeSet::new();
     let (mut chunk_to_doc, mut chunk_ids, mut breakdowns) = (Vec::new(), Vec::new(), Vec::new());
 
     for (index, chunk) in prepared.snapshot.chunks.iter().enumerate() {
-        let Some(doc_index) = map_doc(chunk.doc as usize, docs.len()) else {
+        let Some(Some(doc_index)) = map.get(chunk.doc as usize) else {
             continue;
         };
         let raw = scores.get(index).copied().unwrap_or(0.0);
-        let doc = &docs[doc_index];
+        let doc = &docs[*doc_index];
         if raw <= 0.0 {
             continue;
         }
         if !policy.includes(doc.status) {
             // §3.2's gate is an inclusion rule: count it, do not score it zero.
-            hidden.insert(doc_index);
+            hidden.insert(*doc_index);
             continue;
         }
-        let ordinal = ordinals[doc_index];
-        ordinals[doc_index] = ordinal.saturating_add(1);
-        occurrences[doc_index].push((chunk.id, ordinal, index));
-        chunk_to_doc.push(doc_index as u32);
+        let ordinal = ordinals[*doc_index];
+        ordinals[*doc_index] = ordinal.saturating_add(1);
+        occurrences[*doc_index].push((chunk.id, ordinal, index));
+        chunk_to_doc.push(*doc_index as u32);
         chunk_ids.push(chunk.id);
         breakdowns.push(score::score(
             clock,
@@ -104,13 +124,14 @@ pub fn run(
                 semantic: 0.0,
                 intent,
                 alpha: 0.0,
-                half_life_days: None,
-                include_superseded: false,
+                half_life_days: options.decay_half_life,
+                include_superseded: options.include_superseded,
             },
         ));
     }
 
     let ranked = score::rank_documents(policy, &docs, &chunk_to_doc, &chunk_ids, &breakdowns);
+    let matched = ranked.len();
     let mut hits = Vec::new();
     for winner in ranked {
         if hits.len() >= options.limit {
@@ -144,6 +165,15 @@ pub fn run(
             hidden.len(),
             intent_name(intent)
         ));
+    }
+    if matched > hits.len() {
+        notes.push(format!(
+            "{} more document(s) matched; raise --limit to see them",
+            matched - hits.len()
+        ));
+    }
+    if options.scope_only {
+        notes.push("--scope-only: global and shared-only matches excluded".to_owned());
     }
     render(&Render {
         root,
@@ -230,6 +260,16 @@ pub(crate) fn parse_intent(raw: Option<&str>) -> Result<Intent, JanusError> {
     }
 }
 
+/// `--scope-only` without a scope has nothing to narrow to (§9 gap 10).
+pub(crate) fn require_scope(scope_only: bool, scopes: &[String]) -> Result<(), JanusError> {
+    if scope_only && scopes.is_empty() {
+        return Err(usage(
+            "--scope-only requires at least one --scope; without one there is nothing to narrow to",
+        ));
+    }
+    Ok(())
+}
+
 /// A usage error: understood, but rejected before any work (§9.1 code 2).
 pub(crate) fn usage(message: impl Into<String>) -> JanusError {
     JanusError::Usage {
@@ -250,6 +290,8 @@ pub(crate) struct DocRow {
     pub(crate) date: Option<NaiveDate>,
     pub(crate) effective_from: Option<NaiveDate>,
     pub(crate) scope: String,
+    pub(crate) shared_with: Vec<String>,
+    pub(crate) tags: Vec<String>,
 }
 
 impl DocRow {
@@ -263,7 +305,7 @@ impl DocRow {
             date: self.date,
             effective_from: self.effective_from,
             scope: &self.scope,
-            shared_with: &[],
+            shared_with: &self.shared_with,
         }
     }
 }
@@ -286,6 +328,8 @@ pub(crate) fn doc_rows(snapshot: &Snapshot, config: &Config) -> Vec<DocRow> {
                 date: meta.date,
                 effective_from: meta.effective_from,
                 scope: text(pool, meta.scope),
+                shared_with: strings(pool, &meta.shared_with),
+                tags: strings(pool, &meta.tags),
             }
         })
         .collect()
@@ -295,9 +339,66 @@ fn text(pool: &StringPool, id: StringId) -> String {
     pool.get(id).unwrap_or_default().to_owned()
 }
 
-/// The snapshot's document index, when it is a valid chunk owner.
-fn map_doc(index: usize, docs: usize) -> Option<usize> {
-    (index < docs).then_some(index)
+fn strings(pool: &StringPool, ids: &[StringId]) -> Vec<String> {
+    ids.iter().map(|id| text(pool, *id)).collect()
+}
+
+/// Type, tag and scope filters: eligibility, never a weight (§3.1 step 3).
+pub(crate) struct Filter {
+    types: BTreeSet<String>,
+    tags: BTreeSet<String>,
+    scopes: ScopeFilter,
+}
+
+impl Filter {
+    /// Canonicalizes types through the config registry, so `adr` matches
+    /// `decision` (§6.6.1), and folds tag case for a friendlier match.
+    pub(crate) fn new(
+        config: &Config,
+        types: &[String],
+        tags: &[String],
+        scopes: &[String],
+        scope_only: bool,
+    ) -> Self {
+        Self {
+            types: types
+                .iter()
+                .map(|name| config.resolve_type(name).name.into_owned())
+                .collect(),
+            tags: tags.iter().map(|tag| normalise_tag(tag)).collect(),
+            scopes: ScopeFilter::new(scopes, scope_only),
+        }
+    }
+
+    pub(crate) fn matches(&self, row: &DocRow) -> bool {
+        let type_ok = self.types.is_empty() || self.types.contains(row.type_name.as_str());
+        let tag_ok = self.tags.is_empty()
+            || row
+                .tags
+                .iter()
+                .any(|tag| self.tags.contains(&normalise_tag(tag)));
+        type_ok && tag_ok && self.scopes.matches(&row.scope, &row.shared_with)
+    }
+}
+
+fn normalise_tag(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase()
+}
+
+/// Applies `keep` to every row, returning the kept rows and a snapshot-index map.
+pub(crate) fn select(
+    rows: &[DocRow],
+    keep: impl Fn(&DocRow) -> bool,
+) -> (Vec<&DocRow>, Vec<Option<usize>>) {
+    let mut selected = Vec::new();
+    let mut map = vec![None; rows.len()];
+    for (index, row) in rows.iter().enumerate() {
+        if keep(row) {
+            map[index] = Some(selected.len());
+            selected.push(row);
+        }
+    }
+    (selected, map)
 }
 
 // ───────────────────────────────── results ─────────────────────────────────
@@ -389,7 +490,10 @@ struct HitDto<'a> {
     type_name: &'a str,
     status: &'a str,
     date: Option<String>,
+    effective_from: Option<String>,
     scope: &'a str,
+    shared_with: &'a [String],
+    tags: &'a [String],
     scores: Breakdown,
     chunk_id: String,
     ordinal: u32,
@@ -412,7 +516,10 @@ impl<'a> HitDto<'a> {
             type_name: &row.type_name,
             status: row.status.as_str(),
             date: row.date.map(|date| date.to_string()),
+            effective_from: row.effective_from.map(|date| date.to_string()),
             scope: &row.scope,
+            shared_with: &row.shared_with,
+            tags: &row.tags,
             scores: hit.breakdown,
             chunk_id: chunk.id.to_hex(),
             ordinal: hit.ordinal,

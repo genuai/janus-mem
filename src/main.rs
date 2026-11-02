@@ -105,7 +105,13 @@ fn run(cli: Cli) -> Result<(), JanusError> {
         Command::Search {
             query,
             intent,
+            scope,
+            scope_only,
             limit,
+            types,
+            tags,
+            decay_half_life,
+            include_superseded,
             no_rebuild,
             json,
         } => {
@@ -120,7 +126,13 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                 search::Options {
                     query,
                     intent,
+                    scopes: scope,
+                    scope_only,
                     limit,
+                    types,
+                    tags,
+                    decay_half_life,
+                    include_superseded,
                     no_rebuild,
                     json,
                 },
