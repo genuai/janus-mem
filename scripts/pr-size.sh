@@ -16,8 +16,14 @@
 # hard to review - the logic is. A file counts as tests if it lives in tests/ or
 # benches/, or if the line sits after the file's first `#[cfg(test)]`.
 #
+# The ceiling gates the initial submission, not every fix. A reviewer who has
+# already read the branch has spent the attention the ceiling protects, so after
+# the first review the same numbers are reported as advisory. Strict is the
+# default: a developer planning work should see the hard number and the failure.
+# CI passes --advisory only once the PR has at least one review.
+#
 # Usage:
-#   scripts/pr-size.sh [--base REF] [--logic N] [--tests N] [--quiet]
+#   scripts/pr-size.sh [--base REF] [--logic N] [--tests N] [--quiet] [--advisory]
 #
 # Environment:
 #   BASE   ref to diff against (default: origin/main)
@@ -25,7 +31,7 @@
 #   TESTS  test-line ceiling (default: 900)
 #
 # Exit codes:
-#   0  within budget
+#   0  within budget (or over budget with --advisory)
 #   1  over the hard ceiling
 #   2  usage or environment error
 #
@@ -40,6 +46,7 @@ BASE="${BASE:-origin/main}"
 LOGIC="${LOGIC:-600}"
 TESTS="${TESTS:-900}"
 QUIET=0
+ADVISORY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,7 +54,8 @@ while [[ $# -gt 0 ]]; do
     --logic) LOGIC="$2"; shift 2 ;;
     --tests) TESTS="$2"; shift 2 ;;
     --quiet) QUIET=1; shift ;;
-    -h|--help) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --advisory) ADVISORY=1; shift ;;
+    -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -160,6 +168,14 @@ fi
 if (( tests > TESTS )); then
   echo "✗ tests over budget: $tests lines (limit $TESTS)" >&2
   over=1
+fi
+
+if (( over )) && (( ADVISORY )); then
+  # Same report, but a review already exists: the numbers stay visible as a
+  # GitHub annotation and the check does not fail. Harmless outside CI, where
+  # `::warning::` is just a line of text.
+  echo "::warning::over budget (logic $logic/$LOGIC, tests $tests/$TESTS) — advisory: the ceiling gates the initial submission only, and a review already exists." >&2
+  exit 0
 fi
 
 if (( over )); then
