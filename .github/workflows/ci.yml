@@ -72,6 +72,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
 
+  # The one job allowed to reach the network, and it does so at *build* time:
+  # `fastembed` -> `ort` fetches a prebuilt ONNX Runtime archive (§3.2, V-13).
+  # `embeddings` is not a default feature, so the `test`, `eval` and `windows`
+  # jobs above never compile it; this job is where the module is linted at all,
+  # because the default clippy run cannot see it. No test here loads a model.
+  embeddings:
+    needs: changes
+    if: ${{ github.event_name == 'push' && needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: embeddings
+      - run: cargo check --all-targets --features embeddings
+      - run: cargo clippy --all-targets --features embeddings -- -D warnings
+
   # Enforces the PR size budget in AGENTS.md. Advisory instruction files are
   # read once at session start and then drift; a failing required check is a
   # fact that every session has to deal with. The ceiling gates the initial

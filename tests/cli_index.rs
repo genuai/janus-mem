@@ -397,9 +397,14 @@ fn a_format_version_1_manifest_is_refused_with_a_warning_and_rebuilt() {
 #[test]
 fn index_says_why_it_could_not_embed() {
     let dir = tempfile::tempdir().unwrap();
+    // `model_dir` pins the search, so a machine that happens to have a model in
+    // the cache cannot turn this into an embedding run. Which §3.2 column it
+    // degrades on depends on the build: without `embeddings` no model can be
+    // loaded at all; with it, the files are simply not there.
     fs::write(
         dir.path().join("janus.toml"),
-        "index_dir = \".janus\"\ncorpus_id = \"no-model\"\n\n[embedding]\nmodel = \"AllMiniLML6V2\"\n",
+        "index_dir = \".janus\"\ncorpus_id = \"no-model\"\n\n\
+         [embedding]\nmodel = \"AllMiniLML6V2\"\nmodel_dir = \"/definitely/not/a/model\"\n",
     )
     .unwrap();
 
@@ -421,7 +426,12 @@ fn index_says_why_it_could_not_embed() {
         .filter(|line| line.contains("embeddings unavailable"))
         .collect();
     assert_eq!(lines.len(), 1, "expected one reason line: {stderr:?}");
-    assert!(lines[0].contains("not compiled"), "{stderr:?}");
+    let reason = if cfg!(feature = "embeddings") {
+        "model not found"
+    } else {
+        "not compiled"
+    };
+    assert!(lines[0].contains(reason), "{stderr:?}");
     assert!(lines[0].contains("AllMiniLML6V2"), "{stderr:?}");
     assert!(!dir.path().join(".janus/vectors.f32").exists());
 

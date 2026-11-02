@@ -70,10 +70,17 @@ Plus the soft cross-platform gate (Windows must stay *possible*, SPEC §8.7):
 
 ```bash
 cargo check --target aarch64-pc-windows-msvc --all-targets --features blake3/pure
+# never add `--features embeddings` here: `fastembed` -> `ort` fetches a prebuilt
+# ONNX Runtime at build time and cannot be cross-compiled from macOS to Windows.
 ```
 
 (The `blake3/pure` feature is only needed when cross-checking from macOS, which
 has no MSVC C toolchain; CI's `windows-latest` job builds natively.)
+
+The `embeddings` feature is therefore never in the default build, `cargo test`,
+or the Windows gate. It is checked and linted by its own Linux CI job
+(`cargo check` and `cargo clippy --all-targets --features embeddings`), which is
+the only place the `fastembed` module is compiled at all.
 
 ## Versioning
 
