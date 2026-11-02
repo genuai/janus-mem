@@ -358,15 +358,18 @@ property of the query instead of a magic constant.
 bm25(t, c) = idf(t) · tf · (k1 + 1) / (tf + k1 · (1 − b + b · dl / avgdl))
 idf(t)     = ln(1 + (N − df(t) + 0.5) / (df(t) + 0.5))     always > 0
 s          = Σ over query terms of bm25(t, c)
-s_ref      = Σ over query terms of idf(t)                  the reference score
+s_ref      = Σ over query terms that exist in the index of idf(t)   the reference score
 lexical    = s / (s + s_ref)      ≡ logistic(ln(s / s_ref))
 ```
 
 `s_ref` is the score a document earns for matching **every query term exactly once
 at average length** (`dl == avgdl` makes the length factor `tf·(k1+1)/(tf+k1) = 1`
-at `tf = 1`). So `lexical = 0.5` means “an average match for *this* query”, 0.75
-means “three times the reference”, and the value does not depend on corpus size —
-which a fixed midpoint cannot offer, because `idf` grows like `ln N`:
+at `tf = 1`). It sums only terms that exist in the index: an absent term has no
+`idf`, and folding an invented value in would rescale every score for a single
+typo. An absent term therefore contributes to neither `s` nor `s_ref`. So
+`lexical = 0.5` means “an average match for *this* query”, 0.75 means “three times
+the reference”, and the value does not depend on corpus size — which a fixed
+midpoint cannot offer, because `idf` grows like `ln N`:
 
 | corpus | `df = 1` (N = 40) | `df = 1` (N = 20 000) |
 |---|---|---|
@@ -831,7 +834,10 @@ property (fix N, df, avgdl, dl), and get the length directions right: decreasing
 `dl`, **increasing** in `avgdl` — the draft had the second one backwards, which
 correct BM25 would have failed.”
 
-**Accept:** tests green; building over the fixture vault (≈40 docs) < 10 ms debug.
+**Accept:** tests green; building over the current fixture vault (18 documents,
+18 chunks) is ≈0.4 ms median in a debug build. The old “≈40 docs, < 10 ms” figure
+was never measured and the fixture is not 40 documents; §11 records the method and
+the measured distribution.
 
 ---
 
@@ -1304,14 +1310,23 @@ phase 4 persists its layout.
   memory, but they keep the library panic-free without `unwrap`. The same rule is
   why `Tokens::iter` and the postings lookups use `get`: a panic in a cache build
   would be a bug, not a recovery.
+- **B-10 — Phase 2's Accept number is measured, not assumed.** The earlier
+  “≈40 docs, < 10 ms debug” line named a document count the fixture never had. A
+  one-off example built the index from real chunks: `Config::load` on
+  `tests/fixtures/vault`, a hermetic `vault::walk`, `resolve::resolve_all`,
+  `chunk_body` with the loaded `ChunkingConfig`, `Chunk::embed_text` per chunk,
+  then 100 measured `LexicalIndex::build` calls after one warm-up. The fixture is
+  18 documents and 18 chunks (~6 KB); debug builds measured min 333 µs, median
+  ≈0.40 ms, mean ≈0.40 ms, max ≈0.54 ms across repeated runs. The example was
+  removed after measuring; no timing is asserted in a test. The Accept line now
+  states those numbers.
 
 ### Tests and gates
 
 `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo test --all-targets`, `cargo doc --no-deps`, the Windows cross-check, and
 `scripts/pr-size.sh` are green. The size numbers and the exact gate commands are in
-the PR body. No wall-clock assertion was added; the phase's build target is a manual
-sanity check, not a test.
+the PR body. The phase's build target is the B-10 measurement, not a test assertion.
 
 
 ## 12. Implementation log — Phase 3 (scoring)

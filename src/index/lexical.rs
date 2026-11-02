@@ -516,6 +516,19 @@ mod tests {
     }
 
     #[test]
+    fn s_ref_is_the_sum_of_the_matched_terms_idf() {
+        // N=2. "alpha" occurs in one chunk, "beta" in both.
+        let index = LexicalIndex::build(&["alpha beta", "beta"]);
+        let (_, s_ref) = index.score_query(&["alpha", "beta"]);
+
+        // The definition phase 3 composes against: s_ref = idf(df=1) + idf(df=2).
+        let expected = index.idf(1) + index.idf(2);
+        assert!((s_ref - expected).abs() < 1e-12);
+        // Independently: ln(2) + ln(1.2) = 0.8754687373538999.
+        assert!((s_ref - 0.875_468_737_353_899_9).abs() < 1e-12);
+    }
+
+    #[test]
     fn a_chunk_with_no_tokens_scores_zero() {
         let index = LexicalIndex::build(&["cache", ""]);
         let (scores, _) = index.score_query(&["cache"]);
