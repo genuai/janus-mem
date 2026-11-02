@@ -44,14 +44,18 @@ bincode = "1.3.3"
 # Windows path normalization
 dunce = "1.0.5"
 pulldown-cmark = { version = "0.13.6", default-features = false }
+# `.janus/lock` (S-7). Locks a `File` handle directly, so the guard is a plain
+# field; fd-lock's guard borrows its `RwLock` and cannot be stored without either
+# `unsafe` (D12) or a self-referential wrapper crate.
+fs4 = "1.1.0"
+# unique per-writer temp files: a shared `index.bin.new` is itself a race.
+tempfile = "3.27.0"
 
 [dev-dependencies]
 # cli integration testing
 assert_cmd = "2.2.2"
 # for predicate functions
 predicates = "3.1.4"
-# to create temp files/dirs
-tempfile = "3.27.0"
 # snapshot testing
 insta = "1.49.0"
 proptest = "1"

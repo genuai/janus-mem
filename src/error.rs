@@ -139,6 +139,22 @@ pub enum JanusError {
         source: io::Error,
     },
 
+    /// `.janus/lock` was not free within the timeout (§3.5, S-7). Another
+    /// writer holds it, and this command changed nothing.
+    #[error("lock timeout: {path} is held by another writer")]
+    LockTimeout {
+        /// The lock file that could not be acquired in time.
+        path: PathBuf,
+    },
+
+    /// No generation validated and no rebuild was allowed (§3.5, S-17). Recovery
+    /// is a rebuild, never a restore: the index rename destroys the old bytes.
+    #[error("index is unstable: {path}")]
+    IndexUnstable {
+        /// The index file whose bytes did not match a manifest.
+        path: PathBuf,
+    },
+
     /// Any IO failure without a more specific variant.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -169,6 +185,8 @@ impl JanusError {
             | Self::ConfigParse { .. }
             | Self::CreateDir { .. }
             | Self::Write { .. }
+            | Self::LockTimeout { .. }
+            | Self::IndexUnstable { .. }
             | Self::Io(_) => 1,
         }
     }
