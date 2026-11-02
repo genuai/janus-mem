@@ -96,9 +96,33 @@ pub enum Command {
         #[arg(long, value_name = "INTENT")]
         intent: Option<String>,
 
+        /// Add a scope to the query set; may be repeated (§6.12)
+        #[arg(long, value_name = "SCOPE")]
+        scope: Vec<String>,
+
+        /// Exclude global and shared-only matches; requires --scope (§9 gap 10)
+        #[arg(long)]
+        scope_only: bool,
+
         /// Maximum documents returned, after grouping
         #[arg(long, value_name = "N", default_value_t = crate::search::DEFAULT_LIMIT)]
         limit: usize,
+
+        /// Restrict to these canonical types or configured aliases
+        #[arg(long, value_name = "T,..", value_delimiter = ',')]
+        types: Vec<String>,
+
+        /// Restrict to documents carrying any of these tags
+        #[arg(long, value_name = "T,..", value_delimiter = ',')]
+        tags: Vec<String>,
+
+        /// Override the per-type decay half-life in days (§9 gap 9)
+        #[arg(long, value_name = "DAYS")]
+        decay_half_life: Option<f64>,
+
+        /// Include declared-superseded documents under intent=current (§3.2)
+        #[arg(long)]
+        include_superseded: bool,
 
         /// Refuse instead of building or rebuilding; a read stays a read
         #[arg(long)]

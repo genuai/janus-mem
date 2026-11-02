@@ -1,6 +1,5 @@
 ---
 source: tests/golden_search.rs
-assertion_line: 37
 expression: json
 ---
 {
@@ -11,7 +10,9 @@ expression: json
   ],
   "intent": "history",
   "limit": 3,
-  "notes": [],
+  "notes": [
+    "1 more document(s) matched; raise --limit to see them"
+  ],
   "query": "cache",
   "results": [
     {
@@ -20,6 +21,7 @@ expression: json
       ],
       "chunk_id": "4a607daa43c0441fe93858621648ca907843e34c3f0c56844f14372a71ef4624",
       "date": "2024-12-01",
+      "effective_from": null,
       "id": "d97e653f4a2dd60ea5d426b27d260e63",
       "ordinal": 0,
       "path": "<vault>/decisions/2024-12-01-redis-cache.md",
@@ -36,11 +38,13 @@ expression: json
         "status_factor": 1.0,
         "type_authority": 1.5
       },
+      "shared_with": [],
       "span": [
         0,
         40
       ],
       "status": "superseded",
+      "tags": [],
       "title": "Redis cache",
       "tokens": 9,
       "type": "decision"
@@ -51,6 +55,7 @@ expression: json
       ],
       "chunk_id": "c6bcc6719b62c49c66e8dc99fc4c3cf22b6f15c1b3fe3f1f27e5e4d788a75396",
       "date": "2025-02-01",
+      "effective_from": null,
       "id": "c64418894b25cfc133c800f916942b66",
       "ordinal": 0,
       "path": "<vault>/decisions/2025-02-01-cache-revisited.md",
@@ -67,11 +72,13 @@ expression: json
         "status_factor": 1.0,
         "type_authority": 1.5
       },
+      "shared_with": [],
       "span": [
         0,
         81
       ],
       "status": "superseded",
+      "tags": [],
       "title": "Cache revisited",
       "tokens": 15,
       "type": "decision"
@@ -82,6 +89,7 @@ expression: json
       ],
       "chunk_id": "854fee3dccd0d87d80df9a0f2b11aef4f6d9e2f6edd27ac58de59b7aa2ee01ca",
       "date": "2024-11-02",
+      "effective_from": null,
       "id": "2e85ad7f373d6a46959b68701c2fba40",
       "ordinal": 0,
       "path": "<vault>/decisions/2024-11-02-postgres-cache.md",
@@ -98,11 +106,13 @@ expression: json
         "status_factor": 1.0,
         "type_authority": 1.5
       },
+      "shared_with": [],
       "span": [
         0,
         114
       ],
       "status": "superseded",
+      "tags": [],
       "title": "Postgres cache",
       "tokens": 20,
       "type": "decision"
