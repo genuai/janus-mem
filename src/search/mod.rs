@@ -13,6 +13,8 @@
 //! stderr (§8.2).
 
 use std::collections::BTreeSet;
+
+pub mod facts;
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::time::Instant;
@@ -61,12 +63,12 @@ pub struct Options {
     pub json: bool,
 }
 
-/// Runs `janus search`.
+/// Runs `janus search`: ranks, then renders.
 ///
 /// # Errors
 ///
-/// [`JanusError::Usage`] for an unknown intent,
-/// [`JanusError::IndexMissing`]/[`JanusError::IndexUnstable`] under
+/// [`JanusError::Usage`] for an unknown intent or `--scope-only` without a
+/// scope, [`JanusError::IndexMissing`]/[`JanusError::IndexUnstable`] under
 /// `--no-rebuild`, and any corpus, config or IO failure.
 pub fn run(
     root: &Path,
@@ -75,6 +77,53 @@ pub fn run(
     options: Options,
 ) -> Result<(), JanusError> {
     let started = Instant::now();
+    let outcome = query(root, config, clock, &options)?;
+    render(&Render {
+        root,
+        config,
+        snapshot: &outcome.snapshot,
+        rows: &outcome.rows,
+        selected: &outcome.selected,
+        hits: &outcome.hits,
+        json: options.json,
+        started,
+        query: Some(&options.query),
+        intent: Some(outcome.intent),
+        limit: options.limit,
+        notes: outcome.notes,
+    })
+}
+
+/// A ranked query result, owned so a caller can measure it without rendering.
+pub struct Outcome {
+    /// Every persisted document, in snapshot order.
+    pub rows: Vec<DocRow>,
+    /// Indices into [`Outcome::rows`] that passed the document filters.
+    pub selected: Vec<usize>,
+    /// Ranked results; each `doc_index` indexes [`Outcome::selected`].
+    pub hits: Vec<Hit>,
+    /// What the intent hid and what `--limit` truncated.
+    pub notes: Vec<String>,
+    /// The resolved query intent.
+    pub intent: Intent,
+    /// The generation this outcome was computed from.
+    pub snapshot: Snapshot,
+}
+
+/// Ranks documents without rendering them (§3.1, §3.2).
+///
+/// The clock is injected, which is what lets the eval harness and the retrieval
+/// tests run under [`crate::clock::FixedClock`] (§3.8).
+///
+/// # Errors
+///
+/// Exactly [`run`]'s.
+pub fn query(
+    root: &Path,
+    config: &Config,
+    clock: &dyn Clock,
+    options: &Options,
+) -> Result<Outcome, JanusError> {
     let intent = parse_intent(options.intent.as_deref())?;
     require_scope(options.scope_only, &options.scopes)?;
 
@@ -88,7 +137,10 @@ pub fn run(
         options.scope_only,
     );
     let (selected, map) = select(&rows, |row| filter.matches(row));
-    let docs: Vec<ScoreDoc<'_>> = selected.iter().map(|row| row.score_doc()).collect();
+    let docs: Vec<ScoreDoc<'_>> = selected
+        .iter()
+        .map(|index| rows[*index].score_doc())
+        .collect();
 
     let (scores, reference) = query_scores(&prepared.index, &options.query);
     let policy = score::policy(intent, options.include_superseded);
@@ -175,18 +227,14 @@ pub fn run(
     if options.scope_only {
         notes.push("--scope-only: global and shared-only matches excluded".to_owned());
     }
-    render(&Render {
-        root,
-        config,
-        snapshot: &prepared.snapshot,
-        selected: &selected,
-        hits: &hits,
-        json: options.json,
-        started,
-        query: Some(&options.query),
-        intent: Some(intent),
-        limit: options.limit,
+
+    Ok(Outcome {
+        rows,
+        selected,
+        hits,
         notes,
+        intent,
+        snapshot: prepared.snapshot,
     })
 }
 
@@ -280,18 +328,29 @@ pub(crate) fn usage(message: impl Into<String>) -> JanusError {
 // ─────────────────────────────── document view ─────────────────────────────
 
 /// One document's metadata, owned, so a command can borrow a [`ScoreDoc`].
-pub(crate) struct DocRow {
-    pub(crate) id: DocId,
-    pub(crate) rel_path: String,
-    pub(crate) title: String,
-    pub(crate) type_name: String,
-    pub(crate) type_spec: TypeSpec,
-    pub(crate) status: Status,
-    pub(crate) date: Option<NaiveDate>,
-    pub(crate) effective_from: Option<NaiveDate>,
-    pub(crate) scope: String,
-    pub(crate) shared_with: Vec<String>,
-    pub(crate) tags: Vec<String>,
+pub struct DocRow {
+    /// Stable document identity (§6.4).
+    pub id: DocId,
+    /// Vault-relative, `/`-separated path.
+    pub rel_path: String,
+    /// Effective title.
+    pub title: String,
+    /// Canonical type name, post-alias.
+    pub type_name: String,
+    /// Resolved authority and decay behaviour.
+    pub type_spec: TypeSpec,
+    /// Declared status.
+    pub status: Status,
+    /// Authored date.
+    pub date: Option<NaiveDate>,
+    /// Valid-time start, when declared.
+    pub effective_from: Option<NaiveDate>,
+    /// Normalised owning scope, `global` when absent.
+    pub scope: String,
+    /// Retrieval tags from `shared_with`, never identity (§6.12 rule 2).
+    pub shared_with: Vec<String>,
+    /// Frontmatter tags, as authored.
+    pub tags: Vec<String>,
 }
 
 impl DocRow {
@@ -385,17 +444,17 @@ fn normalise_tag(raw: &str) -> String {
     raw.trim().to_ascii_lowercase()
 }
 
-/// Applies `keep` to every row, returning the kept rows and a snapshot-index map.
+/// Applies `keep` to every row, returning the kept indices and a row-index map.
 pub(crate) fn select(
     rows: &[DocRow],
     keep: impl Fn(&DocRow) -> bool,
-) -> (Vec<&DocRow>, Vec<Option<usize>>) {
+) -> (Vec<usize>, Vec<Option<usize>>) {
     let mut selected = Vec::new();
     let mut map = vec![None; rows.len()];
     for (index, row) in rows.iter().enumerate() {
         if keep(row) {
             map[index] = Some(selected.len());
-            selected.push(row);
+            selected.push(index);
         }
     }
     (selected, map)
@@ -404,11 +463,15 @@ pub(crate) fn select(
 // ───────────────────────────────── results ─────────────────────────────────
 
 /// One result: a document, the chunk that represents it, and its breakdown.
-pub(crate) struct Hit {
-    pub(crate) doc_index: usize,
-    pub(crate) chunk_index: usize,
-    pub(crate) ordinal: u32,
-    pub(crate) breakdown: Breakdown,
+pub struct Hit {
+    /// Index into [`Outcome::selected`].
+    pub doc_index: usize,
+    /// Index into [`Snapshot::chunks`] for the argmax chunk.
+    pub chunk_index: usize,
+    /// Position of that chunk among the document's scored occurrences.
+    pub ordinal: u32,
+    /// Every factor of the score (§3.2).
+    pub breakdown: Breakdown,
 }
 
 /// Everything a renderer needs to turn hits into output.
@@ -416,7 +479,8 @@ pub(crate) struct Render<'a> {
     pub(crate) root: &'a Path,
     pub(crate) config: &'a Config,
     pub(crate) snapshot: &'a Snapshot,
-    pub(crate) selected: &'a [&'a DocRow],
+    pub(crate) rows: &'a [DocRow],
+    pub(crate) selected: &'a [usize],
     pub(crate) hits: &'a [Hit],
     pub(crate) json: bool,
     pub(crate) started: Instant,
@@ -505,7 +569,7 @@ struct HitDto<'a> {
 
 impl<'a> HitDto<'a> {
     fn new(render: &'a Render<'_>, rank: usize, hit: &Hit) -> Self {
-        let row = render.selected[hit.doc_index];
+        let row = &render.rows[render.selected[hit.doc_index]];
         let chunk = &render.snapshot.chunks[hit.chunk_index];
         Self {
             rank,
@@ -580,7 +644,7 @@ fn write_human(out: &mut impl io::Write, r: &Render<'_>) {
             "path".to_owned(),
         ]];
         for hit in r.hits {
-            let row = r.selected[hit.doc_index];
+            let row = &r.rows[r.selected[hit.doc_index]];
             let crumb = breadcrumb(r.snapshot, &r.snapshot.chunks[hit.chunk_index]).join(" > ");
             rows.push([
                 format!("{:.4}", hit.breakdown.final_score),

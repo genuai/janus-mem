@@ -434,6 +434,10 @@ fn scope_only_without_scope_is_a_usage_error() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("--scope-only"), "{stderr}");
     assert!(stderr.contains("--scope"), "{stderr}");
+
+    // The same rule protects `facts`.
+    let output = run(vault.path(), &["facts", "--scope-only"]);
+    assert_eq!(output.status.code(), Some(2));
 }
 
 #[test]
@@ -483,6 +487,10 @@ fn include_superseded_widens_current_and_nothing_else() {
         assert_eq!(hit["span"], reference["span"], "{hit}");
         assert_eq!(hit["breadcrumb"], reference["breadcrumb"], "{hit}");
     }
+
+    // A search override must never widen the facts predicate.
+    let facts = common::facts_json(vault.path(), &["--query", "cache"]);
+    assert!(result_paths(&facts).is_empty(), "{facts}");
 }
 
 #[test]
@@ -518,4 +526,59 @@ fn a_decay_override_changes_the_score_but_not_a_timeless_type() {
             assert_eq!(hit["scores"]["decay"], 1.0, "{hit}");
         }
     }
+}
+
+#[test]
+fn facts_excludes_draft_and_unknown_while_current_includes_them() {
+    let vault = status_vault();
+    index(vault.path());
+
+    let current = paths(&search_json(vault.path(), &["quorum"]));
+    assert_eq!(
+        current,
+        std::collections::BTreeSet::from([
+            "active-decision.md".to_owned(),
+            "active-note.md".to_owned(),
+            "draft-decision.md".to_owned(),
+            "frozen-spec.md".to_owned(),
+        ])
+    );
+
+    let facts = paths(&common::facts_json(vault.path(), &["--query", "quorum"]));
+    assert_eq!(
+        facts,
+        std::collections::BTreeSet::from(["active-decision.md".to_owned()])
+    );
+}
+
+#[test]
+fn facts_lists_active_decisions_specs_and_principles_without_a_query() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let report = common::facts_json(vault.path(), &[]);
+
+    assert!(!result_paths(&report).is_empty(), "{report}");
+    for hit in report["results"].as_array().unwrap() {
+        assert_eq!(hit["status"], "active", "{hit}");
+        assert!(
+            ["decision", "spec", "principle"].contains(&hit["type"].as_str().unwrap()),
+            "{hit}"
+        );
+        assert_eq!(hit["scores"]["decay"], 1.0, "{hit}");
+        assert_eq!(hit["scores"]["status_factor"], 1.0, "{hit}");
+    }
+}
+
+#[test]
+fn facts_ignores_the_superseded_search_override() {
+    let vault = fixture_vault();
+    index(vault.path());
+
+    // `--include-superseded` does not exist on `facts`; the predicate is fixed.
+    let output = run(
+        vault.path(),
+        &["facts", "--query", "cache", "--include-superseded"],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(output.status.code(), Some(2));
 }

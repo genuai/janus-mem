@@ -132,4 +132,35 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// List authoritative facts: active decisions, specs and principles (§3.6)
+    Facts {
+        /// Narrow the listing by relevance and report the score
+        #[arg(long, value_name = "Q")]
+        query: Option<String>,
+
+        /// Restrict to documents carrying any of these tags
+        #[arg(long, value_name = "T,..", value_delimiter = ',')]
+        tags: Vec<String>,
+
+        /// Add a scope to the query set; may be repeated (§6.12)
+        #[arg(long, value_name = "SCOPE")]
+        scope: Vec<String>,
+
+        /// Exclude global and shared-only matches; requires --scope (§9 gap 10)
+        #[arg(long)]
+        scope_only: bool,
+
+        /// Maximum facts returned
+        #[arg(long, value_name = "N", default_value_t = crate::search::DEFAULT_LIMIT)]
+        limit: usize,
+
+        /// Refuse instead of building or rebuilding; a read stays a read
+        #[arg(long)]
+        no_rebuild: bool,
+
+        /// Emit one JSON object on stdout instead of the table
+        #[arg(long)]
+        json: bool,
+    },
 }

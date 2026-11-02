@@ -370,7 +370,10 @@ pub fn cmp_documents(a: &ScoredDoc<'_>, b: &ScoredDoc<'_>) -> Ordering {
 }
 
 /// Newest first; a document with no date sorts after every dated one.
-fn cmp_date_desc(a: Option<NaiveDate>, b: Option<NaiveDate>) -> Ordering {
+///
+/// Shared with `janus facts`, whose §3.6 order has the same date key.
+#[must_use]
+pub fn cmp_date_desc(a: Option<NaiveDate>, b: Option<NaiveDate>) -> Ordering {
     match (a, b) {
         (Some(a), Some(b)) => b.cmp(&a),
         (Some(_), None) => Ordering::Less,

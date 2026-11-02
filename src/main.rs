@@ -138,6 +138,35 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                 },
             )
         }
+
+        Command::Facts {
+            query,
+            tags,
+            scope,
+            scope_only,
+            limit,
+            no_rebuild,
+            json,
+        } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let config = Config::load(&root)?;
+            search::facts::run(
+                &root,
+                &config,
+                &SystemClock,
+                &search::facts::Options {
+                    query,
+                    tags,
+                    scopes: scope,
+                    scope_only,
+                    limit,
+                    no_rebuild,
+                    json,
+                },
+            )
+        }
     }
 }
 
