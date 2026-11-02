@@ -75,8 +75,10 @@ jobs:
   # The one job allowed to reach the network, and it does so at *build* time:
   # `fastembed` -> `ort` fetches a prebuilt ONNX Runtime archive (§3.2, V-13).
   # `embeddings` is not a default feature, so the `test`, `eval` and `windows`
-  # jobs above never compile it; this job is where the module is linted at all,
-  # because the default clippy run cannot see it. No test here loads a model.
+  # jobs above never compile it; this job is where the module is linted and
+  # where its tests actually run, because the default suite cannot see either.
+  # No test here loads a model: `tests/real_model.rs` is `#[ignore]`d and is
+  # P5's acceptance step, run by hand against a real model directory.
   embeddings:
     needs: changes
     if: ${{ github.event_name == 'push' && needs.changes.outputs.rust == 'true' }}
@@ -91,6 +93,7 @@ jobs:
           key: embeddings
       - run: cargo check --all-targets --features embeddings
       - run: cargo clippy --all-targets --features embeddings -- -D warnings
+      - run: cargo test --all-targets --features embeddings
 
   # Enforces the PR size budget in AGENTS.md. Advisory instruction files are
   # read once at session start and then drift; a failing required check is a
