@@ -1487,8 +1487,9 @@ against P1b (`BASE=origin/<p1b branch>`).
 Branch: `bb/m4-p1c-two-file-read-thr_q2fyy3ptxm`, stacked on P1b (measured against it, not against
 `main`). Scope is `Expected`'s V-21 ordering and the three-way manifest check, `LoadOptions`'s
 `want_vectors`/`embedder`, the payload read/hash/decode path, `Load.vectors`, the retry cause's file
-name, and every row of §3.1's table asserted in both read modes. No writer, scoring, CLI-flag or
-feature change.
+name, every row of §3.1's table asserted in both read modes, and (review fix P1c-8) the read-side
+embedder threading that keeps a read-triggered rebuild from dropping the payload. No writer, scoring,
+CLI-flag or feature change.
 
 | ID | decision | why |
 |---|---|---|
@@ -1498,7 +1499,8 @@ feature change.
 | P1c-4 | `want_vectors = true` with no embedder resolved still decodes the payload, using `manifest.embedder.dim` and `snapshot.chunks.len()`. | The manifest carries the whole shape, so a reader needs no model to validate rows. It also makes V-4 about `want_vectors` alone rather than about the embedder. Row 6 loads in both forms and never rebuilds. |
 | P1c-5 | `Load.vectors` is `None` for a read that did not ask for them, even when that read's own rebuild wrote them. | `None` means "you did not want them" (§2's data model), and returning rows a caller's α = 0 path would ignore invites an accidental use. |
 | P1c-6 | `LoadOptions::new` defaults `want_vectors: false` and `embedder: None`; `Debug` is hand-written because `&dyn Embedder` is not `Debug` and prints the id instead. | Every M3 call site keeps its exact behaviour, and the derived `Debug` would not compile. |
-| P1c-7 | `search`/`facts` still pass `embedder: None` and `want_vectors: false`, with a comment naming P2. | P2 owns α and the read-side embedder; passing one now would make a read's auto-build embed on behalf of a scorer that ignores the rows. |
+| P1c-7 | ~~`search`/`facts` pass `embedder: None` and `want_vectors: false`~~ — superseded by P1c-8. | The reasoning ("P2 owns the read-side embedder") was right about α and wrong about the rebuild: a read that must rebuild is a writer, and a writer without an embedder drops the payload. |
+| P1c-8 | **Review fix.** Read commands resolve the embedder in `main` (`embedder_only`) and thread it through `search::run`/`query`/`prepare` and `facts::run`, keeping `want_vectors: false`. Only `index` prints the degraded-resolution line. | Without it, a read that had to rebuild published a lexical generation and **dropped** `vectors.f32`: `janus index`, a chunking change, then `janus search` cost 60 s of embedding work to a read. With it the rebuild produces the generation this process would have built, which is V-21 row 5 applied honestly. Stated consequence: a vectors-less generation is now row 5 for a search too, so `--no-rebuild` refuses it; the brief's "the next read loads with `embedder: None`" holds for a process that cannot embed (`enabled = false`), which is what the row-6 half of the CLI test asserts. α stays 0.0 and `semantic` stays 0.0; `tests/eval_quality.rs` passes `None`. |
 
 ## 11. Implementation log — Phase 2 (hybrid scoring)
 

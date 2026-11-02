@@ -27,6 +27,7 @@ use crate::config::{self, Config, TypeSpec};
 use crate::document::Status;
 use crate::error::JanusError;
 use crate::id::{ChunkId, DocId};
+use crate::index::embed::Embedder;
 use crate::index::store::{self, LoadOptions, Policy};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
 use crate::scan::API_VERSION;
@@ -74,10 +75,11 @@ pub fn run(
     root: &Path,
     config: &Config,
     clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
     options: Options,
 ) -> Result<(), JanusError> {
     let started = Instant::now();
-    let outcome = query(root, config, clock, &options)?;
+    let outcome = query(root, config, clock, embedder, &options)?;
     render(&Render {
         root,
         config,
@@ -122,12 +124,13 @@ pub fn query(
     root: &Path,
     config: &Config,
     clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
     options: &Options,
 ) -> Result<Outcome, JanusError> {
     let intent = parse_intent(options.intent.as_deref())?;
     require_scope(options.scope_only, &options.scopes)?;
 
-    let prepared = prepare(root, config, clock, options.no_rebuild)?;
+    let prepared = prepare(root, config, clock, embedder, options.no_rebuild)?;
     let rows = doc_rows(&prepared.snapshot, config);
     let filter = Filter::new(
         config,
@@ -252,6 +255,7 @@ pub(crate) fn prepare(
     root: &Path,
     config: &Config,
     clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
     no_rebuild: bool,
 ) -> Result<Prepared, JanusError> {
     let dir = config::resolve_index_dir(root, &config.index_dir);
@@ -275,11 +279,14 @@ pub(crate) fn prepare(
         built_at: &built_at,
         lock_timeout: store::LOCK_TIMEOUT,
         policy,
-        // P2 passes its resolved embedder and asks for the rows. Until then the
-        // service is lexical-only: α is 0, so the payload is neither read nor
-        // required (V-4), and a generation with vectors still loads (row 6).
+        // A read never wants the rows until P2 wires α, so it never opens the
+        // payload (V-4) and a generation with vectors still loads (row 6). The
+        // embedder is passed anyway because a read that has to **rebuild** must
+        // publish the generation this process would have built: without it, a
+        // first `search` after `janus index` would drop the payload it just
+        // inherited (V-21 row 5, §3.6 row 3).
         want_vectors: false,
-        embedder: None,
+        embedder,
     })?;
     // Only a generation this call had to build is stale; a retry that ended by
     // adopting a valid one is not.

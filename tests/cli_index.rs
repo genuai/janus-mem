@@ -217,7 +217,7 @@ fn a_second_index_produces_byte_identical_payloads() {
 }
 
 #[test]
-fn no_embeddings_drops_the_payload_with_one_line_and_the_next_read_loads() {
+fn no_embeddings_drops_the_payload_with_one_line_and_a_read_rebuilds_it_once() {
     let vault = fixture_vault();
     index(vault.path());
     assert!(vault.path().join(".janus/vectors.f32").exists());
@@ -254,17 +254,71 @@ fn no_embeddings_drops_the_payload_with_one_line_and_the_next_read_loads() {
     assert!(manifest["vectors_sha"].is_null(), "{manifest}");
     assert!(manifest["vectors_len"].is_null(), "{manifest}");
 
-    // The next read resolves to `embedder: None`, so nothing is stale and
-    // `--no-rebuild` loads the generation unchanged.
+    // A read that can embed treats a vectors-less generation as stale (V-21
+    // row 5): one stale line, one rebuild, and the payload is back.
+    let output = run(vault.path(), &["search", "cache", "--json"]);
+    assert!(
+        output.status.success(),
+        "the row-5 rebuild failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stale: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.starts_with("stale:"))
+        .collect();
+    assert_eq!(stale.len(), 1, "expected one stale line: {stderr:?}");
+    assert!(stale[0].contains("no vectors"), "{stale:?}");
+    assert!(
+        vault.path().join(".janus/vectors.f32").exists(),
+        "the rebuild that row 5 triggers must bring the payload back"
+    );
+
+    // A process that cannot embed is not stale: row 6 loads and writes nothing,
+    // `--no-rebuild` included.
+    let config_path = vault.path().join("janus.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace(
+            "model = \"hash-64\"",
+            "model = \"hash-64\"\nenabled = false",
+        ),
+    )
+    .unwrap();
     let before = dir_snapshot(&vault.path().join(".janus"));
     let output = run(vault.path(), &["search", "cache", "--no-rebuild", "--json"]);
     assert!(
         output.status.success(),
-        "a vectors-less generation must load: {}",
+        "a vectors-bearing generation must load for a non-embedding reader: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
     assert_eq!(dir_snapshot(&vault.path().join(".janus")), before);
+}
+
+#[test]
+fn a_read_triggered_rebuild_keeps_the_vectors() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let payload = vault.path().join(".janus/vectors.f32");
+    assert!(payload.exists());
+
+    // The state `janus index`, then a change the generation no longer matches,
+    // leaves behind. The read must rebuild — and that rebuild must not throw
+    // away the embeddings it inherited.
+    fs::remove_file(vault.path().join(".janus/index.bin")).unwrap();
+    let output = run(vault.path(), &["search", "cache", "--json"]);
+    assert!(
+        output.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        payload.exists(),
+        "a read-triggered rebuild must still write the payload"
+    );
+    assert_eq!(manifest(vault.path())["embedder"]["name"], "hash-64");
 }
 
 #[test]

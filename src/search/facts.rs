@@ -23,6 +23,7 @@ use std::time::Instant;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::error::JanusError;
+use crate::index::embed::Embedder;
 use crate::score::{self, Intent, ScoreDoc, ScoreInput};
 
 // One loader, one filter, one renderer: only the predicate and the order differ.
@@ -58,12 +59,13 @@ pub fn run(
     root: &Path,
     config: &Config,
     clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
     options: &Options,
 ) -> Result<(), JanusError> {
     let started = Instant::now();
     require_scope(options.scope_only, &options.scopes)?;
 
-    let prepared = prepare(root, config, clock, options.no_rebuild)?;
+    let prepared = prepare(root, config, clock, embedder, options.no_rebuild)?;
     let rows = super::doc_rows(&prepared.snapshot, config);
     let filter = Filter::new(
         config,
