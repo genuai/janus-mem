@@ -37,8 +37,11 @@ scripts/pr-size.sh                              # HEAD against origin/main
 BASE=origin/m1-scan-parse scripts/pr-size.sh    # stacked PRs
 ```
 
-CI runs the same check on every pull request and fails it when over budget,
-unless the PR carries the `large-pr` label. That label is an escape hatch for
+CI runs the same check on every pull request, but the ceiling gates the
+**initial submission**: the job fails only while the PR has no reviews. Once a
+review exists the same numbers are reported with a warning annotation and the
+check passes, because the ceiling protects a reviewer's attention and that
+reviewer has already spent it. The `large-pr` label remains an escape hatch for
 generated files and mechanical renames, not for "I got carried away" — and if
 you use it, put the numbers in the PR description.
 

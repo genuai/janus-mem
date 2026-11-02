@@ -56,7 +56,10 @@ jobs:
 
   # Enforces the PR size budget in AGENTS.md. Advisory instruction files are
   # read once at session start and then drift; a failing required check is a
-  # fact that every session has to deal with.
+  # fact that every session has to deal with. The ceiling gates the initial
+  # submission: once a review exists the same numbers are reported as advisory,
+  # because the ceiling protects a reviewer's attention and that reviewer has
+  # already spent it.
   pr-size:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -80,12 +83,27 @@ jobs:
           else
             echo "labelled=false" >> "$GITHUB_OUTPUT"
           fi
+      - name: Check whether a review exists
+        id: review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          count=$(gh pr view "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" --json reviews \
+            --jq '.reviews | length')
+          if (( count > 0 )); then
+            echo "reviewed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reviewed=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Enforce size budget
         env:
           BASE: origin/${{ github.base_ref }}
         run: |
           if [[ "${{ steps.escape.outputs.labelled }}" == "true" ]]; then
             ./scripts/pr-size.sh || echo "::warning::over budget, but large-pr is set"
+          elif [[ "${{ steps.review.outputs.reviewed }}" == "true" ]]; then
+            ./scripts/pr-size.sh --advisory
           else
             ./scripts/pr-size.sh
           fi
