@@ -1022,10 +1022,17 @@ error mapping so a model failure names the path and the embedder.
 **How the feature job gets `ort`, stated so "no network" is not a false claim.** `fastembed` →
 `ort` fetches a prebuilt ONNX Runtime archive during the **build**. That is a build-time dependency,
 not a runtime one, and it is why the feature is non-default. Phase 3 names exactly one job that is
-allowed to reach the network (`embeddings`, ubuntu, `cargo check`/`clippy`/`test --features
-embeddings`), and `SWATINEM/rust-cache` caches the result so it is not fetched every run. If the
-archive cannot be fetched in CI, the fallback is `ort`'s system-library path against a
-preinstalled runtime, recorded as a decision; the default path never depends on it.
+allowed to reach the network (`embeddings`, ubuntu, `cargo check` + `cargo clippy --all-targets` +
+`cargo test --all-targets --features embeddings`), and `SWATINEM/rust-cache` caches the result so
+it is not fetched every run. If the archive cannot be fetched in CI, the fallback is `ort`'s
+system-library path against a preinstalled runtime, recorded as a decision; the default path never
+depends on it.
+
+**P3 amendment:** the job runs all three, including the feature-on test suite. An earlier draft of
+this phase ran `check` + `clippy` only, which would have left every `#[cfg(feature =
+"embeddings")]` test — the dispatch-table rows, the batching assertions, the CLI degradation test —
+executing on no machine at all. They are model-free by construction, so the step costs one extra
+run on a job that already pays the `ort` build.
 
 **Tests (~180 lines):** `resolve` returns `Degraded` for each absent-model case and never blocks or
 downloads; batching splits by `batch_size`, preserves order, and sends every chunk exactly once
@@ -1033,7 +1040,9 @@ downloads; batching splits by `batch_size`, preserves order, and sends every chu
 build with a message naming the chunk index; the feature-off build still passes the whole suite.
 The `fastembed` module itself has no unit test that runs a model — a test would need weights and
 would be slow; its coverage is the shared normalise/validate path and the CI `check`, which is
-stated rather than pretended.
+stated rather than pretended. **P3 amendment:** "model present ⇒ `Ready` with dim 384" is asserted
+as its two halves (`model_dir` finds the five files; `id_for` records 384/f32/l2), because a
+`Ready` holds a loaded model and the same phase forbids a test that loads one (P3-9 in §12).
 
 **Handoff (paste):** "Implement Phase 3 of M4 per `docs/m4-breakdown.md` §3.2 and Phase 3. The
 `embeddings` feature is **not** default: the Windows cross-check and default `cargo test` must
@@ -1047,7 +1056,8 @@ real model."
 
 **Accept:** `cargo check --all-targets` (no features) and `cargo check --all-targets --features
 embeddings` both green; the Windows cross-check green without the feature; `cargo test
---all-targets` green on both feature sets, with no test opening a socket.
+--all-targets` green on both feature sets (both run in CI: the default set in `test`, the
+feature-on set in `embeddings`), with no test opening a socket.
 
 ---
 
@@ -1127,6 +1137,11 @@ against hand-computed `nDCG@10` values for two tiny result lists (so the compari
 not itself the thing being trusted); `scripts/eval.sh` prints denominators. Docs: the phase log
 carries the sweep table and the chosen α; SPEC gets §9's edits; README says what M4 added and how to
 enable it.
+
+**The sweep's first step is P3's ignored test (P3-13).** Before any α is measured, run
+`JANUS_MODEL_DIR=/path/to/model cargo test --features embeddings --test real_model -- --ignored`:
+it loads real weights through `FastEmbed::load` and asserts 384 finite unit rows, so a broken model
+path is discovered as a test failure rather than as a strange sweep table.
 
 **Handoff (paste):** "Implement Phase 5 of M4 per `docs/m4-breakdown.md` §3.5, §3.8 and Phase 5.
 No quality threshold goes into `cargo test`: the eval is `#[ignore]`d, CI's job is
@@ -1529,7 +1544,52 @@ build, vectors, embed, manifest, feature or `SPEC.md` change.
 
 ## 12. Implementation log — Phase 3 (real embedder behind a feature)
 
-_Nothing recorded yet._
+Branch: `bb/m4-p3-fastembed-behind-a-feature-thr_7bcr2qhnm5`, from `main`. Scope is
+`Cargo.toml` (one optional dependency, one non-default feature), `src/index/embed.rs` (the
+`fastembed` module, the feature-on arm of `resolve`, and the feature-gated tests),
+`tests/batching.rs` (new), `tests/cli_index.rs` (one test made feature-set-aware),
+`.github/workflows/ci.yml` (one Linux job), `AGENTS.md` (the Windows gate line), `README.md` (how
+to build it). No change to `store.rs`, `vectors.rs`, `build.rs`, `score.rs`, `search/*`, the
+goldens, the manifest, the publication protocol, α, the admission rule, or `SPEC.md`.
+
+**Does the dependency build here? Yes.** `fastembed 5.17.4`, resolved with `ort 2.0.0-rc.13`.
+The deciding command was
+
+```
+cargo check --all-targets --features embeddings   # Finished in 9.48s, no warnings
+```
+
+`ort-sys`'s build script fetched `ms@1.28.0/aarch64-apple-darwin+coreml.tar.lzma2` from
+`cdn.pyke.io` and emitted `cargo:rustc-link-lib=static=onnxruntime`. Linking works too:
+`cargo test --all-targets --features embeddings` is green (389 lib + 132 integration tests) and
+`cargo doc --no-deps --features embeddings` has zero warnings. The default build is untouched:
+`cargo tree -e normal` contains no `fastembed` and no `ort`. Model id and shape for the phase log
+and the manifest: **`AllMiniLML6V2`** (the `Qdrant/all-MiniLM-L6-v2-onnx` export), **dim 384**,
+`dtype = "f32"`, `normalisation = "l2"`.
+
+| ID | decision | why |
+|---|---|---|
+| P3-1 | `fastembed = "5.17.4"`, optional, behind `embeddings = ["dep:fastembed"]`. | The plan's row is 5.x and `cargo search` (run as instructed) shows 7.5.0 as latest. 5.17.4 is the newest 5.x, and a major bump is not this phase's business: 7.x's breaking changes buy nothing here and every one of them would be re-verified against `resolve`, the loader and the id. The bump is a one-line `Cargo.toml` change plus a `--rebuild` for anyone holding vectors, which is M8's or P5's call, not a silent rider on P3. |
+| P3-2 | `fastembed`'s **default** features are left alone. No `ort` dependency and no `download-binaries` feature is named in our `Cargo.toml`. | §1's rule is "do not helpfully turn on `download-binaries`", and the fetch arrives through `fastembed`'s own default set either way. Naming it ourselves would be the change the rule forbids, and disabling it would need `default-features = false` plus the very feature list we are told not to write. The consequence is stated in the module docs and the CI comment: the feature-on **build** may reach the network, runtime never does. |
+| P3-3 | Loading goes through `TextEmbedding::try_new_from_user_defined`, not `try_new`. | `try_new` calls `retrieve_model` -> `hf-hub`, which resolves a revision and can open a socket; the user-defined entry point takes bytes. "Read from disk, never download" is then true by construction rather than by whatever happens to be in a cache. |
+| P3-4 | A model directory is **flat**: the configured directory itself holds the five files in `MODEL_FILES`. Candidates are `[embedding] model_dir`, then `JANUS_MODEL_DIR`, then the cache, de-duplicated; the first with all five wins (V-25). | One documented layout that a user can create with `cp` and a test can create with `fs::write`. Guessing a hub's cache tree (`models--<org>--<name>/snapshots/<rev>/`) would be a second, undocumented contract and a source of "why is my model not found" reports. The message names every directory probed, so the wrong guess is diagnosable in one line. |
+| P3-5 | The absent case is `Degraded("model not found", "`<model>` searched <dirs>; expected <files>")`; a present-but-unusable model is `Degraded("model unusable", "<path>: <diagnostic>")`. | §3.2 requires the reason to name the directory it looked in; §3.6 row 1 requires degradation rather than failure. Naming the expected file names is what turns "not found" into an action, and keeping the loader's own text is what makes a wrong-width or corrupt ONNX file distinguishable from a missing one. |
+| P3-6 | `FastEmbed` holds `Mutex<TextEmbedding>`: `fastembed`'s `embed` takes `&mut self` while `Embedder::embed` takes `&self`. A poisoned lock is an `EmbedError`, never a panic. `EmbedError::batch` is always `0` from this implementation. | No `unsafe`, no interior-mutability crate, no trait change in a phase that may not touch the trait. `batch` is 0 because `build` has already split the corpus, so this type only ever sees one batch; the caller's index is the caller's to report, and the `reason` names how many texts failed. |
+| P3-7 | `embed` passes `Some(batch.len())` and returns early on an empty slice. | `fastembed` re-splits by its own default of 256, so passing `None` would let `[embedding] batch_size` describe a split that never happened. An empty batch must not warm up a session for zero rows. |
+| P3-8 | `tests/cli_index.rs::index_says_why_it_could_not_embed` pins `[embedding] model_dir` to a nonexistent path and asserts the reason of the column the build compiles (`not compiled` without the feature, `model not found` with it). The P1a unit test for the same case is now `#[cfg(not(feature = "embeddings"))]`. | Both were feature-off assertions (R2-6 scoped P1a's tests to that column), so the feature-on suite failed on them. Pinning `model_dir` also stops a developer machine with a model in `~/.cache/fastembed` from turning a degradation test into an embedding run. |
+| P3-9 | **Plan correction.** "Model present -> `Ready` with dim 384" is asserted as its two halves — `fastembed::model_dir` finds a directory holding the five files, and `fastembed::id_for` records `dim = 384`, `dtype = "f32"`, `normalisation = "l2"` — not as a `Ready`. | `Ready` holds a *loaded* model, and the same phase forbids a test that loads one or commits a fixture model. The plan asks for both, which cannot both hold. The `Ready` path is covered by the CI feature job's `check` plus the shared normalise/validate path in `build`, exactly as the plan already says for "the module has no unit test that runs a model". |
+| P3-10 | No test loads a model, and no model file is committed. The "unusable" case writes five files of garbage, so `resolve` reaches the loader and degrades on its error. | The brief's rule, and it is also what keeps `cargo test --features embeddings` at 14 s instead of a download. |
+| P3-11 | The CI `embeddings` job runs on **push only**, like `test`/`eval`/`windows-compile`, and carries its own `rust-cache` key. It runs `cargo check`, `cargo clippy --all-targets --features embeddings` **and `cargo test --all-targets --features embeddings`**. | It matches the file's existing convention for heavy jobs, so a PR run is not duplicated. **Review fix:** an earlier draft stopped at `check` + `clippy` on the reasoning that the feature-on suite was a local acceptance run — which left every `#[cfg(feature = "embeddings")]` test (the dispatch-table rows, the batching assertions, the CLI degradation test) executing on no machine but the author's. The tests are model-free by construction, so the step is one extra run on a job that already pays the `ort` build. §7 DoD 11 says "on both feature sets", and it now is. |
+| P3-12 | No split. Measured **286 logic / 351 tests / 637 total** against `origin/main`. | Well under the 600/900 ceilings and under the pre-authorised 450-logic seam. |
+| P3-13 | `tests/real_model.rs::a_real_model_embeds_384_finite_values` is `#[ignore]`d and is **P5's acceptance step**: it builds `ModelDirs` from `JANUS_MODEL_DIR`, calls `resolve`, and asserts one row per input, 384 values, all finite, unit norm within `1e-3`, and that two different texts are not the same vector. | `FastEmbed::load` is only ever called with garbage in the automated suite — correctly, since a fixture export is ~90 MB — so the happy path would otherwise first run inside P5's α sweep, as a discovery rather than a check. It fails, rather than returning early, when the variable is missing or the model does not load: `#[ignore]` already means "run me on purpose", and a silent skip is a test that cannot fail. The cache candidate is a path that cannot exist, so a model left in the cache cannot make a run that forgot the variable look like a success. |
+| P3-14 | The ignored test **was run** against the real `Qdrant/all-MiniLM-L6-v2-onnx` export (90,387,630 bytes) and passes in 0.13 s. The CLI path was then run end to end on a copy of the fixture vault with `model = "AllMiniLML6V2"`: `janus index` publishes `vectors.f32` of **27,648 bytes = 18 chunks × 384 × 4** with the manifest recording `{name: AllMiniLML6V2, dim: 384, dtype: f32, normalisation: l2}`, and `janus search cache --json` reports `alpha: 0.65`, `degraded: []`, and semantic scores between **0.05 and 0.51** — real cosines, not the hash double's near-BM25 values. | The whole point of P3 is that this path runs for the first time *here* and not inside P5's sweep. The download lives in `/tmp`, never in the repo; the test stays `#[ignore]`d so CI neither fetches weights nor needs a socket. |
+
+Also verified, and worth keeping in the log: `cargo test --all-targets` (no features) is green at **515** tests
+with the goldens unmoved — the `hash-64` path and every fixture snapshot are untouched — and
+`cargo check --target aarch64-pc-windows-msvc --all-targets --features blake3/pure` is green,
+which is the gate that forces `embeddings` to stay non-default. `cargo test --all-targets
+--features embeddings` is green at **521 passed, 1 ignored** (the ignored one is P3-13), and it is
+now a CI step rather than a local run.
 
 ## 13. Implementation log — Phase 4 (incremental embedding)
 

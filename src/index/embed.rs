@@ -241,18 +241,20 @@ impl fmt::Debug for Resolved {
 /// Resolves `[embedding]` plus the compiled feature set into an embedder or a
 /// reason.
 ///
-/// This is the feature-off column of §3.2's dispatch table:
+/// This is §3.2's dispatch table. The `hash-` and `enabled` rows do not depend
+/// on the feature; the third row does:
 ///
-/// | `[embedding] model` | result |
-/// |---|---|
-/// | `hash-<n>`, `n > 0` | [`Resolved::Ready`] with a [`HashEmbedder`] |
-/// | any other name | [`Resolved::Degraded`] with `"not compiled"` |
-/// | `enabled = false` | [`Resolved::Degraded`] with `"disabled"` |
+/// | `[embedding] model` | feature off | feature on, files present | feature on, files absent |
+/// |---|---|---|---|
+/// | `hash-<n>`, `n > 0` | [`Resolved::Ready`] with a [`HashEmbedder`] | same | same |
+/// | any other name | `Degraded("not compiled")` | `Ready` with a `FastEmbed` | `Degraded("model not found")` |
+/// | `enabled = false` | `Degraded("disabled")` | same | same |
 ///
-/// The feature-on rows belong to P3, which owns the `fastembed` module and the
-/// feature that compiles it. This function never touches the filesystem in
-/// P1a: `dirs` is used only to describe what would be searched, and a missing
-/// directory therefore degrades immediately rather than timing out.
+/// Resolution never opens a socket, downloads, or blocks (§3.2, V-13). The
+/// feature-on arm reads five file names per candidate directory and loads the
+/// model from disk only when all five exist; anything else degrades with a
+/// reason that names the directories searched, because embedding is never
+/// required for correctness (§3.6 row 1).
 #[must_use]
 pub fn resolve(config: &Config, dirs: &ModelDirs) -> Resolved {
     if !config.embedding.enabled {
@@ -280,6 +282,13 @@ pub fn resolve(config: &Config, dirs: &ModelDirs) -> Resolved {
         );
     }
 
+    model_arm(config, dirs)
+}
+
+/// The non-`hash-` arm of [`resolve`], with the `embeddings` feature compiled
+/// out: a model cannot be loaded, so the reason names the feature (V-13).
+#[cfg(not(feature = "embeddings"))]
+fn model_arm(config: &Config, dirs: &ModelDirs) -> Resolved {
     Resolved::Degraded(
         "not compiled",
         format!(
@@ -289,12 +298,237 @@ pub fn resolve(config: &Config, dirs: &ModelDirs) -> Resolved {
     )
 }
 
+/// The non-`hash-` arm of [`resolve`], with the `embeddings` feature compiled
+/// in.
+///
+/// Three outcomes, none of them fatal (§3.2's dispatch table, §3.6 row 1): a
+/// directory holding every model file loads and is [`Resolved::Ready`]; no such
+/// directory is `Degraded("model not found")` naming what was searched; a
+/// present but unreadable or unusable model is `Degraded("model unusable")`
+/// carrying the path and the loader's own diagnostic. A hard failure here would
+/// turn "the model is not installed" into "the command does not work", which
+/// §3.6 exists to prevent.
+#[cfg(feature = "embeddings")]
+fn model_arm(config: &Config, dirs: &ModelDirs) -> Resolved {
+    match fastembed::model_dir(dirs) {
+        Some(dir) => match fastembed::FastEmbed::load(&dir, &config.embedding.model) {
+            Ok(embedder) => Resolved::Ready(Box::new(embedder)),
+            Err(detail) => Resolved::Degraded("model unusable", detail),
+        },
+        None => Resolved::Degraded(
+            "model not found",
+            format!(
+                "`{}` searched {}; expected {}",
+                config.embedding.model,
+                fastembed::searched(dirs),
+                fastembed::MODEL_FILES.join(", ")
+            ),
+        ),
+    }
+}
+
 /// Parses `hash-<n>` into its dimension, including the invalid zero case.
 ///
 /// Zero is returned rather than filtered so [`resolve`] can report the specific
 /// reason instead of treating `hash-0` as an unrecognised model name.
 fn hash_model_dim(model: &str) -> Option<u32> {
     model.strip_prefix("hash-")?.parse::<u32>().ok()
+}
+
+/// The ONNX sentence-transformer behind the `embeddings` feature (§3.2, V-13).
+///
+/// The module exists only when the feature is compiled, because `fastembed`
+/// pulls `ort`, which fetches a prebuilt ONNX Runtime at **build** time and
+/// cannot be cross-compiled from macOS to Windows. A lexical-only build
+/// compiles none of this and resolves a non-`hash-` model as `"not compiled"`;
+/// runtime never fetches anything.
+///
+/// **Nothing here downloads.** [`fastembed::FastEmbed::load`] reads the files in
+/// a model directory the user placed and hands the bytes to `fastembed`'s
+/// user-defined loader, which is the entry point that takes files rather than a
+/// hub repository. A missing file is an error naming the path, and [`resolve`]
+/// turns any load error into [`Resolved::Degraded`].
+#[cfg(feature = "embeddings")]
+pub mod fastembed {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    use ::fastembed::{
+        InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel,
+    };
+
+    use super::{EmbedError, Embedder, EmbedderId, ModelDirs};
+
+    /// Row width of the sentence-transformer M4 ships (§3.2).
+    ///
+    /// `all-MiniLM-L6-v2` emits 384 values. The id records the width so the
+    /// writer can validate every row and the reader can shape the payload
+    /// without a model; a directory holding a model of a different width fails
+    /// the build's width check rather than silently writing a payload the
+    /// manifest misdescribes.
+    pub const DIM: u32 = 384;
+
+    /// The files a model directory must contain, in the order
+    /// [`FastEmbed::load`] reads them.
+    ///
+    /// This list is the contract for "the model is present": [`model_dir`]
+    /// probes exactly these names, so a directory with an ONNX file and no
+    /// tokenizer degrades as `model not found` instead of failing later with a
+    /// less useful message.
+    pub const MODEL_FILES: [&str; 5] = [
+        "model.onnx",
+        "tokenizer.json",
+        "config.json",
+        "special_tokens_map.json",
+        "tokenizer_config.json",
+    ];
+
+    /// The identity recorded for a model loaded from the configured name.
+    ///
+    /// `name` is the `[embedding] model` string, not a file name: the id is
+    /// metadata about the model (V-20), so a user who swaps the weights under
+    /// the same name must rebuild for the vectors to be recomputed.
+    #[must_use]
+    pub fn id_for(name: &str) -> EmbedderId {
+        EmbedderId {
+            name: name.to_owned(),
+            dim: DIM,
+            dtype: "f32".to_owned(),
+            normalisation: "l2".to_owned(),
+        }
+    }
+
+    /// The first directory in precedence order that holds every model file.
+    ///
+    /// Read-only and model-free: five `is_file` probes per candidate, no
+    /// listing, no load, no socket. Precedence is `[embedding] model_dir`, then
+    /// `JANUS_MODEL_DIR`, then the cache directory (V-25); `None` is what
+    /// [`resolve`](super::resolve) reports as `model not found`.
+    #[must_use]
+    pub fn model_dir(dirs: &ModelDirs) -> Option<PathBuf> {
+        search_roots(dirs)
+            .into_iter()
+            .find(|root| MODEL_FILES.iter().all(|name| root.join(name).is_file()))
+    }
+
+    /// The candidate directories, rendered for a `Degraded` detail.
+    ///
+    /// Every directory [`model_dir`] probed, in the same order, so the message
+    /// tells the user where the tool actually looked rather than where it might
+    /// have.
+    #[must_use]
+    pub fn searched(dirs: &ModelDirs) -> String {
+        search_roots(dirs)
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The candidate directories in precedence order, without duplicates.
+    ///
+    /// De-duplication is why a user who points both `model_dir` and
+    /// `JANUS_MODEL_DIR` at one directory sees it once in the message.
+    fn search_roots(dirs: &ModelDirs) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = Vec::with_capacity(3);
+        for root in [dirs.config.as_ref(), dirs.env.as_ref(), Some(&dirs.cache)]
+            .into_iter()
+            .flatten()
+        {
+            if !roots.iter().any(|seen| seen == root) {
+                roots.push(root.clone());
+            }
+        }
+        roots
+    }
+
+    /// A sentence-transformer loaded from disk through ONNX Runtime.
+    ///
+    /// The model is held behind a [`Mutex`] because `fastembed` needs
+    /// `&mut self` while [`Embedder::embed`] takes `&self` and one instance is
+    /// shared. A poisoned lock is a failed batch, never a panic.
+    ///
+    /// [`EmbedError::batch`] is always `0` from this implementation: the caller
+    /// has already split the corpus, so this type only ever sees one batch and
+    /// the caller's index is the caller's to report.
+    pub struct FastEmbed {
+        id: EmbedderId,
+        model: Mutex<TextEmbedding>,
+    }
+
+    impl FastEmbed {
+        /// Loads the model files in `dir`, or explains why it could not.
+        ///
+        /// Never downloads: the five [`MODEL_FILES`] are read with
+        /// [`std::fs::read`] and handed to the user-defined loader. A read
+        /// failure and a construction failure both return the path plus the
+        /// underlying diagnostic, because [`resolve`](super::resolve) turns
+        /// either into a degraded run — embedding is never required for
+        /// correctness.
+        ///
+        /// # Errors
+        ///
+        /// A `String` naming the offending path and why it could not be used.
+        pub fn load(dir: &Path, name: &str) -> Result<Self, String> {
+            let tokenizer_files = TokenizerFiles {
+                tokenizer_file: read_file(dir, "tokenizer.json")?,
+                config_file: read_file(dir, "config.json")?,
+                special_tokens_map_file: read_file(dir, "special_tokens_map.json")?,
+                tokenizer_config_file: read_file(dir, "tokenizer_config.json")?,
+            };
+            let onnx_file = read_file(dir, "model.onnx")?;
+            let mut model = UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files);
+            // all-MiniLM-L6-v2 pools the mean of its token vectors. fastembed's
+            // precedence table would pick the same method for this output shape,
+            // but naming it keeps the row a property of the id rather than of a
+            // dependency's default.
+            model.pooling = Some(Pooling::Mean);
+
+            let embedding =
+                TextEmbedding::try_new_from_user_defined(model, InitOptionsUserDefined::new())
+                    .map_err(|error| format!("{}: {error}", dir.display()))?;
+
+            Ok(Self {
+                id: id_for(name),
+                model: Mutex::new(embedding),
+            })
+        }
+    }
+
+    impl Embedder for FastEmbed {
+        fn id(&self) -> &EmbedderId {
+            &self.id
+        }
+
+        fn embed(&self, batch: &[&str]) -> Result<Vec<Vec<f32>>, EmbedError> {
+            if batch.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let mut model = self.model.lock().map_err(|_| EmbedError {
+                embedder: self.id.name.clone(),
+                batch: 0,
+                reason: "the model lock is poisoned".to_owned(),
+            })?;
+
+            // One call, one batch: `build` already split by
+            // `[embedding] batch_size`, and a second split inside `fastembed`
+            // (its own default is 256) would make the configured size untrue.
+            model
+                .embed(batch, Some(batch.len()))
+                .map_err(|error| EmbedError {
+                    embedder: self.id.name.clone(),
+                    batch: 0,
+                    reason: format!("{} text(s): {error}", batch.len()),
+                })
+        }
+    }
+
+    /// Reads one model file, naming the path when it cannot be read.
+    fn read_file(dir: &Path, name: &str) -> Result<Vec<u8>, String> {
+        let path = dir.join(name);
+        std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))
+    }
 }
 
 /// Appends one length-prefixed field to an identity encoding.
@@ -537,7 +771,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "embeddings"))]
     fn resolve_degrades_an_absent_model_without_touching_the_directory() {
+        // The feature-off column of §3.2's table. With the feature on the same
+        // config is `model not found` instead of `not compiled`, which is the
+        // next column and is asserted by its own test below.
         let config = config("[embedding]\nmodel = \"AllMiniLML6V2\"\n");
 
         match resolve(&config, &dirs("/definitely/not/a/model/cache")) {
@@ -575,5 +813,141 @@ mod tests {
                 Resolved::Ready(_) => panic!("`{model}` is not a valid hash dimension"),
             }
         }
+    }
+
+    // ── the feature-on rows of §3.2's dispatch table ──────────────────────
+    //
+    // No test here loads a model: the fixtures are a directory of the right
+    // file names and one of the wrong contents, so the assertions cover the
+    // file-presence rule, the identity, and the degradation path. A `Ready`
+    // with real weights needs the model itself and is exercised by the CI
+    // feature job's `check`, not by a test with 90 MB of fixtures.
+
+    /// Writes a model directory holding every file in `MODEL_FILES`.
+    #[cfg(feature = "embeddings")]
+    fn model_fixture(contents: &[u8]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in fastembed::MODEL_FILES {
+            std::fs::write(dir.path().join(name), contents).expect("write model file");
+        }
+        dir
+    }
+
+    #[test]
+    #[cfg(feature = "embeddings")]
+    fn the_model_identity_is_384_dimensional_and_l2() {
+        // The `Ready` half of "model present" that needs no weights: the id a
+        // load would record.
+        let id = fastembed::id_for("AllMiniLML6V2");
+
+        assert_eq!(id.name, "AllMiniLML6V2");
+        assert_eq!(id.dim, 384);
+        assert_eq!(id.dtype, "f32");
+        assert_eq!(id.normalisation, "l2");
+        assert_eq!(
+            id.config_warning(),
+            None,
+            "a real model is not a test double"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embeddings")]
+    fn a_directory_with_every_model_file_is_found() {
+        let vault = model_fixture(b"not a model");
+        let dirs = ModelDirs {
+            config: Some(vault.path().to_path_buf()),
+            env: None,
+            cache: PathBuf::from("/no/such/model/cache"),
+        };
+
+        assert_eq!(
+            fastembed::model_dir(&dirs),
+            Some(vault.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embeddings")]
+    fn a_directory_missing_one_model_file_is_not_found() {
+        let vault = model_fixture(b"not a model");
+        std::fs::remove_file(vault.path().join("tokenizer.json")).expect("remove one file");
+        let dirs = ModelDirs {
+            config: None,
+            env: None,
+            cache: vault.path().to_path_buf(),
+        };
+
+        assert_eq!(fastembed::model_dir(&dirs), None);
+    }
+
+    #[test]
+    #[cfg(feature = "embeddings")]
+    fn the_configured_directory_wins_over_the_cache() {
+        // V-25's precedence: config, then the environment, then the cache.
+        let configured = model_fixture(b"not a model");
+        let cached = model_fixture(b"not a model either");
+        let dirs = ModelDirs {
+            config: Some(configured.path().to_path_buf()),
+            env: None,
+            cache: cached.path().to_path_buf(),
+        };
+
+        assert_eq!(
+            fastembed::model_dir(&dirs),
+            Some(configured.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "embeddings")]
+    fn resolve_degrades_a_missing_model_and_names_the_directory() {
+        let config = config("[embedding]\nmodel = \"AllMiniLML6V2\"\n");
+        let missing = "/definitely/not/a/model/cache";
+
+        match resolve(&config, &dirs(missing)) {
+            Resolved::Degraded(reason, detail) => {
+                assert_eq!(reason, "model not found");
+                assert!(detail.contains(missing), "{detail}");
+                assert!(detail.contains("AllMiniLML6V2"), "{detail}");
+            }
+            Resolved::Ready(_) => panic!("there is no model in {missing}"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "embeddings")]
+    fn resolve_degrades_present_but_unusable_model_files_with_the_path() {
+        // The files exist, so the presence rule passes and the loader runs; the
+        // contents cannot be a model, so the run degrades instead of failing.
+        let vault = model_fixture(b"not a model");
+        let config = config("[embedding]\nmodel = \"AllMiniLML6V2\"\n");
+        let dirs = ModelDirs {
+            config: Some(vault.path().to_path_buf()),
+            env: None,
+            cache: PathBuf::from("/no/such/model/cache"),
+        };
+
+        match resolve(&config, &dirs) {
+            Resolved::Degraded(reason, detail) => {
+                assert_eq!(reason, "model unusable");
+                assert!(
+                    detail.contains(&vault.path().display().to_string()),
+                    "{detail}"
+                );
+            }
+            Resolved::Ready(_) => panic!("five files of garbage cannot be a model"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "embeddings")]
+    fn the_feature_does_not_change_the_hash_rows_of_the_table() {
+        // `hash-64` is compiled unconditionally and must stay `Ready` with the
+        // feature on, or a featured build would lose the deterministic double.
+        let config = config("[embedding]\nmodel = \"hash-64\"\n");
+        let embedder = ready(resolve(&config, &dirs("/no/such/model/cache")));
+
+        assert_eq!(embedder.id().name, "hash-64");
     }
 }

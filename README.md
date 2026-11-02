@@ -67,6 +67,27 @@ text. A read auto-builds a missing index and rebuilds a stale one, printing one
 `facts` lists only active decisions, specs and principles — not drafts, unknown,
 deprecated or superseded documents, which `search --intent current` may still show.
 
+## Embeddings (opt-in)
+
+The semantic half of hybrid search is compiled behind the **non-default**
+`embeddings` feature, because it pulls ONNX Runtime through `fastembed`:
+
+```bash
+cargo build --features embeddings
+cargo install janus-mem --features embeddings
+```
+
+**The model is read from disk and never downloaded by `janus`.** Put the five
+files of an `all-MiniLM-L6-v2` ONNX export (`model.onnx`, `tokenizer.json`,
+`config.json`, `special_tokens_map.json`, `tokenizer_config.json`) in one
+directory and point the tool at it with `[embedding] model_dir` in `janus.toml`
+or with `JANUS_MODEL_DIR`. Without those files the command still works: it says
+`model not found`, embeds nothing, and searches lexically.
+
+A build without the feature is a full lexical engine, and a build with it still
+runs lexical-only for any vault whose model is absent — embedding is never
+required for correctness.
+
 ## Documentation
 
 - [SPEC.md](SPEC.md) — the full project specification: domain model, scoring, read/write

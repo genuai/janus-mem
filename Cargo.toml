@@ -51,6 +51,18 @@ fs4 = "1.1.0"
 # unique per-writer temp files: a shared `index.bin.new` is itself a race.
 tempfile = "3.27.0"
 
+# The ONNX sentence-transformer of SPEC §7.2 behind the non-default `embeddings`
+# feature. Optional because `fastembed` pulls `ort`, which fetches a prebuilt
+# ONNX Runtime at build time and cannot be cross-compiled to Windows from macOS,
+# so a lexical-only build must not pay for it (§8.2, V-13). The download path is
+# `ort`'s, reached through `fastembed`'s own defaults; do not add
+# `ort/download-binaries` here, and nothing at runtime downloads (§3.2).
+fastembed = { version = "5.17.4", optional = true }
+
+[features]
+# Not default: the Windows cross-check and `cargo test` never compile it (V-13).
+embeddings = ["dep:fastembed"]
+
 [dev-dependencies]
 # cli integration testing
 assert_cmd = "2.2.2"
