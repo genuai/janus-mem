@@ -1575,6 +1575,140 @@ Markdown is not budgeted.
 
 ## 14. Implementation log — Phase 5 (publication)
 
+## 14. Implementation log — Phase 5 (publication)
+
+Branch: `bb/m3-phase-5-publication-lock-thr_7ptkmjkuza`, the bb worktree branch
+based on `main` at `8312077`; the plan's `m3-publish` name was superseded by the
+worktree branch before implementation started, as in phase 1. Scope is
+`src/index/store.rs` (the publication and reader halves), `src/error.rs` (two
+variants), `Cargo.toml` (`fs4`, `tempfile` promoted), and `tests/publish.rs`.
+Squarely absent: the CLI, the eval harness, and every scoring change. No new
+command, and `score.rs`, `lexical.rs` and `tokenize.rs` are untouched.
+
+§3.5 is implemented as written: exclusive `.janus/lock` for writers, 10 s
+timeout, held across all six stages; unique temp file per writer; `index.bin`
+before `manifest.json`, with a directory sync after each; stale temp sweep under
+the lock; double-checked freshness; readers lock-free on the validated path,
+retrying 3×, then taking the writer lock, re-checking, rebuilding once, then
+refusing. The §3.5 recovery table is the contract: after the index rename the old
+bytes are gone, so recovery is a rebuild from the vault, never a restore.
+
+### Decisions taken
+
+- **P-1 — `fs4`, not `fd-lock`.** `fd_lock::RwLock`'s guard borrows the lock
+  object, so a struct that owns both is a self-reference: it needs `unsafe`
+  (banned by D12) or a self-referential wrapper crate. `fs4` locks the `File`
+  directly, so `Lock` is a plain owning struct and the publish path holds it in
+  one local. std's `File::try_lock` would also work but is only stable since
+  1.89; `fs4` keeps the crate's MSRV at edition 2024's 1.85. Calls go through
+  `fs4::FileExt::try_lock` UFCS because `File::try_lock` is now inherent and
+  would otherwise win name resolution. A 5 ms poll against a deadline gives the
+  timeout that `fd_lock::write()` does not have; `TryLockError::WouldBlock` is
+  fs4's contention signal on both platforms (its own Windows tests assert the
+  same-process case this suite depends on).
+- **P-2 — the six stages are enum values, and the hook is `#[doc(hidden)]`.**
+  `Stage` is `IndexWritten`, `IndexRenamed`, `IndexDirSynced`,
+  `ManifestWritten`, `ManifestRenamed`, `ManifestDirSynced`; the six are the
+  publication events, not the eight bullet points of §3.5's step list, because
+  "write" and "sync" happen together before the call back. `publish_with_hook`
+  and `Stage` are hidden: they exist for the test seam and are not part of the
+  API a consumer should call. `missing_docs` does not require doc text on hidden
+  items, which is also why the variant docs are the short ones.
+- **P-3 — `_lock: &Lock` is a witness parameter, not state.** `publish_locked`
+  cannot read the lock and does not need to; taking the reference makes
+  "published without holding the lock" unrepresentable, which is the property a
+  reviewer should be able to check by reading the signature. `Lock` itself is
+  public because a test (and, later, a maintenance command) must be able to hold
+  the writer lock deliberately.
+- **P-4 — the reader returns the cause; phase 6 prints the one stderr line.**
+  `Load.stale: Option<String>` carries "why a published generation was
+  rejected" (`.../index.bin does not match manifest.index_sha`, `tokenizer
+  v1/none != v2/none`, ...). The library writes no stderr, matching the existing
+  precedent that `Config.warnings` are collected and the CLI prints them (§8.2
+  keeps diagnostics off stdout). Acceptance 4a therefore asserts the cause string
+  names `index.bin` and `manifest.index_sha`; phase 6 prints it verbatim and
+  its test owns the stderr assertion.
+- **P-5 — retry is the latency mechanism; the lock re-check is the correctness
+  mechanism.** A reader that meets "new index, old manifest" first re-reads the
+  manifest after 10/50/200 ms, so a publish that finishes in that window costs no
+  lock at all. If it does take the lock, freshness is re-tested **under** it, so
+  a reader that waited for a publisher adopts the completed generation. That is
+  what makes two auto-builds cost one build. The retry *count* is deliberately
+  not asserted: it is not observable through the public API without a reader
+  hook or a wall-clock assertion. Mutation check while writing this phase:
+  deleting the lock re-check fails
+  `two_simultaneous_auto_builds_cost_one_build` with 2 builds; setting
+  `RETRY_BACKOFF` to empty leaves the whole suite green, which is the honest
+  evidence for the split above.
+- **P-6 — determinism without sleeping (the §3.5 acceptance discipline).** No
+  test sleeps and no test creates a race by timing:
+  - a reader is spawned from the writer hook at each stage and joined **after**
+    `publish_with_hook` returns, so the publisher is never paused — pausing it
+    would hold the lock that a recovering reader waits for and deadlock the test;
+  - the post-crash pair (new `index.bin`, old `manifest.json`) is **built
+    directly**, because that is the durable state a crash leaves and it needs no
+    publisher at all;
+  - the lock-timeout case holds a real `Lock` in the test thread and gives the
+    load a 10 ms timeout, so the timeout is exercised, not simulated;
+  - the two auto-builds synchronise on a `Barrier`, not a delay;
+  - manifests use an injected `built_at` and documents a fixed `date`, so no
+    snapshot depends on when the suite ran; `load` never reads a clock and only
+    the protocol's own bounded backoff sleeps.
+- **P-7 — recovery reuses the old index bytes when they still decode.**
+  `previous_snapshot` reads `index.bin` and ignores the manifest, so the
+  interrupted pair's index is still a valid reuse source: the recovered bytes are
+  byte-identical to a clean build (asserted in both the interrupted-publish and
+  corrupt-bytes cases). This also keeps S-9's reuse contract intact across a
+  crash, at no extra storage.
+- **P-8 — the refusal variant is `IndexUnstable` for both "no generation
+  validates" and "nothing has been built".** §3.5 names one variant with exit 1
+  and a message that names the index; adding a third variant for "absent" would
+  be a second code for the same caller action ("rerun without `--no-rebuild`").
+  The message names `.janus/index.bin` in both cases.
+- **P-9 — the phase does not fit the plan's ~200 logic-line estimate; it is 597,
+  and it is not split.** The estimate was written for six bullet points, not for
+  their code: the protocol itself (lock, six stages, temp/persist/dir-sync,
+  sweep, expectation check, retry loop, recovery) is ~330 lines; ~90 are
+  `missing_docs`-required public documentation on `Load`/`LoadOptions`/
+  `Publication`/`Stage`/constants; ~40 are blank lines; ~35 are the *deletions*
+  of `write_generation` and its phase-4 test body, which the size script counts;
+  the rest is error plumbing. Splitting the writer from the reader would put two
+  reviewable units of ~300 lines each on two stacked branches, but they share the
+  lock, the `Publication` type and half the acceptance cases, and the phase's
+  whole point is that the pair is one protocol. 597 < 600, so it ships as one
+  phase PR. The next phase that needs to fit a 200-line estimate should be
+  estimated from the protocol's steps, not from its bullets.
+
+### Tests and gates
+
+Seven integration tests in `tests/publish.rs`, one per acceptance case plus the
+order assertion: a reader at every stage (six readers, each returns a validated
+pair whose bytes hash to the manifest it read, each hit set equals the pre- or
+post-publication set, none rebuilds); two simultaneous auto-builds (1 rebuilt,
+1 adopted with zero `BuildStats`, identical hits and `index_sha`); a held lock
+plus a 10 ms timeout (`LockTimeout`, exit 1, names `.janus/lock`, `.janus/`
+unchanged, loadable after release); an interrupted publish (`Policy::Refuse`
+exits 1 naming `.janus/index.bin` and leaves `.janus/` byte-identical;
+`Policy::Rebuild` returns bytes equal to a clean build and reports the cause;
+a failure before the rename loads with no rebuild and no cause); corrupt bytes
+(one flipped byte, truncated, zeroed — each rebuilds to the clean bytes and
+reports a cause); an 8-reader storm during one publish (zero errors, no mixed
+generation); and the stage record, where `IndexRenamed` observes the new index
+on disk while `manifest.json` is still the old bytes, proving the rename order.
+The store's own phase-4 write test now publishes through `publish`, so the plain
+write path is gone rather than left beside the protocol.
+
+Gates: `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test --all-targets` (336 unit + all integration, 0 failures),
+`cargo doc --no-deps` (0 warnings, and `publish_with_hook`/`Stage` do not appear
+in the generated docs), the Windows cross-check
+(`cargo check --target aarch64-pc-windows-msvc --all-targets --features
+blake3/pure`), and `scripts/pr-size.sh` — **597 logic / 490 tests**, total 1087.
+Markdown and `Cargo.lock` are not budgeted. The Windows check is the one that
+matters for the new dependencies: `fs4` pulls `windows-sys` and `tempfile` is
+already exercised by other targets, both compile for the MSVC target from macOS.
+
+
 ## 15. Implementation log — Phase 6 (CLI + eval)
 
 ## 16. Handoff to M4

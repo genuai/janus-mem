@@ -1,16 +1,26 @@
 //! Snapshot persistence, the manifest, and load-time validation (§3.5, §8.3).
 //!
-//! Phase 4 writes plain files; phase 5 adds locking and publication. Loading
-//! validates every id, range and offset before use (S-18).
+//! Loading validates every id, range and offset before use (S-18). Writing is a
+//! publication: `.janus/lock` for the whole write (S-7), a unique temp file per
+//! writer, `index.bin` renamed before `manifest.json` (S-17).
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write as _};
 use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
 
+use fs4::TryLockError;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use tempfile::NamedTempFile;
 
+use crate::config::{self, Config};
+use crate::error::JanusError;
 use crate::tokenize::{Stemmer, Tokenizer, TokenizerFingerprint};
+use crate::vault::{self, WalkOptions, identity, resolve};
 
+use super::build::{self, BuildPlan, BuildStats};
 use super::{ChunkMeta, ChunkingFingerprint, DocMeta, FORMAT_VERSION, LexicalIndex, Snapshot};
 
 macro_rules! corrupt {
@@ -18,6 +28,33 @@ macro_rules! corrupt {
         return Err(Corrupt::new(format!($($arg)*)))
     };
 }
+
+/// The index snapshot inside the index directory (§2).
+pub const INDEX_FILE: &str = "index.bin";
+
+/// The generation manifest, written last (§2, S-17).
+pub const MANIFEST_FILE: &str = "manifest.json";
+
+/// The exclusive advisory writer lock (§8.3, S-7).
+pub const LOCK_FILE: &str = "lock";
+
+/// How long a writer waits for [`LOCK_FILE`] before giving up (§3.5, S-7).
+pub const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Prefix of every publication temp file, swept under the lock only (§3.5).
+const TEMP_PREFIX: &str = ".tmp";
+
+/// The reader's bounded retry schedule (§3.5 step 4): three retries after the
+/// first attempt, because a publication takes milliseconds, not seconds.
+const RETRY_BACKOFF: [Duration; 3] = [
+    Duration::from_millis(10),
+    Duration::from_millis(50),
+    Duration::from_millis(200),
+];
+
+/// How often a waiting writer re-tests the lock. Short enough that the 10 ms
+/// timeout in tests is honoured, long enough not to spin.
+const LOCK_POLL: Duration = Duration::from_millis(5);
 
 /// The human-readable index manifest (`.janus/manifest.json`, §2).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,12 +102,11 @@ impl Manifest {
         index_len: u64,
         built_at: &str,
     ) -> Self {
-        let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         Self {
             format_version: snapshot.format_version,
             schema_version: 1,
             corpus_id: snapshot.corpus_id.clone(),
-            built_root: root.to_string_lossy().replace('\\', "/"),
+            built_root: built_root(root),
             built_at: built_at.to_owned(),
             docs: snapshot.docs.len(),
             chunks: snapshot.chunks.len(),
@@ -255,27 +291,506 @@ impl Snapshot {
     }
 }
 
-/// Writes `index.bin` and then `manifest.json` as plain phase-4 files.
+/// The manifest's `built_root`: canonicalized with `dunce`, `/`-separated (§8.7).
+#[must_use]
+pub fn built_root(root: &Path) -> String {
+    let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    root.to_string_lossy().replace('\\', "/")
+}
+
+// ───────────────────────────────── writer ──────────────────────────────────
+
+/// The exclusive advisory writer lock, [`LOCK_FILE`] (S-7). Dropping it releases
+/// it; it is a plain file, so it can be held across a whole publish.
+#[derive(Debug)]
+pub struct Lock {
+    file: File,
+}
+
+impl Lock {
+    /// Takes the lock, re-testing until `timeout` elapses.
+    ///
+    /// # Errors
+    ///
+    /// [`JanusError::LockTimeout`], or [`JanusError::Write`] on the lock file.
+    pub fn acquire(dir: &Path, timeout: Duration) -> Result<Self, JanusError> {
+        fs::create_dir_all(dir).map_err(|source| JanusError::CreateDir {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let path = dir.join(LOCK_FILE);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|source| JanusError::Write {
+                path: path.clone(),
+                source,
+            })?;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            // UFCS on purpose: `File::try_lock` is inherent on newer compilers,
+            // so `file.try_lock()` would resolve to std's, not fs4's, method.
+            match fs4::FileExt::try_lock(&file) {
+                Ok(()) => return Ok(Self { file }),
+                Err(TryLockError::WouldBlock) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(JanusError::LockTimeout { path });
+                    }
+                    thread::sleep(LOCK_POLL.min(deadline - now));
+                }
+                Err(TryLockError::Error(source)) => {
+                    return Err(JanusError::Write { path, source });
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        // Closing the handle releases it too; unlocking first is explicit.
+        let _ = fs4::FileExt::unlock(&self.file);
+    }
+}
+
+/// The six stages of a publication (S-17), the seam behind [`publish_with_hook`].
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    IndexWritten,
+    IndexRenamed,
+    IndexDirSynced,
+    ManifestWritten,
+    ManifestRenamed,
+    ManifestDirSynced,
+}
+
+/// One generation to write; the manifest is derived from these fields (S-17).
+#[derive(Debug, Clone, Copy)]
+pub struct Publication<'a> {
+    /// The index directory (normally `.janus`).
+    pub dir: &'a Path,
+    /// The corpus root recorded in the manifest.
+    pub root: &'a Path,
+    /// The snapshot to publish.
+    pub snapshot: &'a Snapshot,
+    /// The chunker fingerprint the manifest records.
+    pub chunker: ChunkingFingerprint,
+    /// Injected build time; no library path invents one (I-3).
+    pub built_at: &'a str,
+}
+
+/// Publishes one generation under the writer lock, manifest last (S-7, S-17).
+/// An interrupted publish is recovered by a rebuild, never by a restore (§3.5).
 ///
 /// # Errors
 ///
-/// [`Corrupt`] when encoding fails or either file cannot be written.
-pub fn write_generation(
-    dir: &Path,
-    snapshot: &Snapshot,
-    manifest: &Manifest,
-) -> Result<(), Corrupt> {
-    let bytes = snapshot.to_bytes()?;
-    fs::create_dir_all(dir)
-        .map_err(|error| Corrupt::new(format!("cannot create {}: {error}", dir.display())))?;
-    // TODO(phase 5): replace with lock, unique temp files, fsync and renames.
-    fs::write(dir.join("index.bin"), &bytes)
-        .map_err(|error| Corrupt::new(format!("cannot write index.bin: {error}")))?;
-    let manifest_json = serde_json::to_vec_pretty(manifest)
-        .map_err(|error| Corrupt::new(format!("cannot encode manifest.json: {error}")))?;
-    fs::write(dir.join("manifest.json"), manifest_json)
-        .map_err(|error| Corrupt::new(format!("cannot write manifest.json: {error}")))?;
+/// [`JanusError::LockTimeout`], and any stage's IO or encoding failure.
+pub fn publish(publication: &Publication<'_>) -> Result<Manifest, JanusError> {
+    publish_with_hook(publication, &mut |_| {})
+}
+
+/// [`publish`] with a callback at each of the six [`Stage`]s: the §3.5 test seam.
+/// Errors are exactly [`publish`]'s.
+#[doc(hidden)]
+pub fn publish_with_hook(
+    publication: &Publication<'_>,
+    hook: &mut dyn FnMut(Stage),
+) -> Result<Manifest, JanusError> {
+    let lock = Lock::acquire(publication.dir, LOCK_TIMEOUT)?;
+    publish_locked(publication, hook, &lock)
+}
+
+/// The six-stage write. `_lock` is a witness that the caller holds the lock.
+fn publish_locked(
+    publication: &Publication<'_>,
+    hook: &mut dyn FnMut(Stage),
+    _lock: &Lock,
+) -> Result<Manifest, JanusError> {
+    let dir = publication.dir;
+    // Only writers create temp files, so a leftover one is a crashed writer's.
+    sweep_temps(dir)?;
+
+    let bytes = publication.snapshot.to_bytes()?;
+    let index_path = dir.join(INDEX_FILE);
+    let temp = write_temp(dir, &bytes)?;
+    hook(Stage::IndexWritten);
+    persist(temp, &index_path)?;
+    hook(Stage::IndexRenamed);
+    sync_dir(dir)?;
+    hook(Stage::IndexDirSynced);
+
+    let manifest = Manifest::new(
+        publication.root,
+        publication.snapshot,
+        publication.chunker,
+        blake3::hash(&bytes).to_hex().to_string(),
+        bytes.len() as u64,
+        publication.built_at,
+    );
+    let manifest_path = dir.join(MANIFEST_FILE);
+    let json = serde_json::to_vec_pretty(&manifest).map_err(|error| {
+        let reason = format!("cannot encode {}: {error}", manifest_path.display());
+        JanusError::Io(io::Error::new(io::ErrorKind::InvalidData, reason))
+    })?;
+    let temp = write_temp(dir, &json)?;
+    hook(Stage::ManifestWritten);
+    persist(temp, &manifest_path)?;
+    hook(Stage::ManifestRenamed);
+    sync_dir(dir)?;
+    hook(Stage::ManifestDirSynced);
+    Ok(manifest)
+}
+
+/// Writes `bytes` to a uniquely named temp file in `dir` and syncs it.
+fn write_temp(dir: &Path, bytes: &[u8]) -> Result<NamedTempFile, JanusError> {
+    let mut temp = NamedTempFile::new_in(dir).map_err(|source| write_error(dir, source))?;
+    temp.write_all(bytes)
+        .and_then(|()| temp.as_file().sync_all())
+        .map_err(|source| write_error(temp.path(), source))?;
+    Ok(temp)
+}
+
+/// Atomically replaces `target` with the temp file.
+fn persist(temp: NamedTempFile, target: &Path) -> Result<(), JanusError> {
+    temp.persist(target)
+        .map(|_file| ())
+        .map_err(|error| write_error(target, error.error))
+}
+
+/// Removes leftover `.tmp*` files from crashed writers.
+fn sweep_temps(dir: &Path) -> Result<(), JanusError> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io_error(dir, source)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|source| io_error(dir, source))?;
+        if !entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let path = entry.path();
+            fs::remove_file(&path).map_err(|source| io_error(&path, source))?;
+        }
+    }
     Ok(())
+}
+
+/// Syncs a directory so both renames are durable (§3.5, §8.7).
+fn sync_dir(dir: &Path) -> Result<(), JanusError> {
+    match File::open(dir).and_then(|file| file.sync_all()) {
+        Ok(()) => Ok(()),
+        // Windows cannot open a directory as a file; the renames stay atomic.
+        #[cfg(unix)]
+        Err(source) => Err(write_error(dir, source)),
+        #[cfg(not(unix))]
+        Err(_) => Ok(()),
+    }
+}
+
+fn write_error(path: &Path, source: io::Error) -> JanusError {
+    JanusError::Write {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+/// An IO failure whose message still names the path that failed (AGENTS.md).
+fn io_error(path: &Path, source: io::Error) -> JanusError {
+    let reason = format!("{}: {source}", path.display());
+    JanusError::Io(io::Error::new(source.kind(), reason))
+}
+
+impl From<Corrupt> for JanusError {
+    fn from(corrupt: Corrupt) -> Self {
+        Self::Io(io::Error::new(io::ErrorKind::InvalidData, corrupt.reason))
+    }
+}
+
+// ───────────────────────────────── reader ──────────────────────────────────
+
+/// What a manifest must agree with before its bytes are trusted (§3.5, S-8).
+struct Expected {
+    format_version: u16,
+    tokenizer: TokenizerFingerprint,
+    chunker: ChunkingFingerprint,
+    corpus_id: String,
+    built_root: String,
+}
+
+impl Expected {
+    fn new(root: &Path, config: &Config) -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            tokenizer: Tokenizer::new().fingerprint(),
+            chunker: ChunkingFingerprint {
+                max_chars: config.chunking.max_chars,
+                overlap: config.chunking.overlap,
+            },
+            corpus_id: config.corpus_id.clone(),
+            built_root: built_root(root),
+        }
+    }
+
+    /// The reason this manifest is stale, or `Ok` when it describes us.
+    fn check(&self, manifest: &Manifest) -> Result<(), String> {
+        let found = [
+            ("format_version", manifest.format_version.to_string()),
+            ("tokenizer", tokenizer_name(&manifest.tokenizer)),
+            ("chunker", chunker_name(manifest.chunker)),
+            ("corpus_id", manifest.corpus_id.clone()),
+            ("built_root", manifest.built_root.clone()),
+        ];
+        let wanted = [
+            self.format_version.to_string(),
+            tokenizer_name(&self.tokenizer),
+            chunker_name(self.chunker),
+            self.corpus_id.clone(),
+            self.built_root.clone(),
+        ];
+        match found.iter().zip(&wanted).position(|((_, a), b)| a != b) {
+            None => Ok(()),
+            Some(index) => {
+                let (field, actual) = &found[index];
+                Err(format!("{field} {actual} != {}", wanted[index]))
+            }
+        }
+    }
+}
+
+fn tokenizer_name(fingerprint: &TokenizerFingerprint) -> String {
+    let stemmer = match fingerprint.stemmer {
+        Stemmer::None => "none",
+    };
+    format!("{}/{stemmer}", fingerprint.algorithm)
+}
+
+fn chunker_name(chunker: ChunkingFingerprint) -> String {
+    format!("{}@{}", chunker.max_chars, chunker.overlap)
+}
+
+/// A validated pair: the bytes hashed to the manifest that names them.
+struct Generation {
+    manifest: Manifest,
+    snapshot: Snapshot,
+}
+
+/// The result of one validated-read attempt (§3.5 steps 1–4).
+enum Attempt {
+    /// The manifest and the bytes it names agree. This is a generation.
+    Ready(Box<Generation>),
+    /// The pair did not agree; a publisher may be between the two renames.
+    Retry(String),
+    /// Nothing retrying can fix: absent, unreadable, or built for another world.
+    Stale(String),
+}
+
+/// Reads one file, distinguishing absence from a real IO failure.
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, JanusError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io_error(path, source)),
+    }
+}
+
+/// One lock-free read, validation included.
+fn read_generation(dir: &Path, expected: &Expected) -> Result<Attempt, JanusError> {
+    let manifest_path = dir.join(MANIFEST_FILE);
+    let Some(manifest_bytes) = read_optional(&manifest_path)? else {
+        return Ok(Attempt::Stale(format!(
+            "{} is missing",
+            manifest_path.display()
+        )));
+    };
+    let manifest: Manifest = match serde_json::from_slice(&manifest_bytes) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let reason = format!("{} is unreadable: {error}", manifest_path.display());
+            return Ok(Attempt::Stale(reason));
+        }
+    };
+    if let Err(reason) = expected.check(&manifest) {
+        return Ok(Attempt::Stale(reason));
+    }
+
+    let index_path = dir.join(INDEX_FILE);
+    let Some(bytes) = read_optional(&index_path)? else {
+        return Ok(Attempt::Stale(format!(
+            "{} is missing",
+            index_path.display()
+        )));
+    };
+    if blake3::hash(&bytes).to_hex().to_string() != manifest.index_sha {
+        let reason = format!("{} does not match manifest.index_sha", index_path.display());
+        return Ok(Attempt::Retry(reason));
+    }
+    match Snapshot::from_bytes(&bytes) {
+        Ok(snapshot) => Ok(Attempt::Ready(Box::new(Generation { manifest, snapshot }))),
+        Err(corrupt) => {
+            let reason = format!("{} {}", index_path.display(), corrupt.reason);
+            Ok(Attempt::Retry(reason))
+        }
+    }
+}
+
+/// What a read may do when no generation validates (S-8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Policy {
+    /// Build from the vault and publish it under the writer lock.
+    Rebuild,
+    /// Refuse with [`JanusError::IndexUnstable`] and write nothing.
+    Refuse,
+}
+
+/// The inputs a load needs that are not on disk.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadOptions<'a> {
+    /// The corpus root: the manifest's `built_root` and the rebuild's input.
+    pub root: &'a Path,
+    /// The resolved config: corpus id, chunking, and the index location.
+    pub config: &'a Config,
+    /// Injected build time for a manifest this call writes (I-3).
+    pub built_at: &'a str,
+    /// How long a recovering reader waits for the writer lock (S-7).
+    pub lock_timeout: Duration,
+    /// Whether a read may rebuild (S-8).
+    pub policy: Policy,
+}
+
+impl<'a> LoadOptions<'a> {
+    /// The defaults: [`LOCK_TIMEOUT`] and [`Policy::Rebuild`].
+    #[must_use]
+    pub fn new(root: &'a Path, config: &'a Config, built_at: &'a str) -> Self {
+        Self {
+            root,
+            config,
+            built_at,
+            lock_timeout: LOCK_TIMEOUT,
+            policy: Policy::Rebuild,
+        }
+    }
+}
+
+/// A validated generation, plus what the read that produced it did (§3.5).
+#[derive(Debug)]
+pub struct Load {
+    /// The snapshot whose bytes hashed to [`Load::manifest`]'s `index_sha`.
+    pub snapshot: Snapshot,
+    /// The manifest those bytes were validated against.
+    pub manifest: Manifest,
+    /// True when this call built and published the generation.
+    pub rebuilt: bool,
+    /// What a build reused; all zero when the generation was adopted.
+    pub stats: BuildStats,
+    /// Why a generation on disk was rejected (S-8); `None` when one validated.
+    pub stale: Option<String>,
+}
+
+impl Load {
+    /// The outcome when an existing generation validated.
+    fn adopted(generation: Generation, stale: Option<String>) -> Self {
+        Self {
+            snapshot: generation.snapshot,
+            manifest: generation.manifest,
+            rebuilt: false,
+            stats: BuildStats::default(),
+            stale,
+        }
+    }
+}
+
+/// Reads a validated generation, rebuilding once under the writer lock if none
+/// validates and [`Policy`] allows it (§3.5). A healthy read takes no lock;
+/// recovery does, and may wait for an active publisher. Errors:
+/// [`JanusError::IndexUnstable`] under [`Policy::Refuse`],
+/// [`JanusError::LockTimeout`] if recovery cannot get the lock, and IO failures.
+pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
+    let dir = config::resolve_index_dir(options.root, &options.config.index_dir);
+    let expected = Expected::new(options.root, options.config);
+
+    let mut ready = None;
+    let mut last = String::new();
+    let mut retries = 0;
+    loop {
+        match read_generation(&dir, &expected)? {
+            Attempt::Ready(generation) => {
+                ready = Some(generation);
+                break;
+            }
+            Attempt::Stale(reason) => {
+                last = reason;
+                break;
+            }
+            Attempt::Retry(reason) => last = reason,
+        }
+        let Some(backoff) = RETRY_BACKOFF.get(retries) else {
+            break;
+        };
+        retries += 1;
+        thread::sleep(*backoff);
+    }
+
+    if let Some(generation) = ready {
+        return Ok(Load::adopted(
+            *generation,
+            (!last.is_empty()).then_some(last),
+        ));
+    }
+    if options.policy == Policy::Refuse {
+        return Err(JanusError::IndexUnstable {
+            path: dir.join(INDEX_FILE),
+        });
+    }
+
+    let lock = Lock::acquire(&dir, options.lock_timeout)?;
+    // Double-checked freshness (S-7): another process may have published while
+    // we waited. Adopting it is what makes two auto-builds cost one build.
+    if let Attempt::Ready(generation) = read_generation(&dir, &expected)? {
+        return Ok(Load::adopted(
+            *generation,
+            (!last.is_empty()).then_some(last),
+        ));
+    }
+
+    let plan = rebuild_plan(options.root, options.config, &dir)?;
+    let publication = Publication {
+        dir: &dir,
+        root: options.root,
+        snapshot: &plan.snapshot,
+        chunker: plan.chunker,
+        built_at: options.built_at,
+    };
+    let manifest = publish_locked(&publication, &mut |_| {}, &lock)?;
+    Ok(Load {
+        snapshot: plan.snapshot,
+        manifest,
+        rebuilt: true,
+        stats: plan.stats,
+        stale: (!last.is_empty()).then_some(last),
+    })
+}
+
+/// Computes the next snapshot from the vault, reusing tokens where §3.4 allows.
+fn rebuild_plan(root: &Path, config: &Config, dir: &Path) -> Result<BuildPlan, JanusError> {
+    let walk = vault::walk(root, config, WalkOptions::default())?;
+    let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
+    identity::derive_identity(&mut documents, config);
+    let previous = previous_snapshot(dir);
+    Ok(build::plan(config, &documents, previous.as_ref()))
+}
+
+/// The old snapshot if its bytes still decode: reuse needs tokens, not a manifest.
+fn previous_snapshot(dir: &Path) -> Option<Snapshot> {
+    let bytes = fs::read(dir.join(INDEX_FILE)).ok()?;
+    Snapshot::from_bytes(&bytes).ok()
 }
 
 /// The persisted fingerprint names only known algorithms and stemmers (I-1).
@@ -423,21 +938,18 @@ mod tests {
     fn manifest_is_human_readable_and_a_generation_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
         let snapshot = sample_snapshot();
-        let manifest = Manifest::new(
-            dir.path(),
-            &snapshot,
-            ChunkingFingerprint {
+        let index_dir = dir.path().join(".janus");
+        let publication = Publication {
+            dir: &index_dir,
+            root: dir.path(),
+            snapshot: &snapshot,
+            chunker: ChunkingFingerprint {
                 max_chars: 1800,
                 overlap: 0.15,
             },
-            blake3::hash(&snapshot.to_bytes().expect("encode"))
-                .to_hex()
-                .to_string(),
-            snapshot.to_bytes().expect("encode").len() as u64,
-            "2025-04-01T00:00:00Z",
-        );
-        let index_dir = dir.path().join(".janus");
-        write_generation(&index_dir, &snapshot, &manifest).expect("write");
+            built_at: "2025-04-01T00:00:00Z",
+        };
+        let manifest = publish(&publication).expect("publish");
 
         let json: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(index_dir.join("manifest.json")).expect("read manifest"),
