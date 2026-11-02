@@ -60,7 +60,7 @@ claims inherited from the brief are not what the code does, and the difference c
    "costs zero embedding work" (M4). No `path_history`, no file-hash comparison and no move
    detection is built in M4.
 
-**Status: revised once after review; awaiting round 2.** No implementation exists. Every phase log
+**Status: revised twice after review; awaiting round 3.** No implementation exists. Every phase log
 in §10–§14 is empty on purpose.
 
 **Revision note.** Round 1 of independent review returned 15 findings and the verdict *needs another
@@ -69,9 +69,12 @@ blockers, and two of those were defects in **shipped M3 code** that this plan wa
 the reuse key ignored the difference between normalised text (what `ChunkId` hashes) and raw text
 (what the embedder sees), and the reuse predicate compared a chunk-id *set* while copying rows by
 *ordinal*, so a section reorder would attach one section's data to another. The third blocker was
-the feature-off/featured binary pair deleting each other's vectors. The rest are contract precision,
-budget honesty, and four SPEC/DOC corrections the first draft had left unmentioned. Nothing was
-rejected.
+the feature-off/featured binary pair deleting each other's vectors. Round 2 checked the fixes and
+found that three of them were locally right and globally inconsistent: the raw-text witness was too
+coarse (`content_hash` is the whole file, so a one-tag edit re-embeds), the carry-forward branch
+wrote a manifest that contradicted itself, and one claim about shipped M3 code was simply false.
+Both rounds are recorded in §9.0, including the findings I rejected nothing from and the one claim
+I got wrong.
 
 ## 0. Scope
 
@@ -231,6 +234,13 @@ pub struct LoadOptions<'a> {
     /* … unchanged … */
     pub want_vectors: bool,                      // §3.1: a lexical-only read skips the file
     pub embedder: Option<&'a dyn Embedder>,      // resolved once at the edge, passed down
+}
+
+pub struct DocMeta {
+    /* … unchanged … */
+    /// blake3 of `Document.body`: the witness both caches key on (V-26).
+    /// `content_hash` stays, as the whole-file fact M5's move detection wants.
+    pub body_hash: Blake3Hash,
 }
 ```
 
@@ -476,7 +486,7 @@ keeps those commands at M3 cost and removes `embed("")` from the hot path.
 M3 keys token reuse per document on `lex_key = blake3(tokenizer_fp ‖ chunker_fp ‖ title)` plus the
 chunk-id set, the chunk count and the file's `content_hash` (§3.4 of M3, S-9), because `ChunkId`
 excludes the title while the indexed text includes it. Embeddings have that defect plus two of
-their own, so they get their own key:
+their own, so they get their own key (and P4 narrows both witnesses, V-26):
 
 | Identity | Formula | Purpose |
 |---|---|---|
@@ -498,34 +508,54 @@ both §3.4 and V-11 cite that one function instead of spelling a formula twice.
 `normalize(text)` — CRLF folded to LF, trailing whitespace stripped, edges trimmed — while
 `Chunk::embed_text` appends `Chunk::text(body)`, which is the **raw** span. So an EOL-only or
 trailing-whitespace-only rewrite of a file (a `git checkout` under a different `core.autocrlf`,
-SPEC §8.7 and CH-9) keeps every `ChunkId` byte-identical and changes every embedded text. This is
-why the predicate below carries `content_hash`: it is the cheap, file-level witness for "the bytes
-the embedder will see are the bytes it saw last time", and M3's `reusable` already relies on it for
-the same reason.
+SPEC §8.7 and CH-9) keeps every `ChunkId` byte-identical and changes every embedded text.
+
+**The witness is `body_hash`, not `content_hash` (V-26).** `DocMeta.content_hash` is blake3 of the
+**whole file** (`src/vault/mod.rs`), frontmatter included. Using it as the witness is correct but
+far too coarse: adding one tag to a document re-hashes the file and would force a re-embed of text
+that did not change — which makes this plan's own acceptance case 2 impossible, and which is
+already M3's behaviour for tokens (a tag edit re-tokenizes today). So P4 adds `DocMeta.body_hash =
+blake3(doc.body)` and **both** predicates key on it:
+
+| What changed | `body_hash` | `vec_key` | chunk-id sequence | result |
+|---|---|---|---|---|
+| one tag, status, scope or date | same | same | same | **reuse** (vectors and tokens) |
+| `title:` | same | **differs** | same | re-embed and re-tokenize |
+| body text | **differs** | same | differs | re-embed and re-tokenize |
+| line endings only | **differs** | same | same | re-embed and re-tokenize (V-23) |
+| sections reordered | **differs** | same | **differs** | re-embed and re-tokenize |
+| nothing | same | same | same | reuse |
+
+`body_hash` is conservative: a body edit that changes no chunk's embedded text (say, an extra blank
+line that only moves a span) still re-embeds. That is the right direction — a needless embed costs
+one document, a stale vector costs correctness — and it is one blake3 per document per build.
 
 Reuse is per document, and it is a contract with the same shape as §3.4 of M3 — **the conjuncts are
 ordered cheapest first**, and the chunk comparison is a **sequence**, not a set:
 
 ```
-reuse_vectors(doc) ⟺  old.content_hash == new.content_hash      (cheap, and catches raw-text drift)
+reuse_vectors(doc) ⟺  old.body_hash == new.body_hash            (cheap; the raw text the embedder sees)
                    ∧  old.vec_key == new.vec_key                 (embedder + title)
                    ∧  old.embedder == new.embedder               (also in the manifest check)
-                   ∧  the old chunk-id sequence == the new one    (order included, V-24)
+                   ∧  the old chunk-id sequence == the new one    (order, V-24)
                    ∧  the previous generation's vectors validated
                    ∧  the old row range has room for every new row
 ```
 
-**A set is not enough, and M3 has the same latent bug (V-24).** The first draft required only that
-every new `ChunkId` be *present* in the old snapshot and that the count match — then copied rows
-by ordinal. Reordering two sections of a body leaves the set of `(heading_path, text)` pairs and
-the count unchanged, so reuse fires and section A's vector is attached to section B's chunk. That
-is exactly "the worst failure this milestone can produce", permitted by the rule that names it. The
-comparison is therefore `old_chunks.iter().map(|c| c.id).eq(chunks.iter().map(|c| c.id))`: one
-iterator, no allocation, and the same one-line tightening belongs in M3's `build::reusable`, whose
-`all(|chunk| old_chunks.iter().any(...))` has the identical hole for **tokens** — a reordered
-document currently keeps the wrong term frequencies on the wrong spans. P4 fixes both, with a
-reorder test for each; it is one predicate, owned by one phase, and leaving the M3 half broken
-while writing the correct M4 half would be indefensible.
+**A set is not enough (V-24), and the fix is defence in depth rather than a bug fix.** The first
+draft required only that every new `ChunkId` be *present* in the old snapshot and that the count
+match — then copied rows by ordinal. Reordering two sections leaves the set of
+`(heading_path, text)` pairs and the count unchanged, so reuse would fire and section A's vector
+would be attached to section B's chunk: exactly "the worst failure this milestone can produce".
+The comparison is therefore `old_chunks.iter().map(|c| c.id).eq(chunks.iter().map(|c| c.id))`.
+
+**Correction to round 1: M3 is not broken today.** An earlier revision of this section claimed
+shipped `build::reusable` reuses the wrong term frequencies after a reorder. It does not: the
+`content_hash` conjunct fires first and denies reuse on any byte change, so the set check is
+unreachable. The hole is latent, and the sequence form removes the dependence on that accident.
+P4 therefore **does not edit M3's predicate** for ordering; it changes M3's witness from
+`content_hash` to `body_hash` (V-26) because that is what makes acceptance case 2 true, and a test
+that fails before the change and passes after it is the only evidence worth having.
 
 What is reused is **rows only**, copied into the new snapshot positions. Rows are addressed by
 chunk position, so a reused document whose chunks moved must have its rows copied to the new
@@ -546,8 +576,10 @@ normalising `built_at`, identical `vectors.f32` bytes, and the named counter):
 
 1. Frontmatter `title:` edited → tokens and vectors both re-keyed for that document only;
    `embedded_chunks == chunks(doc)`.
-2. Frontmatter change that touches neither title nor body (tags, status, scope) → **zero**
-   re-embedding and zero re-tokenizing.
+2. **Frontmatter change that touches neither title nor body** (tags, status, scope, date) → **zero**
+   re-embedding **and** zero re-tokenizing. This case is the reason for `body_hash` (V-26): with
+   `content_hash` as the witness it is impossible, and it is already impossible for tokens in M3
+   today, so P4's test must fail on `main` and pass after the witness change.
 3. **Body edited** → that document re-embeds; every other document reuses; `embedded_chunks ==
    chunks(doc)`.
 4. **Pure rename of a document that declares `title:`** → identical snapshot and identical
@@ -563,17 +595,15 @@ normalising `built_at`, identical `vectors.f32` bytes, and the named counter):
 9. **EOL rewrite (V-23).** A CRLF file rewritten with LF, and a file whose trailing spaces are
    stripped, each keep every `ChunkId` and change every embedded text → that document re-embeds
    and **nothing is reused**; a clean rebuild's `vectors.f32` is byte-identical to the incremental
-   one. The M3 counterpart asserts `retokenized_chunks == chunks(doc)` for the same rewrite, which
-   pins the `content_hash` conjunct in both predicates.
+   one. The token half asserts `retokenized_chunks == chunks(doc)` for the same rewrite.
 10. **Section reorder (V-24).** Swap two sections of one body (same text, same heading paths, new
-    order) → the document re-embeds or its rows are re-permuted so that **row *i* still belongs to
-    chunk *i***; the published array equals a clean rebuild's byte for byte. The token half of the
-    same test asserts the reordered document's term frequencies follow their own chunks, which is
-    the M3 fix.
-9. **Vectors and index stay in step**: after every incremental build, `vectors.len() ==
-   snapshot.chunks.len()`, and for every row *i*, `snapshot.chunks[i].doc` names a document whose
-   span/text produced it. Asserted structurally over the whole fixture and by a property test over
-   generated edits.
+    order) → the document does not reuse, and **row *i* still belongs to chunk *i***; the published
+    array equals a clean rebuild's byte for byte. Note this case passes on `body_hash` alone, which
+    is the honest reason it is a regression guard and not evidence for the sequence conjunct.
+11. **Vectors and index stay in step**: after every incremental build, `vectors.len() ==
+    snapshot.chunks.len()`, and for every row *i*, `snapshot.chunks[i].doc` names a document whose
+    span/text produced it. Asserted structurally over the whole fixture and by a property test over
+    generated edits.
 
 ### 3.5 Calibration: how the blend is verified, and what happens if cosine dominates
 
@@ -667,7 +697,18 @@ one `stale:` line, and `--no-rebuild` still refuses and writes nothing.
 The first draft removed `vectors.f32` unconditionally, which turns one degraded `janus index` into
 a full re-embed for the next featured run. Instead the build reuses rows exactly as P4 does, and
 the file is removed **only when at least one document's rows cannot be carried forward** (its
-`content_hash` or chunk sequence changed). The manifest then says `embedder: None`, and one stderr
+`body_hash` or chunk sequence changed).
+
+**Two branches, two manifest states, and they must not be confused (round-2 fix).** On
+carry-forward the manifest keeps `embedder: Some(<the previous id>)`, `vectors_sha` and
+`vectors_len` **describing the file that is still there**. The manifest describes the file, not the
+writer's capability — which is exactly the rule row 6 already relies on. Writing `embedder: None`
+while keeping the rows would violate §3.1's "all three `Some` together or `None` together", lose
+`dim` (the reader must not infer a shape from a byte count), and leave the carried rows
+**unreusable**, because P4's predicate compares `old.embedder == new.embedder`: the next featured
+run would then hit row 5 and re-embed the corpus, which is the cost row 3 exists to prevent.
+
+On the drop branch the manifest writes all three as `None`, the file is removed, and one stderr
 line says `vectors dropped: N document(s) changed and this build cannot embed`. If nothing changed,
 the vectors survive a degraded `index` untouched — which is also why row 6 is safe.
 
@@ -746,7 +787,7 @@ the chunker is the thing that must not be re-implemented.
 | V-8 | Cosine | `dot` over unit rows, clamped to `[0,1]`; a zero row scores 0.0, never `NaN`. | `src/index/vectors.rs`, `score.rs` |
 | V-9 | Admission rule | `relevance > 0`, not `lexical > 0`. This is what lets a semantic-only match enter, and what makes α = 0 exactly M3. | `src/search/mod.rs` |
 | V-10 | α | `[embedding] alpha`, default `0.65`, clamped to `[0,1]` with a config warning; `0.0` whenever there is no embedder. `α = 0` is the exact M3 path. | `src/config.rs`, `src/search/mod.rs` |
-| V-11 | Vector reuse key | Per document: `vec_key = blake3(EmbedderId::to_bytes() ‖ 0x00 ‖ title)` **+ `content_hash` + the chunk-id sequence + a validated previous generation**. **Never `ChunkId` alone** — it excludes the title and it hashes normalised text while `embed_text` is raw. | `src/index/build.rs` |
+| V-11 | Vector reuse key | Per document: `body_hash` + `vec_key = blake3(EmbedderId::to_bytes() ‖ 0x00 ‖ title)` **+ the chunk-id sequence + a validated previous generation**. **Never `ChunkId` alone** — it excludes the title and it hashes normalised text while `embed_text` is raw. | `src/index/build.rs` |
 | V-12 | Cross-document vector dedupe | None in M4. One row per chunk occurrence, mirroring postings; a copied document is embedded twice. "Same `ChunkId` and title ⇒ identical row" is **not** claimed: different line endings break it (V-23). | `src/index/build.rs` |
 | V-13 | The `embeddings` feature | **Not default.** `fastembed` is optional; the Windows cross-check and default `cargo test` never build it. **No runtime download and no socket**; the model is read from disk or the build degrades. The feature job's build may fetch `ort` (§6). | `Cargo.toml`, `src/index/embed.rs` |
 | V-14 | `--no-embeddings` | On `index`: publish lexically, **carrying vectors forward** and dropping them only when a document's rows cannot be carried. On `search`/`facts`: α = 0, and `.janus/` written only by an S-8 build. | `src/cli.rs`, `src/index/cmd.rs`, `src/search/mod.rs` |
@@ -758,9 +799,10 @@ the chunker is the thing that must not be re-implemented.
 | V-20 | Embedder identity vs model weights | `EmbedderId` = name/dim/dtype/normalisation. The model file is not hashed (100 ms/process); swapping weights under the same name needs `--rebuild`, documented. | `src/index/embed.rs` |
 | V-21 | Embedder staleness is an **ordering**, not an equality | `Some(id)` manifest + no embedder resolved → **acceptable**, load at α = 0 with the reason in `degraded` (row 6). `None` manifest + an embedder resolved → stale, rebuild once (row 5). Both `Some` and different → stale. This is what stops a feature-off binary and a featured one from deleting each other's vectors. | `src/index/store.rs` |
 | V-22 | Cache-key encoding | `EmbedderId::to_bytes()` length-prefixes every field (as `chunk_id`/`lex_key` already do); `vec_key` cites that one function. A bare concatenation lets `"hash"+"-64"` and `"hash-"+"64"` collide. | `src/index/embed.rs`, `build.rs` |
-| V-23 | `ChunkId` is not a proxy for the embedded text | `chunk_id` hashes `normalize(text)`; `embed_text` appends the raw span, and prepends the title. So the vector predicate carries `content_hash` (raw bytes) and `vec_key` carries the title. An EOL-only rewrite re-embeds. | `src/index/build.rs` |
-| V-24 | The chunk comparison is a **sequence** | `old_chunks.iter().map(|c| c.id).eq(new.iter().map(|c| c.id))`, because a set plus a count permits a reorder and rows are copied by ordinal. The identical tightening lands in M3's `build::reusable` for tokens in the same PR (P4): shipped code currently reuses the wrong term frequencies after a section reorder. | `src/index/build.rs` |
+| V-23 | `ChunkId` is not a proxy for the embedded text | `chunk_id` hashes `normalize(text)`; `embed_text` appends the raw span, and prepends the title. So the predicate carries a raw-text witness and `vec_key` carries the title. An EOL-only rewrite re-embeds. | `src/index/build.rs` |
+| V-24 | The chunk comparison is a **sequence** | `old_chunks.iter().map(|c| c.id).eq(new.iter().map(|c| c.id))`. A set plus a count permits a reorder, and rows are copied by position. This is defence in depth, not a bug fix: `body_hash` already denies reuse after a reorder, and M3's set check is likewise unreachable behind `content_hash`. P4 does not edit M3 for ordering. | `src/index/build.rs` |
 | V-25 | Model directories are an argument | `resolve(&Config, &ModelDirs)`; `ModelDirs` is built in `main` from `[embedding] model_dir` → `JANUS_MODEL_DIR` → the cache dir. No `std::env` below `main`, which is what makes the no-env test possible. | `src/main.rs`, `src/index/embed.rs` |
+| V-26 | The reuse witness is `body_hash`, not `content_hash` | New `DocMeta.body_hash = blake3(doc.body)`; **both** predicates (vectors and M3's tokens) use it. `content_hash` is the whole file, so a one-tag edit would re-embed and re-tokenize text that did not change — making acceptance case 2 impossible. Conservative by design: a body edit that alters no embedded text still re-embeds. | `src/index/mod.rs`, `src/index/build.rs` |
 
 ## 5. Phases
 
@@ -824,7 +866,8 @@ and `model_dir`), `src/lib.rs`, `src/main.rs` (`ModelDirs`), `tests/publish.rs`,
 `NaN`, `inf`, wrong row count, un-normalised row, `dim = 0`); `dot`/`normalize` hand-computed
 values including the zero row and `cos(a,a) = 1`; `EmbedderId::to_bytes` distinguishes
 `("hash","-64")` from `("hash-","64")`; `HashEmbedder` determinism, unit norm, `cos(a,a)`/ordering
-properties, empty text; `resolve` for every row of the dispatch table, including that `hash-64`
+properties, empty text; `resolve` for **every row of the feature-off column** of the dispatch table
+(the feature-on columns need P3's module, so they are P3's tests), including that `hash-64`
 resolves with the feature off and that an absent model directory degrades without a socket;
 publication stage order (vectors before index before manifest) through `publish_with_hook`; a
 reader at every stage still sees one validated generation; **every row of the §3.1 table in both
@@ -962,8 +1005,9 @@ checkable numbers rather than claims.
 previous vectors), `src/index/cmd.rs` (receipt, `--dry-run` planning), `src/search/mod.rs`
 (`LoadOptions` plumbing), `tests/cli_index.rs`, `tests/incremental.rs` (new).
 
-**Build (~280 logic lines):** `EmbedderId::to_bytes` feed into `vec_key` (V-22); the two-part reuse
-predicate of §3.4 — `content_hash`, `vec_key`, and the **chunk-id sequence** (V-23, V-24); row
+**Build (~280 logic lines):** `EmbedderId::to_bytes` feed into `vec_key` (V-22); `DocMeta.body_hash`
+and the switch of both predicates to it (V-26); the reuse predicate of §3.4 — `body_hash`, `vec_key`,
+and the **chunk-id sequence** (V-23, V-24); row
 copying into the new positions; `embedded_chunks`/`reused_vector_chunks`; `plan` becomes fallible
 (the embedder can fail) and every caller updates; `--dry-run` computes the reuse decision and
 reports `would_embed` **without calling the embedder**; the receipt gains `dim`, `embedded`,
@@ -972,30 +1016,33 @@ snapshot.
 
 **Tests (~380 lines):** the **eleven** acceptance cases of §3.4, each comparing incremental against
 a clean rebuild (snapshot equality after normalising `built_at`, byte equality of `vectors.f32`, and
-the named counter); case 5 (derived-title rename re-embeds) is the §3.7 correction pinned as a test,
-case 2 (tags-only edit re-embeds nothing) is the counterweight, and cases 9–10 (EOL rewrite,
-section reorder) are the two defects review round 1 found the predicate missing; **two** reorder
-tests — one for vectors, one asserting M3's `build::reusable` now compares the id sequence rather
-than a set, so a reordered document's term frequencies follow their own chunks; the in-step
-assertion over the whole fixture plus a property test that generates random document edits and
-checks `vectors.len() == chunks.len()` and row-to-chunk correspondence after every incremental
+the named counter); case 2 (a tags-only edit reuses everything) is the `body_hash` test (V-26) and
+must **fail on `main`** before the witness change, for tokens as well as vectors — a test that
+passes before the change proves nothing; case 5 (derived-title rename re-embeds) is the §3.7
+correction pinned as a test; cases 9–10 (EOL rewrite, section reorder) are the two holes round 1
+found, and case 10 is labelled a regression guard because `body_hash` alone would pass it; the
+in-step assertion over the whole fixture plus a property test that generates random document edits
+and checks `vectors.len() == chunks.len()` and row-to-chunk correspondence after every incremental
 build; a tampered previous generation (wrong row count, un-normalised row) forces a full re-embed
 rather than a silently misaligned array; `--dry-run` writes nothing and reports a non-zero
 `would_embed` after a body edit.
 
 **Handoff (paste):** "Implement Phase 4 of M4 per `docs/m4-breakdown.md` §3.4 and Phase 4. Reuse is
-per document and keyed on **all three**: `content_hash` (raw bytes — `ChunkId` hashes *normalised*
-text while `embed_text` is raw), `vec_key = blake3(EmbedderId::to_bytes() ‖ 0x00 ‖ title)` (the title
-because `ChunkId` excludes it), and the **chunk-id sequence** (a set plus a count permits a reorder,
-and rows are copied by position). Apply the same sequence tightening to M3's `build::reusable` for
-tokens in this PR; a reordered document currently keeps the wrong term frequencies on the wrong
-spans. A row is addressed by chunk position, so a misalignment is the worst bug this milestone can
-produce — assert the invariant after every build. `--dry-run` never calls the embedder. Deviations
-go in the phase log."
+per document and keyed on **all three**: `body_hash` = blake3 of the raw body (not `content_hash`,
+which is the whole file and would re-embed on a one-tag edit — V-26), `vec_key =
+blake3(EmbedderId::to_bytes() ‖ 0x00 ‖ title)` (the title because `ChunkId` excludes it), and the
+**chunk-id sequence** (a set plus a count permits a reorder, and rows are copied by position). Switch
+M3's `build::reusable` from `content_hash` to the same `body_hash`, so a frontmatter-only edit reuses
+tokens too; that test must fail before the change. Do **not** touch M3's set check for ordering —
+`body_hash` already denies reuse after a reorder, so the sequence form is defence in depth. A row is
+addressed by chunk position, so a misalignment is the worst bug this milestone can produce — assert
+the invariant after every build. `--dry-run` never calls the embedder. Deviations go in the phase
+log."
 
-**Accept:** eleven acceptance cases green; a second `janus index` reports `embedded 0`; a
-single-document body edit reports `embedded = chunks(that doc)`; an EOL-only rewrite re-embeds and
-reuses nothing; a section reorder leaves row *i* on chunk *i*; the receipt is stable across runs.
+**Accept:** eleven acceptance cases green; case 2 fails on `main` and passes after the witness
+change; a second `janus index` reports `embedded 0`; a single-document body edit reports `embedded =
+chunks(that doc)`; an EOL-only rewrite re-embeds and reuses nothing; a section reorder leaves row *i*
+on chunk *i*; the receipt is stable across runs.
 
 ---
 
@@ -1069,6 +1116,8 @@ Blocking (CI / `cargo test`):
    to the first run's.
 2. **A title-only edit re-keys vectors and nothing else.** Frontmatter `title:` changed → that
    document re-embeds; every other document does not; `vectors.f32` equals a clean rebuild's.
+   **A metadata-only edit re-keys nothing** (V-26): changing tags, status, scope or date reuses
+   every vector **and** every token, and the test fails on `main` before the witness change.
 3. **§3.7's conditional is pinned both ways.** A pure rename with a declared `title:` reports
    `embedded_chunks == 0`; a pure rename with a derived title re-embeds exactly that document and
    nothing else.
@@ -1123,17 +1172,20 @@ upper bounds; the seam column says where to split **in the same session** if the
 | PR | Branch | Logic est. | Tests est. | Why it splits here | Split seam |
 |---|---|---|---|---|---|
 | P1a | `m4-embed-vectors` | ~200 | ~200 | Pure modules: `EmbedderId`, the trait, `HashEmbedder`, `Vectors` encode/decode/validate. No I/O, so no recovery test and no chance of a storage bug hiding a trait bug. | none needed; if it exceeds ~300, the hashing double ships separately |
-| P1b | `m4-two-file-publish` | ~230 | ~380 | The protocol: manifest fields, three new stages, dual-hash validation, V-21's ordering, the carry-forward rule. M3 measured this protocol at 597 lines on its own; here it is the smaller half because P1a carries the format. | manifest + stages / reader + recovery |
+| P1b | `m4-two-file-publish` | ~320 | ~380 | The protocol delta: manifest fields, three new stages, dual-hash validation, V-21's ordering, the two carry-forward branches. **~320, not ~230** — it is a delta over M3's 597-line protocol, but the delta includes everything that protocol's tests exercise, and round 2 called the ~230 a repeat of the same estimation error. | writer (manifest + stages + carry-forward) / reader (validation + recovery table) — **pre-authorised as P1c if the diff measures over 450** |
 | P2 | `m4-hybrid` | ~260 | ~340 | The ranking contract; a mistake here is invisible in a green suite, so it gets its own diff. | α + admission / report + goldens |
 | P3 | `m4-fastembed` | ~300 | ~180 | Build, portability and model-availability risk, isolated from scoring and storage. | `fastembed` module / CI matrix |
-| P4 | `m4-incremental-vectors` | ~280 | ~380 | The cache contract and the row-alignment invariant, including M3's sequence tightening. | reuse predicate / receipt + `--dry-run` |
+| P4 | `m4-incremental-vectors` | ~280 | ~380 | The cache contract and the row-alignment invariant, including the `body_hash` witness (V-26) that both caches then share. | reuse predicate / receipt + `--dry-run` |
 | P5 | `m4-eval-baseline` | ~150 | ~260 | Measurements and prose; changes shared eval files and SPEC, so it lands alone. | sweep / baseline script |
 
-Total ≈ 1 420 logic lines across **six** PRs on five phases, every one under the 600 ceiling with
+Total ≈ 1 510 logic lines across **six** PRs on five phases, every one under the 600 ceiling with
 room for review fixes. P1 is two PRs on the strength of M3's measurement, not on the strength of
-this estimate; a phase estimating "~430" and containing M3's 597-line protocol plus a new file
-format is not an upper bound. If the review adds a contract (it will — M2, M3 and round 1 here all
-did), the added work goes to the phase that owns the contract, not to a new phase.
+this estimate. The writer/reader split inside P1b is **not** taken now, for the reason M3's phase 5
+gave when the same seam was proposed: the two halves share the `Publication` type and half the
+acceptance cases, so two stacked PRs would move the same test harness twice. It is pre-authorised
+if the measurement says the diff is over 450 — which is what P-9's "estimate from the protocol's
+steps, not its bullets" is for. If the review adds a contract (it will — M2, M3, round 1 and round
+2 here all did), the added work goes to the phase that owns the contract, not to a new phase.
 
 ## 9. Review round 1, SPEC corrections, and gaps
 
@@ -1147,7 +1199,7 @@ was about to copy.
 
 | # | Finding (short) | Resolution | Where |
 |---|---|---|---|
-| 1 | `vec_key` misses `content_hash`: `ChunkId` hashes *normalised* text while `embed_text` is *raw*, so an EOL-only rewrite reuses stale vectors | **Accepted, blocker.** `content_hash` is the first conjunct; new decision V-23; acceptance case 9 (EOL rewrite); `reuse_vectors` re-ordered cheapest-first. | §3.4, §3.7, V-11/V-23, P4 |
+| 1 | `vec_key` misses `content_hash`: `ChunkId` hashes *normalised* text while `embed_text` is *raw*, so an EOL-only rewrite reuses stale vectors | **Accepted, blocker.** A raw-text witness becomes the first conjunct (narrowed from `content_hash` to `body_hash` in round 2, R2-1); new decision V-23; acceptance case 9 (EOL rewrite); `reuse_vectors` ordered cheapest-first. | §3.4, §3.7, V-11/V-23/V-26, P4 |
 | 2 | "Copied by ordinal" + a set-based predicate misaligns rows after a section reorder | **Accepted, blocker.** The comparison is the chunk-id **sequence**; acceptance case 10. The same hole exists in M3's `build::reusable` for **tokens** — P4 fixes both. | §3.4, V-24, P4 |
 | 3 | V-21 is one-directional, and the missing direction makes a feature-off and a featured binary delete each other's vectors | **Accepted, blocker.** Embedder staleness is an ordering, not an equality; row 6 added to the matrix; degraded `index` carries vectors forward and drops only what it cannot carry. | §3.6, V-14/V-21, P1, DoD 9 |
 | 4 | `resolve`'s model dispatch was undefined; `hash-64` + feature-off contradicted "feature off ⇒ no vectors" | **Accepted.** Explicit dispatch table, keyed on the *resolved* embedder; `hash-64` always compiles, is selectable, and warns that it is a test double. | §3.2, §3.6, P2 |
@@ -1167,6 +1219,26 @@ Nothing was rejected. That is not a sign the review was perfect; it is a sign th
 long enough to hide three alignment bugs behind prose that read confidently — which is the same
 failure M3's review round found, one milestone later.
 
+#### Review round 2 — verification of the resolutions
+
+The same reviewer checked the amended contracts. Verdict: *still open* — three resolutions were
+correct, three had introduced a new problem, and one claim of mine was simply false. All accepted.
+
+| # | Round-2 finding | Resolution |
+|---|---|---|
+| R2-1 | `content_hash` is the **whole file**, so a one-tag edit re-embeds and re-tokenizes — which makes acceptance case 2 impossible, and it is already impossible for tokens in M3 | **Accepted, new issue.** The witness becomes `DocMeta.body_hash = blake3(body)` for **both** predicates (V-26), so case 2 becomes true and its test fails on `main` before the change. `content_hash` stays as the whole-file fact M5 will want. |
+| R2-2 | The sequence conjunct is correct, but the claim that shipped M3 code reuses wrong term frequencies is **false** — `content_hash` gates the set check first | **Accepted, my claim was wrong.** V-24 is reworded: the sequence form is defence in depth and P4 does **not** edit M3's ordering check. A reorder test would have passed before the change, which is the standard this plan holds tests to. |
+| R2-3 | Row 3's carry-forward writes `embedder: None` while keeping the rows, contradicting §3.1's three-way consistency, losing `dim`, and making the carried rows unreusable | **Accepted, new issue.** Carry-forward writes `embedder: Some(previous id)` with the kept file's `sha`/`len` — the manifest describes the file, not the writer's capability. `None` belongs to the drop branch only. |
+| R2-4 | §9.1 item 5 adds nothing that SPEC §8.3 does not already say | **Accepted.** Item 5 withdrawn and marked as such, because deleting it silently would hide the mistake. |
+| R2-5 | §9.1 item 4 still restates the SPEC's checksum rule; item 7 misses §16.1 | **Accepted.** Item 4 keeps only the reason and the headerless/row-*i* facts; item 7 adds the key to §16.1's `[embedding]` block. |
+| R2-6 | P1a's test list promises the feature-on dispatch rows, which need P3 | **Accepted.** Scoped to the feature-off column; the other two columns are P3's tests. |
+| R2-7 | P1b at ~230 keeps everything M3 measured at 597 and adds more — the same error one PR later | **Accepted in part.** Estimate raised to ~320 with the basis stated; the writer/reader split is pre-authorised as P1c but **not** taken now, for M3 phase 5's own reason (the halves share `Publication` and half the acceptance cases). Stated as a judgement, not hidden. |
+| R2-8 | Two acceptance cases were numbered 9 | **Accepted.** Renumbered 9–11. |
+
+The lesson is worth recording: round 1's fixes were locally correct and globally inconsistent. A
+narrower witness is only narrower if it still covers the input, and a manifest field is only
+consistent if it describes the same thing on both branches.
+
 ### 9.1 SPEC corrections and gaps
 
 None of these is an edit in *this* PR: this PR is the plan. Each is either a correction the code
@@ -1185,19 +1257,23 @@ already implies, or a gap the M4 implementation PR should close with one line.
    measurement at 200k chunks with the two-file read path, and put the target where §13 already puts
    it: p50 ≤ 100 ms.
 4. **§8.3's `vectors.f32` comment is true and incomplete.** It already says "raw little-endian f32,
-   row-major, L2-normalized, dim known". What is missing: **headerless**, **row *i* = snapshot
-   chunk *i*** (`vectors_sha`/`vectors_len` in the manifest), no padding, and that a generation is
-   validated over both payloads because a new-vectors/old-index pair is otherwise
-   indistinguishable from a good one.
-5. **§8.3's rebuild triggers are nearly complete** — it already lists `embedder`/dim/dtype
-   mismatch. Add only what it lacks: a normalisation mismatch, and "a `vectors_sha` mismatch
-   observed by a reader".
+   row-major, L2-normalized, dim known", and §8.3 already says both files are checksummed and that a
+   generation mismatch is a rebuild trigger. What is genuinely missing: **headerless**, **row *i* =
+   snapshot chunk *i***, `vectors_sha`/`vectors_len` as manifest fields, no padding, and the *reason*
+   both payloads must be validated together (a new-vectors/old-index pair is otherwise
+   indistinguishable from a good one). Keep the reason, drop the rule the SPEC already states.
+5. ~~§8.3's rebuild triggers~~ — **withdrawn after round 2.** SPEC §8.3 already lists
+   `embedder`/dim/dtype mismatch, "a generation mismatch observed by a reader", and `EmbedderId`
+   already names normalization. There was nothing left to add; round 1's version of this item
+   restated the SPEC.
 6. **§8.3.1's heap budget is exceeded by M4's load path** (~307 MB at 200k × 384, §3.1). Add one
    sentence saying the whole array is read onto the heap until M8's mmap, so the table describes
    M8 and not M4. Without it, the next reader concludes the code violates the spec.
 7. **§7.2 gives α = 0.65 and "0.0 if no embedder" but never says α is configurable.** Add: α is
    `[embedding] alpha`; the default is the number §7.2 already states; it is clamped to `[0,1]` with
-   a config warning.
+   a config warning. **Also add the key to §16.1's `[embedding]` block**, which currently lists only
+   `enabled`/`model`/`batch_size` — otherwise the key lives in §7.2 prose and nowhere in the config
+   reference.
 8. **§7.2 does not state the admission rule.** Add after the formula block: "a chunk is a candidate
    when `relevance > 0`, so a semantic-only match can enter the result set" — a real behaviour
    change from lexical-only that the spec should contain.
@@ -1221,8 +1297,8 @@ already implies, or a gap the M4 implementation PR should close with one line.
 14. **D24 over-states what the cache can do.** It says "embedding cache reuse across edits, moves,
     and copies becomes automatic and identity-free". True of the *content*; not sufficient: the
     embedded text also contains the effective title and the raw line endings, so the cache key is
-    `content_hash` + `vec_key` + the chunk-id sequence — `ChunkId` is the content component, not
-    the key. **Proposed SPEC edit:** one clause in D24's rationale.
+    `body_hash` + `vec_key` + the chunk-id sequence — `ChunkId` is the content component, not the
+    key. **Proposed SPEC edit:** one clause in D24's rationale.
 15. **D48's rationale cites a property M4 has to qualify.** "Content-addressing by text is what
     makes the embedding cache free across edits, moves, renames and copies" — free across *content*
     edits, and free across renames only when the title does not change with them (§3.7). Input that
