@@ -95,6 +95,10 @@ impl Tokens {
     ///
     /// The iterator's lifetime is tied to `&self`, so `tokens` must outlive the
     /// terms. Copy a term into the caller's storage if it must be kept.
+    ///
+    /// The `unwrap_or_default` fallback is unreachable: `commit` only stores
+    /// char-boundary offsets into `folded`, so it keeps the function total rather
+    /// than handling a real invalid range.
     pub fn iter(&self) -> impl Iterator<Item = &str> + '_ {
         self.ranges.iter().map(|range| {
             self.folded
