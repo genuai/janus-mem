@@ -657,12 +657,14 @@ semantic   = cosine(q_vec, c_vec)                        ∈ [-1, 1] → clamped
 lexical    = bm25_norm(q, c)                             ∈ [0, 1] via sigmoid squash
              = s / (s + s_ref), where s = Σ bm25(t, c) and
                s_ref = Σ idf(t) over query terms present in the index
-relevance  = α · semantic + (1 − α) · lexical            α = 0.65 (0.0 if no embedder)
+relevance  = α · semantic + (1 − α) · lexical            α = 0.5 (0.0 if no embedder)
 authority  = AUTHORITY[type] · STATUS_FACTOR[status]
 decay      = exp(−ln(2) · age_days / half_life_days)     = 1.0 if timeless or half_life ≤ 0
 final      = relevance · authority · decay
 ```
 
+- **Admission is `relevance > 0`.** A chunk is a candidate when `relevance > 0`, not when `lexical > 0`, so a semantic-only match can enter the result set. At α = 0 the two rules coincide, which is what keeps the lexical path unchanged.
+- **α is configurable.** It is `[embedding] alpha` (§16.1), defaulting to the value above and clamped to `[0, 1]` with a config warning. `0.0` is the exact lexical path and is forced whenever no embedder resolves.
 - **Retrieval is candidate-scoped.** The scorer signature is effectively `score(query, candidates: Option<&CandidateSet>)`, where a candidate set is a bitset or sorted `ChunkId` list. v1 always passes `None` (all chunks). This exists so a future graph expansion, tag filter, or “only these docs” restriction reuses the exact same scoring path instead of growing a second one (§8.9).
 - `age_days` uses `effective_from` (falling back to `date`) and the injected `Clock`, clamped at 0 (future-dated docs get decay = 1.0).
 - `as_of` requests bypass the status gate and set `decay = 1.0`; inclusion is decided by the valid-time window alone. The response still reports declared and effective status so the agent can see what the document's standing was.
@@ -679,7 +681,7 @@ final      = relevance · authority · decay
 
 - Vectors are fuzzy. Ask for `JANUS_WRITE`, `bincode`, `blake3`, an error code, a person's name, or “the exact sentence about time decay” and cosine similarity is mediocre; exact term matching is excellent.
 - Lexical is brittle. Ask “how do I keep old decisions from confusing the agent?” and the words you use may share nothing with the words in the doc.
-- Hybrid (α = 0.65) is the default because the failure modes are complementary. The lexical layer also keeps the tool fully useful with `--no-embeddings`, before the model is downloaded, and on machines where ONNX Runtime won't build.
+- Hybrid (α = 0.5) is the default because the failure modes are complementary. The default was 0.65 until M4's α sweep measured one top-1 result broken by the semantic term at 0.65 and none at 0.5, with the same nDCG@10 (V-27). The lexical layer also keeps the tool fully useful with `--no-embeddings`, before the model is downloaded, and on machines where ONNX Runtime won't build.
 
 **DECIDED (D20): hand-written BM25 for now.** Inverted index, Unicode-aware tokenizer, optional Porter stemmer — ~200 lines, no heavy dependency, and it teaches `HashMap`, tokenization, and score normalization in a way `tantivy`'s API does not. At M4, compare nDCG@10 against `tantivy` on the eval set; swap only if the hand-rolled version is >10% worse. `tantivy` remains the documented escape hatch, not the plan.
 
@@ -822,7 +824,7 @@ janus-mem/
 | IDs | `ulid` | Sortable IDs for generated docs |
 | Parallelism | `rayon` | Vector math, embedding batches |
 | Logging | `tracing`, `tracing-subscriber` | stderr only; **never** stdout (would corrupt MCP) |
-| Embeddings (opt-in) | `fastembed` | Feature `embeddings`; ONNX Runtime via `ort` |
+| Embeddings (opt-in) | `fastembed` | Feature `embeddings`, **non-default**; ONNX Runtime via `ort`; **no runtime download** — the model is read from `JANUS_MODEL_DIR` or `[embedding] model_dir`, and the build degrades when it is absent |
 | MCP | `rmcp` (DECISION GATE) | Official Rust MCP SDK; hand-rolled JSON-RPC fallback |
 | Index access (M8) | `memmap2`, `bytemuck` | Zero-copy read of `vectors.f32` (§8.3) |
 | Dev | `insta`, `proptest`, `criterion`, `tempfile`, `assert_cmd`, `predicates` | |
@@ -837,7 +839,8 @@ Dependency policy: every dependency needs a one-line justification in `Cargo.tom
 .janus/
 ├── manifest.json     # human-inspectable: counts, formats, embedder id, offsets, checksums
 ├── index.bin         # bincode: string pool, docs, chunks (spans only), links, path history
-├── vectors.f32       # raw little-endian f32, row-major, L2-normalized, dim known
+├── vectors.f32       # headerless raw little-endian f32, row-major, L2-normalized,
+│                     # row i = snapshot chunk i, no padding; dim, sha and len in the manifest
 └── lock              # advisory lock for index/write critical sections
 ```
 
@@ -857,6 +860,8 @@ pub struct Index {
     pub edges: Vec<Edge>,              // v1: only EdgeKind::Supersedes; generic (§8.9)
     pub path_history: BTreeMap<DocId, Vec<PathEntry>>,
     pub vectors: VectorSection,        // offset, len, dim, dtype into vectors.f32
+    pub vectors_sha: Option<Blake3>,   // checksum of vectors.f32; None without vectors
+    pub vectors_len: Option<u64>,      // byte length; must equal chunks × dim × 4
 }
 ```
 
@@ -871,7 +876,7 @@ This also means the on-disk format does not change between M4 (simple `read` of 
 - **`.janus/lock` is a writer lock.** Writers take it exclusively for the whole publication (temp write, rename, fsync, manifest last) and hold it until the manifest is durable. Readers never lock: they validate the bytes they read against `manifest.index_sha` and retry with bounded backoff; if no generation validates they take the writer lock, re-check freshness, rebuild once, and then refuse (`--no-rebuild` never writes).
 - Incremental: skip a file when `content_hash` is unchanged; reuse chunks whose `chunk_id` still exists (across moves, too — §6.9); only embed the delta.
 - Embedding is never required for correctness. With `--no-embeddings` (or if the model is absent and download is disallowed), janus-mem runs lexical-only, omits `vectors.f32`, and says so in every response (`degraded`).
-- Corruption: blake3 checksums for both files live in `manifest.json`; mismatch ⇒ rebuild from source with a warning. A truncated or partial index is never loaded.
+- Corruption: blake3 checksums for both files live in `manifest.json`; mismatch ⇒ rebuild from source with a warning. A truncated or partial index is never loaded. **Both payloads are validated together**, because a new-`vectors.f32`/old-`index.bin` pair is otherwise indistinguishable from a good one.
 - Atomic index update: write `index.bin.new` / `vectors.f32.new`, fsync, rename both, then rewrite `manifest.json` last. Readers see the old manifest or the new one, never a mix.
 
 Every stored path is vault-relative. The manifest carries two different identifiers, and they must not be confused:
@@ -910,6 +915,8 @@ Techniques used (each is a concrete Rust learning target):
 - `madvise(SEQUENTIAL)` during full scans and `RANDOM` in the long-running server (M8, via `memmap2`'s advice API; `#[cfg(unix)]`, a no-op on Windows).
 - Text fetched lazily with a bounded LRU keyed by `doc_id`, so a 10-result query opens at most 10 files.
 
+**M4 reads the whole vector array onto the heap** (~307 MB at the reference size, once per process); the mmap'd row above describes M8's load path, not M4's.
+
 ### 8.4 Concurrency and process model
 
 - **Sync core.** No Tokio in the core. Embedding runs on rayon; the MCP server (if `rmcp` forces async) isolates async at the transport boundary and calls the sync core via `spawn_blocking`.
@@ -923,6 +930,7 @@ Techniques used (each is a concrete Rust learning target):
 - Path confinement: every user-supplied path is joined to the vault root, canonicalized, and checked with `starts_with(root)`; reject symlinks that escape the root; refuse to touch `.git/`, `.janus/`, and (by default) dot-directories.
 - Response sizes are capped (`max_chars`, default 4000; `max_results`, default 10) to protect the agent's context window.
 - Secrets: janus-mem never logs document content at `info`; `debug` requires `--log-content` explicitly.
+- `.janus/vectors.f32` is derived from document content — a vector is a lossy encoding of the passage it came from — so it is covered by the same "never vault content" rule as the rest of `.janus/`: excluded from walking, never served by a read command, and rebuildable from the vault.
 
 ### 8.6 Git coexistence
 
@@ -1033,9 +1041,9 @@ janus search <QUERY> [--intent current|history|evolution|exhaustive]
                      [--scope <SCOPE>]... [--scope-only]
                      [--limit N] [--types T,..] [--tags T,..]
                      [--decay-half-life DAYS] [--include-superseded]
-                     [--no-rebuild] [--json] [--no-color]
+                     [--no-rebuild] [--no-embeddings] [--json] [--no-color]
 janus lineage <PATH|--topic QUERY> [--json]
-janus facts [--tags T,..] [--query Q] [--scope S]... [--no-rebuild] [--json]   # authoritative_facts
+janus facts [--tags T,..] [--query Q] [--scope S]... [--no-rebuild] [--no-embeddings] [--json]   # authoritative_facts
 janus read <PATH> [--json]
 janus set <PATH> --expect-hash H --key status=superseded [--key k=v ...] [--dry-run]
 janus write <PATH> --frontmatter f.yaml (--body -|f.md)
@@ -1054,6 +1062,8 @@ janus completions <shell>
 ```
 
 Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash, `4` refused (unsafe or unsupported operation). Human output is a compact table; `--json` is stable and versioned.
+
+`--no-embeddings` is accepted by `index`, `search` and `facts`, and means two different things on purpose: on `index` it is a statement about the generation being published (vectors are carried forward, or dropped when a document's embedded text changed, §8.3), and on `search`/`facts` it is a statement about the query (`degraded`, §9.4).
 
 ### 9.2 MCP read tools
 
@@ -1121,9 +1131,9 @@ Every tool returns the same outer shape, so agents learn one contract:
                  "shared_with": ["shared:finance"],
                  "author": "claude-opus",
                  "date_source": "frontmatter", "doc_version": "2.0",
-                 "scores": { "semantic": 0.81, "lexical": 12.4, "relevance": 0.78,
+                 "scores": { "semantic": 0.81, "lexical": 0.72, "relevance": 0.77,
                              "authority": 1.5, "decay": 0.93, "corpus": 1.0,
-                             "final": 1.09 },
+                             "final": 1.07 },
                  "chunk_id": "…", "heading": "## Decision", "text": "…",
                  "truncated": false } ]
 }
@@ -1186,12 +1196,12 @@ Hand-written BM25 (inverted index, tokenizer, optional stemmer); scoring module 
 **Learn:** `HashMap`/`BTreeMap`, `Eq`/`Hash` derives, sorting with `sort_by`, `&mut self` accumulation, iterator chains, float comparison pitfalls, `#[derive]` and newtypes (`DocId`, `ChunkId` — no stringly typed IDs).
 
 ### M4 — Embeddings and hybrid index (4–6 days)
-`Embedder` trait (`fn embed(&self, batch: &[&str]) -> Result<Vec<Vec<f32>>>`), `HashEmbedder` for tests, `FastEmbed` behind a feature; flat vector storage written to a **separate `vectors.f32` file from day one** (so M8's mmap is a load-path change, not a format change); rayon top-k; `Index` metadata via `bincode`; incremental reindex; exact-hash move detection (`path_history`); `janus index`.
-**Done when:** second index run touches zero embeddings for unchanged docs; a moved-but-unchanged file is recognized as a move and costs zero embedding work; queries are <10 ms warm at 100k chunks; `--no-embeddings` degrades cleanly.
-**Learn:** traits, trait objects vs. generics, `Send`/`Sync`, rayon, slices and `chunks_exact`, serde/bincode, feature flags, `Option<&T>` in structs, `Arc`.
+`Embedder` trait (`fn embed(&self, batch: &[&str]) -> Result<Vec<Vec<f32>>>`), `HashEmbedder` for tests, `FastEmbed` behind a feature; flat vector storage written to a **separate `vectors.f32` file from day one** (so M8's mmap is a load-path change, not a format change); hybrid scoring (§7.2); vector reuse across builds.
+**Done when:** second index run touches zero embeddings for unchanged docs; a rename that leaves the embedded text unchanged costs zero embedding work, while a rename that changes the derived title re-embeds only that document; warm-query latency is **printed** at 200k chunks with the two-file read path, against §13's p50 ≤ 100 ms target; `--no-embeddings` degrades cleanly.
+**Learn:** traits, trait objects vs. generics, `Send`/`Sync`, slices and `chunks_exact`, serde/bincode, feature flags, `Option<&T>` in structs, `Arc`.
 
 ### M5 — Temporal graph (3–4 days)
-Supersession parsing, transitive chains, cycle detection, intersect-or-global cross-scope rules, scope-relative validity windows, `--as-of` valid-time queries (§6.10), effective-status derivation, `janus lineage` (chain + terminal state), `janus doctor` link/scope checks (`cross_scope_supersession`, `invalid_validity`), `suggest-links` (similarity candidates, no writes), `janus ids`, and §6.9 move handling: derived-identity and exact-hash moves, path alias table, continuation hints, tombstones, `janus moves`.
+Supersession parsing, transitive chains, cycle detection, intersect-or-global cross-scope rules, scope-relative validity windows, `--as-of` valid-time queries (§6.10), effective-status derivation, `janus lineage` (chain + terminal state), `janus doctor` link/scope checks (`cross_scope_supersession`, `invalid_validity`), `suggest-links` (similarity candidates, no writes), `janus ids`, and §6.9 move handling: derived-identity and exact-hash moves (exact-hash move detection, `path_history`), path alias table, continuation hints, tombstones, `janus moves`.
 **Done when:** `lineage` renders a correct 5-link chain from the fixture vault, `search --as-of` returns the old value for a past date and the new one today, detects the seeded cycle, and survives a simulated “dream cycle” that (a) moves a linked doc unchanged, (b) moves and edits a linked doc with no `id` anywhere, and (c) rewrites a third body — all without breaking any chain, touching any file, or requiring any confirmation step.
 **Learn:** recursive functions and explicit stacks (avoid gratuitous recursion), `HashMap` graph representation, `enum` state machines, borrowing across a traversal, `impl Display` for output types.
 
@@ -1206,7 +1216,7 @@ Span-preserving frontmatter patcher (§7.3), atomic write + locks, optimistic co
 **Learn:** byte manipulation, `&[u8]` vs `&str`, `fs` + `File` + `OpenOptions`, `rename` atomicity, file locking (`fs2`/`fd-lock`, cross-platform advisory locks), `Drop`-based cleanup guards, `?` with custom errors, testing filesystem failure with permissions.
 
 ### M8 — Polish and scale (ongoing)
-`watch`, mmap + `madvise` load path, optional `--quantize f16`/`i8` (§8.3.1), `doctor` in CI, eval harness + nDCG report, benchmarks, `cargo dist` release binaries, README with a 60-second quickstart, example `janus.toml`, MCP client config snippets for Claude Desktop / Hermes, and a "how to write docs the engine understands" guide.
+`watch`, mmap + `madvise` load path, optional `--quantize f16`/`i8` (§8.3.1), rayon top-k over 200k dot products **if a measurement asks for it**, `doctor` in CI, eval harness + nDCG report, benchmarks, `cargo dist` release binaries, README with a 60-second quickstart, example `janus.toml`, MCP client config snippets for Claude Desktop / Hermes, and a "how to write docs the engine understands" guide.
 **Done when:** a stranger can install and get a useful first search in under five minutes.
 
 ---
@@ -1225,7 +1235,7 @@ Span-preserving frontmatter patcher (§7.3), atomic write + locks, optimistic co
 | Iterators, closures, combinators | M1–M3 | scoring, filtering, top-k |
 | Traits and trait objects | M4 | `Embedder`, `Clock`, `Store` |
 | Generics (mild) | M4 | `top_k<T: Ord>`-style helpers |
-| Concurrency without the GIL | M4 | rayon over 200k dot products |
+| Concurrency without the GIL | M8 | rayon over 200k dot products, once the sweep's latency says it matters |
 | Serde in anger | M1, M4, M6 | frontmatter, index, MCP DTOs |
 | Cargo features | M4 | `embeddings` |
 | `Arc`, `RwLock`, interior mutability | M6 | MCP server state |
@@ -1331,7 +1341,7 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | D21 | macOS + Linux required, Windows must remain possible but unsupported in v1 | Covers the author's machines; `#[cfg]`-clean code and cross-platform crates keep Windows a later matrix change, not a rewrite | Yes (add CI later) |
 | D22 | `cargo-dist` releases + curl installer + Homebrew tap; model downloaded separately, never bundled | Single binary, no runtime deps; keeps the download small and the offline path honest | Yes |
 | D23 | Identity comes from document metadata (exact keys), never from similarity or move inference; similarity produces display-only continuation hints | Correctness must not depend on a human or LLM confirming a prompt, and must not require editing anyone's files to get started | No |
-| D24 | `chunk_id` is content-addressed and excludes `doc_id` | Embedding cache reuse across edits, moves, and copies becomes automatic and identity-free | No |
+| D24 | `chunk_id` is content-addressed and excludes `doc_id` | Embedding cache reuse across content edits, moves, and copies becomes automatic and identity-free — for the **content** only: the embedded text also carries the effective title and the raw line endings, so the cache key is `body_hash` + `vec_key` + the chunk-id sequence, and `ChunkId` is its content component rather than the key | No |
 | D25 | janus-mem never inserts an `id` or any other identity key; `adopt-ids` is removed | Writing metadata the user didn't ask for is the behavior that drove them off basic-memory. Derived/matched identity makes the migration unnecessary | No |
 | D26 | `doc_version` is a fallback match key (after title+date), never the primary identity key | Versions are bumped as documents evolve, so keying identity on them would break continuity exactly when the document changes | Yes |
 | D27 | Markdown only (`.md`, `.markdown`); no other formats in v1 | Non-Markdown text has no temporal metadata, can only pollute results, and adds parsing paths for no benefit at this stage | Yes (add include globs later) |
@@ -1355,7 +1365,7 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | D45 | Cross-scope supersession is allowed only when scopes intersect or one side is global; disjoint links are inert and reported as `doctor` errors | Acme must not be able to retire beta's facts. Refusing a likely mistake is safer than warning and applying it anyway | Yes (`allow_disjoint_supersession`) |
 | D46 | Validity windows and `effective_status` are resolved per query scope set | A global fact superseded only for one org must remain current for the others. This is the semantic cost of allowing intersecting cross-scope supersession | No |
 | D47 | Corpus-local config and workspace config are separate files with disjoint responsibilities ("one setting, one home"); no global index | A corpus must be readable standalone and with its own conventions; a workspace must never reinterpret a corpus's parsing or scoring rules | No |
-| D48 | Chunk ids are `blake3(heading_path ‖ 0x00 ‖ normalized_text)` — the document title and `doc_id` do **not** participate | The default title is the filename stem, so including it would re-key every chunk on a rename. §11-M4 requires a renamed-but-unchanged file to cost *zero* embedding work; content-addressing by text is what makes the embedding cache free across edits, moves, renames and copies | Yes (bump `format_version`, rebuild) |
+| D48 | Chunk ids are `blake3(heading_path ‖ 0x00 ‖ normalized_text)` — the document title and `doc_id` do **not** participate | The default title is the filename stem, so including it would re-key every chunk on a rename. §11-M4 requires a renamed-but-unchanged file to cost *zero* embedding work; content-addressing by text is what makes the embedding cache free whenever the embedded text is unchanged — free across edits, moves, renames and copies only under that condition (§11-M4) | Yes (bump `format_version`, rebuild) |
 | D49 | A body `H1` never becomes the identity-bearing `title`; it enters `heading_path` instead | §6.4 rung 3 keys on the title, so promoting a body heading to the title would let an edit to `# Notes` re-key the whole document — precisely what the identity ladder forbids. The breadcrumb still gets the `H1`; identity does not | Yes |
 
 ### Open questions (to resolve at the milestone in brackets)
@@ -1467,6 +1477,7 @@ overlap = 0.15
 enabled = true
 model = "AllMiniLML6V2"
 batch_size = 32
+alpha = 0.5                    # semantic weight; clamped to [0, 1], 0.0 = lexical only
 
 [mcp]
 allow_write = false
