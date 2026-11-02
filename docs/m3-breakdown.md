@@ -23,9 +23,12 @@ resolved type/status/scope/date/tags/shared_with, `DocNote`, the `scan`/`chunks`
 pipeline seam, and the `{code, message}` DTO pair. It inherits no index, no clock
 abstraction, no scoring, and no cross-process coordination.
 
-**Revision note.** This document was revised after review. Seven findings were
-resolved by adding explicit contracts (§3), a sixth phase, and acceptance cases
-that fail if the contract is violated. §9 maps each finding to its resolution and
+**Revision note.** Revised twice after review. The first pass resolved seven findings
+by adding explicit contracts (§3), a sixth phase, and acceptance cases that fail when a
+contract is violated. The second pass resolved four follow-ups — publication recovery,
+BM25 length monotonicity, `--include-superseded`, and tie-breaking — which corrected one
+genuinely wrong guarantee (a failed publish does *not* leave the previous generation
+loadable) and three under-specified ones. §9 maps every finding to its resolution and
 lists the SPEC gaps that remain open. No implementation exists yet; nothing here
 describes code that has been written.
 
@@ -45,6 +48,8 @@ describes code that has been written.
 - `janus search <QUERY> [--intent …] [--scope …] [--scope-only] [--limit N]
   [--types T,..] [--tags T,..] [--decay-half-life DAYS] [--include-superseded]
   [--json]` and `janus facts [--tags …] [--query Q] [--scope S]… [--json]`.
+  Every listed flag does something: `--include-superseded` is implemented against
+  declared status in M3 (§3.2), not accepted and ignored.
 - The retrieval eval harness: `tests/eval/queries.jsonl` (≥30 queries), reported as
   a **non-blocking** CI number plus an explicit milestone acceptance run (§3.8).
 
@@ -56,7 +61,9 @@ describes code that has been written.
 - Any write to the vault. `janus index` writes `.janus/` only.
 - Supersession, transitive lineage, `--as-of`, validity windows, `effective_status`,
   `doctor`, `lineage`, `moves`, `path_history` (M5). M3 gates on **declared**
-  `status`; `--as-of` is not exposed at all rather than exposed-and-wrong.
+  `status`; `--as-of` is not exposed at all rather than exposed-and-wrong. Note the
+  distinction: `--include-superseded` *is* in M3 (§3.2) because it needs declared
+  status only, which M1 already resolves.
 - Multi-corpus queries, `--corpus`, archived weighting (M5/M6).
 - The Porter stemmer (`Stemmer::None` only; see S-2).
 - `--diversity` / MMR and any multi-chunk-per-document display (§7.2 calls it an
@@ -202,7 +209,7 @@ pub struct SearchQuery {
     pub types: Vec<String>,              // empty = all; OR within, AND across flags
     pub tags: Vec<String>,
     pub limit: usize,                    // default 10
-    pub include_superseded: bool,        // accepted, inert until M5 (documented)
+    pub include_superseded: bool,        // widens `current` by `superseded` (§3.2)
 }
 
 pub struct Hit {                         // one *document*, not one chunk
@@ -236,13 +243,26 @@ argmax”), in this exact order (review finding 4):
 
 1. Score candidate **chunk occurrences** (`lexical → relevance → final`).
 2. Group by `DocId`; keep `doc.score = max(final)` and the argmax chunk
-   (ties between chunks of one document: lower `ordinal` wins).
+   (within-document ties: lower `chunk_id` first — §7.2's key — then lower `ordinal`,
+   which is unique per document, as the occurrence discriminator).
 3. Filter (types/tags/scope/status) — filters run on documents, before grouping is
    rendered, and are cheap because they use `DocMeta` only.
 4. Sort documents: `final` desc, then `date` desc (missing date last), then argmax
-   `chunk_id` asc. Total order, no floats compared with `==`.
+   `chunk_id` asc, then **`DocId` asc**, then **`rel_path` asc**. Total order, no
+   floats compared with `==`.
 5. Apply `--limit` to **documents**.
 6. Render one row per document, quoting its argmax chunk.
+
+**Why the last two keys exist.** `(final, date, chunk_id)` is *not* a total order on
+documents: `ChunkId` deliberately excludes `DocId` (D48) and identical chunks are kept
+per occurrence (§3.4), so two documents in different scopes with the same body, title,
+date and score tie on all three keys — and their order would then depend on
+enumeration order, which is exactly the non-determinism §7.2's tie-break list exists to
+prevent. `DocId` separates them; `rel_path` is the backstop, unique by construction
+within a corpus. These two keys are a **documented extension**, not an override:
+SPEC's three keys are applied first and unchanged, and the extras only order hits SPEC
+leaves tied. Within one document `chunk_id` precedes `ordinal` for the same reason —
+`chunk_id` is SPEC's key, and duplicate ids within a document are expected (CH-10).
 
 **Not in the default path:** more than one chunk per document, MMR diversity, or a
 second display ordering. `--diversity` is deferred (§7.2 keeps it optional and off).
@@ -250,7 +270,11 @@ second display ordering. `--diversity` is deferred (§7.2 keeps it optional and 
 **Acceptance:** a fixture where one document owns the top ten chunk scores and nine
 other documents also match — `--limit 10` returns ten **distinct** documents. A
 document with many chunks appears once. A test asserts `hits.len() == limit` and
-`hits.map(doc_id).dedup() == hits.map(doc_id)`.
+`hits.map(doc_id)` contains no duplicates. Ties are pinned twice: (a) two same-date,
+same-score documents that share a `ChunkId` (identical body and title, different
+scope) produce identical limited results when the candidate slice is reversed or
+shuffled, and the same `--limit 1` winner; (b) two chunks of one document with equal
+scores return the lower `chunk_id` first and the lower `ordinal` second.
 
 ### 3.2 Scoring contract: complete equations and a per-intent table
 
@@ -275,6 +299,7 @@ document has no date at all, or the intent disables decay.
 | Intent | Decay | Included statuses | `STATUS_FACTOR` |
 |---|---|---|---|
 | `current` (default) | on (per-type half-life; `--decay-half-life` overrides) | `active`, `draft`, `unknown` | active 1.0, draft 0.7, unknown 0.8 |
+| `current` + `--include-superseded` | on | `active`, `draft`, `unknown`, **`superseded`** | active 1.0, draft 0.7, unknown 0.8, **superseded 1.0** |
 | `history` | off | all five | 1.0 for every status |
 | `evolution` | off | `active`, `deprecated`, `superseded`, `unknown` | 1.0 for every status |
 | `exhaustive` | off | all five, `unknown` included explicitly | 1.0 for every status |
@@ -282,6 +307,29 @@ document has no date at all, or the intent disables decay.
 `draft` and `deprecated`/`superseded` exclusion is an **inclusion rule**, not a
 weight: an excluded document is absent from the result set, not scored at zero.
 Sorting inside `evolution` is oldest→newest on `date` (§7.1), then the §3.1 keys.
+
+**`--include-superseded` is an override of the gate, not a second status penalty.**
+§7.1 calls it an override and §9.1 puts it on `search`; M3 already reads declared
+`status` and already excludes `superseded` under `current`, so the override needs
+neither M5's graph nor `effective_status`. It changes exactly one cell of the table
+above — `superseded` becomes included under `current` — and nothing else:
+
+- **Factor `1.0`, decay unchanged.** The flag's job is “show me the retired thing I
+  asked for”; inventing a penalty would invent a number SPEC does not contain, and it
+  would silently reorder the results the caller explicitly asked to see.
+- **`deprecated` is not included by it.** Different status, different reason, and §9.1
+  names only superseded. Folding them together would be a scope change, not a flag.
+- **A no-op elsewhere, and that is fine:** `history`/`evolution`/`exhaustive` already
+  include `superseded`, so the flag is accepted and changes nothing there.
+- **`janus facts` ignores it.** The active-only predicate (§3.6) is an inclusion rule;
+  a search override must not be able to widen it into surfacing retired decisions as
+  authoritative facts.
+- **Declared status in M3.** When M5 adds supersession, `effective_status` becomes the
+  meaning of “superseded” (§6.12 rule 7) and this flag follows it — recorded there.
+
+Accepting the flag and ignoring it, as the earlier draft had it, is the one option that
+is wrong in every direction: the caller asks for superseded documents, gets a
+success, and does not get them.
 
 **SPEC gap (recorded, not silently extended):** §6.6’s status table has columns for
 `current`/`history`/`evolution` only, while §7.1 defines a fourth intent,
@@ -434,8 +482,38 @@ contend in M3. §8.3 assigns `.janus/lock` to exactly this.
 
 **Manifest last, and never a shared temp name.** The old `index.bin.new` was itself
 a race (two writers truncating one file); a `NamedTempFile` is unique per writer and
-removed on drop if step 5–8 fail, so a failed publish leaves the previous generation
-intact — which is invariant I3’s spirit applied to the index.
+is removed on drop if a step fails, so a writer never leaves a half-written file under
+a name a reader would open.
+
+**Recovery is a rebuild, not a restore.** Two files are replaced in order, so an
+interruption can leave the pair inconsistent, and the plan has to say what happens
+then instead of assuming the previous generation survives:
+
+| Failure point | On-disk state | Next read, rebuild allowed | Next read, `--no-rebuild` |
+|---|---|---|---|
+| before step 6 (index not yet renamed) | previous generation, untouched | loads directly | loads directly |
+| **between steps 6 and 8** (index renamed, manifest not) | **new index bytes, old manifest** | sha mismatch → retry → **rebuild from the vault** under the lock | **exit 1**, nothing written, message names `.janus/index.bin` |
+| after step 8 (manifest renamed) | new generation, complete | loads directly | loads directly |
+
+The middle row is what an earlier draft got wrong by claiming “the previous generation
+stays loadable”: once step 6 renames, the previous bytes are **gone**, and no temp-file
+cleanup can bring them back. M3 does not need them back. The index is a rebuildable
+cache (§5 rule 1, §8.3) and a rebuild costs one vault read, so the contract is
+*“either a validated generation loads, or the next allowed read rebuilds one”* — never
+“the old one is still there”.
+
+Deliberately **not** built in M3: versioned generation files (`index.<n>.bin`), a
+commit pointer, or renaming the index last. Those buy an immediately loadable previous
+generation for a cache that can be recomputed, and they cost a second on-disk layout
+plus a garbage-collection rule plus a new `format_version`. If a later milestone needs
+instant availability across a failed publish (a long-lived server, M6), that is the
+design and the budget review — not this one.
+
+**The reader guarantees what it *validated*, not what the manifest says.** It hashes
+the bytes it actually read and compares that hash with `manifest.index_sha`; it never
+assumes the pathname still holds the generation the manifest names. That is precisely
+why an old manifest is not dangerous: it produces a mismatch, and a mismatch produces a
+retry or a rebuild — never a half-loaded index.
 
 **Reader protocol** (no lock — readers must never block on a builder):
 
@@ -472,11 +550,17 @@ violation is a checksum-equivalent corruption: rebuild, never a panic.
    missing index with the same root; assert exactly one built (`rebuilt` count 1,
    `reused` 1) and both returned identical hits.
 3. **Lock timeout.** A holder keeps the lock; the second writer with a 10 ms timeout
-   exits 1 with `lock timeout`, writes no temp file, and leaves the prior generation
-   loadable.
-4. **Failed publish.** Injected failure between index rename and manifest rename →
-   the previous generation still loads; the leftover temp is removed by the next
-   publish’s sweep.
+   exits 1 with `lock timeout` and writes no temp file — no publish started, so the
+   current generation is untouched and loadable.
+4. **Failed publish, interrupted after the index rename** (injected between steps 6
+   and 8): the pair is inconsistent by construction, and both halves of the contract
+   are asserted. (a) The next read with rebuild allowed rebuilds from the vault and
+   returns hits identical to a clean build, with one stderr line naming the cause.
+   (b) The same read with `--no-rebuild` exits 1 with empty stdout, names
+   `.janus/index.bin`, and leaves `.janus/` byte-identical. (c) A failure *before*
+   step 6 leaves a generation that loads with no rebuild at all. (d) If a second
+   writer completes during the reader’s retry window, the reader adopts it and does
+   not rebuild — the retry must not cause redundant work.
 5. **Corrupt bytes** (flip one byte, truncate, zero the file) → rebuild with one
    stderr line, exit 0 for a read command.
 6. **Concurrent read storm.** 8 reader threads during one publish: all either
@@ -595,6 +679,7 @@ tests whether the tool is pleasant, and no proxy measures that.
 | S-8 | Staleness | `search`/`facts` auto-build when the index is missing and auto-rebuild when the manifest disagrees with config, root, fingerprints, or `format_version`; one stderr line says which (`stale: tokenizer v1 != v2`). `--no-rebuild` refuses instead (exit 1, nothing written), for callers that want a read to be a read. | `src/index/store.rs`, `src/search/mod.rs` |
 | S-9 | Reuse key | Per document, on the **indexed input**: `lex_key = blake3(tokenizer_fp ‖ chunker_fp ‖ effective_title)` plus `content_hash` and the chunk-id set (§3.4). Tokens only are reused; metadata and spans are always rebuilt. Postings are per occurrence, never keyed by `ChunkId`. | `src/index/build.rs` |
 | S-10 | Intents | All four, with the explicit per-intent table in §3.2 (inclusion, factor, decay). `exhaustive` is filled in from §7.1 and flagged as a SPEC gap. | `src/score.rs` |
+| S-19 | `--include-superseded` | Real in M3 against **declared** status: adds `superseded` to `current`'s included set at factor 1.0, decay unchanged; `deprecated` unaffected; `facts` unaffected; no-op under `history`/`evolution`/`exhaustive`. Never an accepted-but-ignored flag. | `src/score.rs`, `src/search/mod.rs` |
 | S-11 | Scope filter | §6.12 rules 3, 4, 9: default union; repeated `--scope` unions; `--scope-only` excludes `global` and shared-only; normalization `ORG:Acme` → `org:acme`. Rules 6–8 (scope-relative windows) wait for M5 with a `todo` in the module docs. | `src/score.rs` |
 | S-12 | `janus facts` | Explicit inclusion predicate (§3.6): type ∈ {decision, spec, principle} **and** declared status `active`, no decay, factor 1.0, authority-ordered. Not the `current` gate. | `src/search/facts.rs` |
 | S-13 | `Clock` | `src/clock.rs`; trait + `SystemClock` + public `FixedClock`. Nothing else in the crate reads the wall clock. Eval and retrieval tests use `FixedClock(2025-04-01)`. | `src/clock.rs` |
@@ -681,16 +766,30 @@ from §3.3.
    |---|---|---|
    | Document `tf` grows (1 → 3 → 10, `dl = avgdl`) | saturating: `1.0000, 1.5714, 1.9643` × `idf`, bounded by `k1 + 1 = 2.2` | `document_tf_saturates_toward_k1_plus_one` |
    | Query repeats a term (`cache` vs `cache cache`) | **linear and exact**: `2 ×` the single-term score for that document, because each occurrence contributes `bm25(t, c)` again | `query_term_repetition_is_linear_unlike_tf` |
+   | `avgdl` grows (10 → 20, `tf = 1`, `dl = 10`, `b = 0.75`) | **increases**: `score / idf` goes `1.000000` → `1.257142857`, because `dl / avgdl` shrinks | `longer_average_document_raises_this_normalized_score` |
+   | `dl` grows (10 → 20, `tf = 1`, `avgdl = 10`) | **decreases** (symmetric mirror of the row above) | `longer_document_is_penalized` |
 
 3. **Monotonicity properties, with their preconditions stated** — the property is
    false without them, which is why the first draft’s “monotone in term frequency”
    was wrong as stated:
 
-   - Fix `(N, df, avgdl)` and `dl = avgdl`: BM25 is strictly increasing in `tf`,
+   - Fix `(N, df, avgdl)` and `dl = avgdl`: BM25 is strictly **increasing** in `tf`,
      bounded above by `idf · (k1 + 1)`.
-   - Fix `(N, tf, avgdl)`: BM25 is strictly decreasing in `dl` for `b > 0`.
-   - Fix `(N, tf, dl)`: BM25 is strictly decreasing in `avgdl` for `b > 0`.
-   - Fix `(N, dl, tf)`: `idf` is strictly decreasing in `df`.
+   - Fix `(N, df, tf, avgdl)`: BM25 is strictly **decreasing** in `dl` for `b > 0` —
+     a longer document is penalised.
+   - Fix `(N, df, tf, dl)`: BM25 is strictly **increasing** in `avgdl` for `b > 0` —
+     a longer *average* document makes this document's length look normal, so
+     `dl / avgdl` shrinks and the denominator shrinks. An earlier draft had this
+     backwards; the property as written would have failed correct BM25 (or forced the
+     arithmetic to be wrong to satisfy it). Independent check with `tf = 1, dl = 10`,
+     `k1 = 1.2, b = 0.75`: `score / idf = 1.000000` at `avgdl = 10` and
+     `1.257142857` at `avgdl = 20`.
+   - Fix `(N, dl, avgdl, tf)`: `idf` is strictly decreasing in `df`.
+   - **Preconditions for every “strictly”**: `tf >= 1`, `dl >= 1`, `avgdl > 0`,
+     `N >= 1`, and `b > 0` where stated. `tf = 0` gives a constant zero score, so no
+     strictness claim survives there. `df` is held fixed in **both** length
+     properties, because `idf` would otherwise move at the same time and the test
+     would prove nothing.
    - **Not** claimed: monotone in `tf` across documents of different length — a long
      document with high `tf` may score below a short one with low `tf`, and that is
      correct.
@@ -707,7 +806,9 @@ Phase 2. Flat postings + range table, `f64`, no I/O. Use the always-positive idf
 assert **literal** expected idf values (0.980829, 0.470004, 0.133531 at N=3). Keep
 document-TF saturation and query-term repetition as separate tests — one saturates,
 the other is exactly linear — and state the preconditions for every monotonicity
-property (fix N, df, avgdl, dl).”
+property (fix N, df, avgdl, dl), and get the length directions right: decreasing in
+`dl`, **increasing** in `avgdl` — the draft had the second one backwards, which
+correct BM25 would have failed.”
 
 **Accept:** tests green; building over the fixture vault (≈40 docs) < 10 ms debug.
 
@@ -721,12 +822,13 @@ predicate (used by phase 6).
 **Files:** `src/score.rs` (new), `src/clock.rs` (new), `src/config.rs` (docs: the
 authority/decay tables from M1 are consumed here), `src/lib.rs`.
 
-**Build (~300 logic lines):** `ScoreInput`/`Breakdown`; type authority from config
+**Build (~310 logic lines):** `ScoreInput`/`Breakdown`; type authority from config
 with the 0.80 fallback and the existing `unknown_type` note; the intent table of
 §3.2 as data (a `const` table, so adding a row is one line and a test can iterate
-it); decay with the five `1.0` short-circuits; `relevance`; `final`; the scope
-matcher (rules 3, 4, 9) as a pure predicate over `DocMeta`; `is_fact(doc)`
-(type ∈ set ∧ declared status active, §3.6); the document comparator (§3.1).
+it), including the `current + --include-superseded` row; decay with the five `1.0`
+short-circuits; `relevance`; `final`; the scope matcher (rules 3, 4, 9) as a pure
+predicate over `DocMeta`; `is_fact(doc)` (type ∈ set ∧ declared status active, §3.6);
+the document comparator of §3.1 with all five keys.
 
 **Tests (~420 lines):** one table-driven test iterating every `(intent, status)`
 cell of §3.2 and asserting inclusion, factor and decay — the table is the test
@@ -737,15 +839,22 @@ under `history`; `history`/`exhaustive` return factor `1.0` and `decay == 1.0` f
 every status; `evolution` excludes `draft` and orders oldest→newest. Decay
 monotonicity (`age ↑ ⇒ decay ↓`), the five `1.0` cases, future dates, missing dates.
 Scope obligations 5, 8, 9 from §6.12.1. Facts predicate table (all 5 statuses × 3
-types + one non-fact type). Ties deterministic across runs. `proptest`:
+types + one non-fact type). `--include-superseded`: the table row above asserts
+`superseded` is absent under plain `current`, present with the flag, at factor `1.0`
+with decay unchanged, that `deprecated` stays absent, and that `history`/`evolution`/
+`exhaustive` are unaffected. Ties: the two §3.1 cases (cross-document shuffle
+stability via `DocId`/`rel_path`, and the within-document `chunk_id` → `ordinal`
+order) are asserted here on the comparator, and again end to end in phase 6. `proptest`:
 `0 ≤ final ≤ 1.5 · 1.0 · 1.0`. Every test injects `FixedClock`.
 
-**Handoff (paste):** “Implement Phase 3 of M3 per `docs/m3-breakdown.md` §3.2, §3.6
-and Phase 3. Read SPEC §6.6, §6.12, §7.1, §7.2 first. `authority` in `Breakdown` is
-the **product** of type and status; report the factors separately. Encode the
-per-intent table as data and iterate it in the test, so a missing status fails.
-`janus facts` is an inclusion predicate (`active` only), not the `current` gate. No
-wall clock — `FixedClock` in every test.”
+**Handoff (paste):** “Implement Phase 3 of M3 per `docs/m3-breakdown.md` §3.2, §3.6 and
+Phase 3. Read SPEC §6.6, §6.12, §7.1, §7.2 first. `authority` in `Breakdown` is the
+**product** of type and status; report the factors separately. Encode the per-intent
+table as data and iterate it in the test, so a missing status fails.
+`--include-superseded` is a real inclusion override (`superseded` at factor 1.0 under
+`current`), not an ignored flag; `deprecated` and `facts` are unaffected. Sorting must
+be a total order: SPEC's `(final, date, chunk_id)` first, then `DocId`, then
+`rel_path`. No wall clock — `FixedClock` in every test.”
 
 **Accept:** every §7.2 obligation and §6.12.1 obligation 5/8/9 present and green;
 clippy clean.
@@ -802,11 +911,12 @@ read→validate→retry loop with 10/50/200 ms backoff and the one rebuild attem
 two new error variants with exit code 1 and messages that name `.janus/lock` /
 `.janus/index.bin`.
 
-**Tests (~280 lines):** the six §3.5 acceptances, all deterministic: reader at every
+**Tests (~300 lines):** the six §3.5 acceptances, all deterministic: reader at every
 publication stage via the hook; two concurrent auto-builds (threads, counter
-assertions, no sleeps); lock timeout; injected mid-publish failure leaving the
-previous generation loadable; corrupt/truncated/zeroed bytes; 8-reader storm during
-publish with zero errors. A test asserts the publish order by recording hook stages
+assertions, no sleeps); lock timeout; injected failure after the index rename with
+rebuild recovery **and** `--no-rebuild` refusal; injected failure before the rename
+loading unchanged; corrupt/truncated/zeroed bytes; 8-reader storm during publish with
+zero errors. A test asserts the publish order by recording hook stages
 and checking `index.bin` is visible before `manifest.json` is replaced.
 
 **Handoff (paste):** “Implement Phase 5 of M3 per `docs/m3-breakdown.md` §3.5 and
@@ -814,7 +924,9 @@ Phase 5. `.janus/lock` is exclusive for writers with a 10 s timeout and held acr
 the entire publish; readers never lock. Unique temp file per writer, `index.bin`
 renamed before `manifest.json`, directory `fsync` after each. Reader validates bytes
 against `manifest.index_sha` and retries (10/50/200 ms), then rebuilds once, then
-`IndexUnstable`. Tests must interleave through `publish_with_hook`, not `sleep`.”
+`IndexUnstable`. A failure after the index rename is recovered by **rebuilding**, not
+by restoring old bytes: assert that, and assert `--no-rebuild` refuses without writing.
+Tests must interleave through `publish_with_hook`, not `sleep`.”
 
 **Accept:** all six pass; `cargo test` never sleeps; two processes cannot produce a
 mixed generation (asserted by the hook test).
@@ -842,13 +954,19 @@ documents, not chunks.
 **Tests (~380 lines):** `index → search → search --json` on the fixture vault;
 the dominant-multi-chunk-document fixture from §3.1 (`--limit 10` → 10 distinct
 documents); `--tags` and `--types` through the CLI **after a reload** (second
-process), which is the review-finding-2 metadata case; `--scope`/`--scope-only` end
-to end; `--intent history` returns a `superseded` document that `current` omits;
+process), which is the metadata case from the first review pass; `--scope`/
+`--scope-only` end to end; `--intent history` returns a `superseded` document that
+`current` omits, and that same document appears under `current` with
+`--include-superseded` (absent by default, present with the flag, same span and
+breadcrumb) while `facts` still excludes it;
 `facts` excludes draft/unknown/deprecated/superseded while `search --intent current`
 includes the first two (pinned against each other); `--json` never contains body
 text; stale index rebuilds with one stderr line and exit 0; `--no-rebuild` exits 1
-and writes nothing; empty corpus; golden `insta` over `search --json` redacting only
-the corpus root; determinism across two runs.
+and writes nothing; an inconsistent index/manifest pair (simulated by publishing only
+the index) rebuilds on the next read and refuses under `--no-rebuild`; empty corpus;
+golden `insta` over `search --json` redacting only the corpus root; determinism across
+two runs; two same-date, same-score documents sharing a `ChunkId` return the same order
+and the same `--limit 1` winner when the candidate order is shuffled.
 
 **Eval:** `tests/eval/queries.jsonl` ≥30 queries with `intent` and graded
 expectations, five of them built from M2’s awkward fixtures (CRLF, BOM, the
@@ -875,8 +993,9 @@ vault; `scripts/eval.sh` prints `active-top-1 0.xx (n/m)`; exit codes match §9.
   breadcrumbs, never chunk text.
 - **No panics** (§10, D12): no `unwrap`/`expect` in lib code; every value read from
   disk validated; indexing everywhere.
-- **Fail open on reads, fail closed on refusal.** Corrupt or stale → rebuild; a
-  `--no-rebuild` read refuses; a failed publish leaves the previous generation.
+- **Fail open on reads, fail closed on refusal.** Corrupt or stale → rebuild; an
+  inconsistent index/manifest pair (a failed publish) is detected by hashing the bytes
+  read and is rebuilt on the next allowed read; `--no-rebuild` refuses without writing.
 - **Cross-process safety** (§3.5): `.janus/lock` for writers, lock-free readers with
   generation validation and bounded retry.
 - **Cross-platform** (§8.7): `rel_path` `/`-separated; `built_root` via `dunce`;
@@ -897,22 +1016,30 @@ Blocking (CI / `cargo test`):
 4. Corrupt, truncated, `format_version`-mismatched or hand-edited `index.bin`
    rebuilds with a warning and never panics (§3.5 acceptance 5, §3.5 validation).
 5. Two concurrent builders yield one build and two identical result sets; a reader
-   interleaved at every publication stage sees a validated generation
-   (§3.5 acceptances 1–4, 6).
+   interleaved at every publication stage sees a validated generation (§3.5
+   acceptances 1, 2, 6); a publish interrupted after the index rename is recovered by
+   a rebuild on the next allowed read, and refused without writes under
+   `--no-rebuild` (§3.5 acceptance 4).
 6. `--limit N` returns N distinct documents; a dominant multi-chunk document appears
    once (§3.1).
 7. `janus facts` excludes `draft`/`unknown`/`deprecated`/`superseded` while
    `search --intent current` still includes `draft` and `unknown` (§3.6).
-8. Every §7.2 obligation, every §6.12.1 obligation M3 can answer, and every row of
-   the §3.2 intent table has a test.
-9. Gates: fmt, clippy `-D warnings`, `cargo test --all-targets`, `cargo doc`
-   (0 warnings), Windows `cargo check`, `scripts/pr-size.sh`.
+8. A declared-`superseded` document is absent from `current` by default and present
+   with `--include-superseded`, at factor 1.0, with `deprecated` and `facts`
+   unaffected (§3.2).
+9. Results are a total order: two same-date, same-score documents sharing a
+   `ChunkId` return the same order under shuffled candidates, and a within-document
+   tie resolves by `chunk_id` then `ordinal` (§3.1).
+10. Every §7.2 obligation, every §6.12.1 obligation M3 can answer, and every row of
+    the §3.2 intent table (including the override row) has a test.
+11. Gates: fmt, clippy `-D warnings`, `cargo test --all-targets`, `cargo doc`
+    (0 warnings), Windows `cargo check`, `scripts/pr-size.sh`.
 
 Milestone acceptance (manual, recorded in the PR that changes ranking):
 
-10. `scripts/eval.sh` reports **active top-1 ≥ 0.80** over ≥ 30 queries, with the
+12. `scripts/eval.sh` reports **active top-1 ≥ 0.80** over ≥ 30 queries, with the
     denominator printed and eligible-query rule from §3.8 applied.
-11. **“I used `janus search` instead of `rg` for a day.”** Signed off in the PR
+13. **“I used `janus search` instead of `rg` for a day.”** Signed off in the PR
     description when phase 6 merges; if it fails, the follow-up is a UX change, not a
     lower threshold.
 
@@ -928,13 +1055,17 @@ of coordination, and the test budget grows where contracts became acceptance cas
 | PR | Branch | Logic estimate | Tests estimate | Why it splits here |
 |---|---|---|---|---|
 | P1 | `m3-tokenize` | ~160 | ~200 | The shared definition both sides of a query depend on; owns an explicit ownership contract. |
-| P2 | `m3-lexical` | ~280 | ~360 | BM25: dense numerics, literal expected values, separated saturation semantics. |
-| P3 | `m3-score` | ~300 | ~420 | Policy layer where a mistake is invisible in the output; table-driven by construction. |
+| P2 | `m3-lexical` | ~280 | ~380 | BM25: dense numerics, literal expected values, separated saturation semantics, both length directions. |
+| P3 | `m3-score` | ~310 | ~440 | Policy layer where a mistake is invisible in the output; table-driven by construction, plus the `--include-superseded` row and the total comparator. |
 | P4 | `m3-index-store` | ~300 | ~330 | Snapshot format + reuse identity; owns `format_version` and the incremental contract. |
-| P5 | `m3-publish` | ~200 | ~280 | Cross-process publication and reader retry — its own PR so review finding 1 gets a focused diff. |
-| P6 | `m3-search-cli` | ~320 | ~380 | Command surface + result contract + eval report. If it approaches 450 logic, the eval harness ships as `m3-eval`. |
+| P5 | `m3-publish` | ~200 | ~300 | Cross-process publication, reader retry, and **rebuild-based recovery** — its own PR so the protocol gets a focused diff. |
+| P6 | `m3-search-cli` | ~330 | ~400 | Command surface + result contract + eval report. If it approaches 450 logic, the eval harness ships as `m3-eval`. |
 
-Total ≈ 1 560 logic lines across six PRs, every one far under the 600 ceiling.
+Total ≈ 1 580 logic lines across six PRs, every one far under the 600 ceiling. The
+second review pass added ~20 logic lines (the override row and two tie-break keys) and
+~60 test lines (recovery refusal, shuffle stability, length directions); it removed
+none of the storage machinery the first draft had implied, because the recovery
+contract is now “rebuild”, which needs no new files.
 
 ## 9. Review resolutions and remaining SPEC gaps
 
@@ -950,10 +1081,19 @@ Seven findings from review, resolved as follows.
 | 6 | `s/(s+4)` silently replaced SPEC’s sigmoid | Kept the sigmoid and defined it scale-free: `lexical = s/(s+s_ref)`, `s_ref = Σ idf(t)`; numeric tables for `r → lexical` and a worked N=40/tf example; rationale is that `idf` grows with `ln N`, so a fixed midpoint is corpus-dependent. | §3.3, S-5, P2 |
 | 7 | `≥0.80` assertion inside `cargo test`; wall-clock assertion; §11 criterion replaced | Three homes: correctness gates in `cargo test`; quality as an `#[ignore]`d harness + non-blocking CI job publishing both numbers; milestone acceptance as a manual step that keeps §11’s wording verbatim; timing printed, never asserted; `active top-1` denominator defined (current-intent queries expecting an active document); `FixedClock` in all retrieval/eval tests. | §3.8, S-15, §7, P6 |
 
-Also fixed in this revision, from the same review pass: the tokenizer ownership
-contract (§3.7), `--tags` support after reload via `DocMeta.tags` (§2, P4/P6), and
-the BM25 test defects — literal expected idf values, document-TF saturation vs
-query-term repetition as separate tests, and monotonicity preconditions (§5 P2).
+### Second review pass (four follow-ups)
+
+| # | Finding (short) | Resolution | Where |
+|---|---|---|---|
+| 8 | Failed-publish recovery claimed the previous generation survives | Corrected outright: after the index rename the old bytes are **gone**, so nothing can restore them. The contract is now “either a validated generation loads, or the next allowed read rebuilds one”, with a per-failure-point table; `--no-rebuild` refuses without writing. No versioned generations, commit pointer, or rename-last index — that would be new storage machinery for a cache that can be recomputed (§3.5). The reader guarantee is restated as *validating the bytes it read*, not trusting the manifest. | §3.5, S-17, P5, DoD 4–5 |
+| 9 | `avgdl` monotonicity had the wrong direction | Inverted to **increasing** in `avgdl` (decreasing in `dl`), with `df` held fixed in both length properties and positive-input preconditions (`tf ≥ 1`, `dl ≥ 1`, `avgdl > 0`); the reviewer’s independent values `1.000000` and `1.257142857` are kept as test literals and as a row in the phase-2 table. | §5 P2 |
+| 10 | `--include-superseded` accepted as an inert flag | Implemented against declared status: it widens `current`'s inclusion set by `superseded` at factor **1.0**, decay unchanged; `deprecated` and `facts` unaffected; a no-op (not an error) under `history`/`evolution`/`exhaustive`. CLI acceptance: absent by default, present with the flag, same span, and still absent from `facts`. | §3.2, S-19, P3/P6 |
+| 11 | `(final, date, chunk_id)` is not a total order | SPEC's keys first, then `DocId`, then `rel_path`, for documents; within one document `chunk_id` then `ordinal`. Shuffle-stability test plus a pinned within-document tie; the extension is called out as a documented addition in §9’s SPEC gaps. | §3.1, S-16, P3/P6 |
+
+Also fixed in the first pass: the tokenizer ownership contract (§3.7), `--tags` support
+after reload via `DocMeta.tags` (§2, P4/P6), and the BM25 test defects — literal
+expected idf values, document-TF saturation vs query-term repetition as separate tests,
+and monotonicity preconditions (§5 P2).
 
 ### Remaining SPEC conflicts and gaps
 
@@ -985,6 +1125,15 @@ should close. They are listed so nothing is silently overridden.
 6. **§10’s “no wall-clock time in tests” vs a performance DoD.** The plan prints
    timings and asserts none; the 200 ms warm-search figure lives in the manual
    acceptance checklist, not in a test. No conflict after this revision.
+7. **§7.2’s tie-break list is not total.** It stops at `chunk_id`, which excludes
+   `DocId` by design (D48), so two documents can tie on every listed key. §3.1 keeps
+   §7.2’s keys first and appends `DocId` then `rel_path`, and resolves within-document
+   ties by `chunk_id` then `ordinal`. **Proposed SPEC edit:** extend §7.2’s tie-break
+   sentence with the two document keys.
+8. **`--include-superseded` has no stated factor.** §7.1 calls it an override but
+   never says what a newly included `superseded` document scores; §3.2 fixes it at
+   1.0 with decay unchanged, and explicitly excludes `deprecated` from the override.
+   **Proposed SPEC edit:** one sentence in §7.1.
 
 ## 10. Implementation log — Phase 1 (tokenizer)
 
