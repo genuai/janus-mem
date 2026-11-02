@@ -110,8 +110,12 @@ const DEFAULT_CONFIG: &str = include_str!("../janus.toml");
 /// Default number of days at which relevance halves for decaying types (§16.1).
 const DEFAULT_HALF_LIFE_DAYS: f64 = 180.0;
 
-/// Default semantic weight for hybrid scoring (§7.2, §3.3).
-const DEFAULT_ALPHA: f64 = 0.65;
+/// Default semantic weight for hybrid scoring (§7.2, §3.3, V-27).
+///
+/// 0.5, not the plan's 0.65: the P5 α sweep measured one top-1 result broken by
+/// the semantic term at 0.65 and none at 0.5, with the same `nDCG@10`
+/// (`docs/m4-breakdown.md` §14). One line, no code change.
+const DEFAULT_ALPHA: f64 = 0.5;
 
 /// Upper bound on alias-chain length. A vault with a 16-deep alias chain is not
 /// expressing vocabulary, it is expressing a bug; the cap turns a potential
@@ -1697,7 +1701,7 @@ mod tests {
     #[test]
     fn alpha_defaults_to_the_spec_value() {
         let config = parse("");
-        assert_eq!(config.embedding.alpha, 0.65);
+        assert_eq!(config.embedding.alpha, 0.5);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
@@ -1727,7 +1731,7 @@ mod tests {
     #[test]
     fn a_nan_alpha_warns_and_uses_the_default() {
         let config = parse("[embedding]\nalpha = nan\n");
-        assert_eq!(config.embedding.alpha, 0.65);
+        assert_eq!(config.embedding.alpha, 0.5);
         assert!(
             config
                 .warnings

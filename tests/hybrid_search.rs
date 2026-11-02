@@ -72,12 +72,12 @@ fn semantic_only_vault(query: &str) -> tempfile::TempDir {
 }
 
 #[test]
-fn a_semantic_only_document_enters_at_alpha_065_and_not_at_alpha_zero() {
+fn a_semantic_only_document_enters_at_the_default_alpha_and_not_at_alpha_zero() {
     let vault = semantic_only_vault("zebra");
     index(vault.path());
 
     let hybrid = search_json(vault.path(), &["zebra", "--no-rebuild"]);
-    assert_eq!(hybrid["alpha"], 0.65, "{hybrid}");
+    assert_eq!(hybrid["alpha"], 0.5, "{hybrid}");
     assert!(
         result_paths(&hybrid).contains(&"notes/semantic.md".to_owned()),
         "a semantic-only match must be admitted: {hybrid}"
@@ -292,7 +292,7 @@ fn an_empty_query_calls_no_embedder_and_a_real_query_calls_it_once() {
         empty.hits.is_empty(),
         "an empty query has no lexical signal"
     );
-    assert_eq!(empty.alpha, 0.65);
+    assert_eq!(empty.alpha, 0.5);
 
     let filled = search::query(
         dir.path(),

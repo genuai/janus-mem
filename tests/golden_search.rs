@@ -6,7 +6,7 @@
 //! * `search_no_embeddings` is the α = 0 reference, taken with
 //!   `--no-embeddings`. Its `results` array must stay exactly the M3 snapshot;
 //!   the top-level `alpha` and `degraded` fields are the only additions.
-//! * `search_hybrid` is the default α = 0.65 path, where `scores.semantic` is
+//! * `search_hybrid` is the default α = 0.5 path (V-27), where `scores.semantic` is
 //!   non-zero and `relevance == α·semantic + (1−α)·lexical` is not degenerate.
 //!
 //! `--intent history` is part of the golden's contract, not an accident: it
@@ -84,7 +84,7 @@ fn search_hybrid_matches_the_golden_and_the_blend_identity() {
         ],
     );
     let report: Value = serde_json::from_str(&text).expect("stdout is JSON");
-    assert_eq!(report["alpha"], json!(0.65), "{report}");
+    assert_eq!(report["alpha"], json!(0.5), "{report}");
     assert_eq!(report["degraded"], json!([]), "{report}");
 
     let mut semantic_seen = false;
