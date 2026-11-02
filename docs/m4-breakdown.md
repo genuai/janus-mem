@@ -48,8 +48,9 @@ claims inherited from the brief are not what the code does, and the difference c
    §9.1 lists `janus index [--no-embeddings]`; the binary does not accept it. M4 adds the flag to
    `index`, `search` and `facts`, and the plan's degradation contract (§3.6) is written from
    scratch rather than inherited.
-2. `bincode` metadata, incremental reindex, `janus index` and `--dry-run` are M3 work that
-   §11-M4 still claims. They are **already done** and are removed from §0's scope.
+2. `bincode` metadata, incremental reindex and `janus index` are M3 work that §11-M4 still claims.
+   They are **already done** and are removed from §0's scope. (`--dry-run` is M3 work too, but
+   §11-M4 does not claim it; an earlier draft of this correction said it did.)
 3. "A moved-but-unchanged file costs zero embedding work" is **not** free, and the brief's
    reasoning is wrong for the most common rename. `ChunkId` excludes the title (D48, CH-5), but
    the embedded text is `Chunk::embed_text` = *title* + breadcrumb + text (S-3), and the title is
@@ -59,8 +60,18 @@ claims inherited from the brief are not what the code does, and the difference c
    "costs zero embedding work" (M4). No `path_history`, no file-hash comparison and no move
    detection is built in M4.
 
-**Status: first draft, awaiting review.** No implementation exists. Every phase log in §10–§14 is
-empty on purpose.
+**Status: revised once after review; awaiting round 2.** No implementation exists. Every phase log
+in §10–§14 is empty on purpose.
+
+**Revision note.** Round 1 of independent review returned 15 findings and the verdict *needs another
+round*; all 15 were verified and accepted, and §9.0 maps each one to its resolution. Three were
+blockers, and two of those were defects in **shipped M3 code** that this plan was about to copy:
+the reuse key ignored the difference between normalised text (what `ChunkId` hashes) and raw text
+(what the embedder sees), and the reuse predicate compared a chunk-id *set* while copying rows by
+*ordinal*, so a section reorder would attach one section's data to another. The third blocker was
+the feature-off/featured binary pair deleting each other's vectors. The rest are contract precision,
+budget honesty, and four SPEC/DOC corrections the first draft had left unmentioned. Nothing was
+rejected.
 
 ## 0. Scope
 
@@ -158,8 +169,15 @@ pub struct EmbedError {
 pub struct HashEmbedder { id: EmbedderId, tokenizer: Tokenizer }
 
 /// Resolves config × feature × model availability into an embedder or a reason.
+/// The directories are an argument, so nothing below `main` reads `std::env` (V-25).
 pub enum Resolved { Ready(Box<dyn Embedder>), Degraded(&'static str, String) }
-pub fn resolve(config: &Config) -> Resolved;
+pub struct ModelDirs { pub config: Option<PathBuf>, pub env: Option<PathBuf>, pub cache: PathBuf }
+pub fn resolve(config: &Config, dirs: &ModelDirs) -> Resolved;
+
+impl EmbedderId {
+    /// Length-prefixed, unambiguous encoding for cache keys (V-22).
+    pub fn to_bytes(&self) -> Vec<u8>;
+}
 ```
 
 ```rust
@@ -270,17 +288,22 @@ must be last because it is the commit record, and the largest file goes first so
 which the commit record lags its payload is as short as possible. Say that honestly instead of
 pretending the order is atomic.
 
-| Failure point | On-disk state | Next read, rebuild allowed | Next read, `--no-rebuild` |
-|---|---|---|---|
-| before the vectors rename | the previous (index, vectors, manifest) triple | loads | loads |
-| **between the vectors rename and the index rename** | **new vectors, old index, old manifest** | `vectors_sha` mismatch → retry → rebuild under the lock | exit 1, names `.janus/vectors.f32`, writes nothing |
-| **between the index rename and the manifest rename** | **new vectors + new index, old manifest** | `index_sha` mismatch → retry → rebuild | exit 1, names `.janus/index.bin`, writes nothing |
-| after the manifest rename | the new triple | loads | loads |
+The table has two "next read" columns because **V-4 makes them different**, and a single column
+would teach a rule the code does not follow.
 
-The middle two rows are the contract: recovery is a **rebuild, not a restore** (§3.5 of M3 stands).
+| Failure point | On-disk state | Read that wants vectors | Same read, lexical only (V-4) | `--no-rebuild` (either kind) |
+|---|---|---|---|---|
+| before the vectors rename | the previous (index, vectors, manifest) triple | loads | loads | loads |
+| **between the vectors rename and the index rename** | **new vectors, old index, old manifest** | `vectors_sha` mismatch → retry → rebuild under the lock | **loads**, because the index and manifest it validates agree with each other | exit 1 only on the wanting path, naming `.janus/vectors.f32`; the lexical path still loads |
+| **between the index rename and the manifest rename** | **new vectors + new index, old manifest** | `index_sha` mismatch → retry → rebuild | `index_sha` mismatch → retry → rebuild | exit 1, names `.janus/index.bin`, writes nothing |
+| after the manifest rename | the new triple | loads | loads | loads |
+
+The middle rows are the contract: recovery is a **rebuild, not a restore** (§3.5 of M3 stands).
 `index.bin` and `vectors.f32` are replaced by rename; the previous bytes are gone. Nothing in M4
 adds versioned generations. The reader's guarantee is unchanged in kind — it validates the bytes it
-actually read — and is now stated over three files instead of two.
+actually read — and is now stated over three files instead of two. Row 2's lexical path is not a
+hole: it validated a consistent (index, manifest) pair and cannot observe the vectors it declined
+to read. DoD 6 asserts both paths.
 
 **A lexical-only read does not read `vectors.f32` (V-4).** `LoadOptions.want_vectors` is false for
 `search --no-embeddings`, for `facts`, and whenever α will be 0. The file is not opened, hashed or
@@ -324,17 +347,43 @@ It is a bag of tokens, so its cosine tracks BM25 almost exactly. That makes it e
 plumbing tests and worthless for calibration; **no quality number in this milestone may be produced
 with `HashEmbedder`**, and §3.5 says what replaces it.
 
-**No network, ever, in the crate or its tests (§10).** `resolve` reads a model from disk:
-`[embedding] model_dir`, else `JANUS_MODEL_DIR` (SPEC §14 already names it), else the
-`fastembed` default cache directory. If the files are not there, `resolve` returns `Degraded` with
-a reason that names the directory it looked in. It never downloads and never blocks. A test asserts
-that a `Config` whose model directory does not exist yields `Degraded`, with no socket, no
-`std::env` read below `main`, and no timeout.
+**No network at runtime, and no download (§10).** `resolve` reads a model from disk. It does not
+open a socket, and it does not block. If the files are not there, `resolve` returns `Degraded` with
+a reason that names the directory it looked in. A test asserts that a `ModelDirs` whose directory
+does not exist yields `Degraded`, with no socket and no timeout. (The `embeddings` *build* may fetch
+the ONNX Runtime binary; §6 scopes the rule to runtime, because pretending a feature job that
+compiles `ort` never touches the network would be a false claim in a plan that forbids false
+claims.)
 
-**Selection is one function, at the edge.** `main` calls `embed::resolve(&config)` once and passes
-`Option<&dyn Embedder>` down. Nothing below `main` reads the environment or the feature flag: the
-feature controls whether the `fastembed` module *exists*, not what any function decides at
-runtime.
+**Paths are resolved at the edge, like every other dependency.** `resolve(&Config, &ModelDirs)`
+takes the directories as an argument; `ModelDirs` is built in `main.rs` from `[embedding]
+model_dir`, then `JANUS_MODEL_DIR`, then `fastembed`'s cache directory. A library function that
+read `std::env` would break AGENTS.md's "a `Config` rather than `std::env::var` deep in the engine"
+and would make the "no `std::env` below `main`" test impossible to write — which is how the first
+draft of this section contradicted itself.
+
+**Selection is one function, at the edge.** `main` calls `embed::resolve(&config, &dirs)` once and
+passes `Option<&dyn Embedder>` down. Nothing below `main` reads the environment or the feature
+flag: the feature controls whether the `fastembed` module *exists*, not what any function decides
+at runtime.
+
+**The dispatch table, because "model name → behaviour" was left implicit and two sections then
+disagreed about it:**
+
+| `[embedding] model` | Feature off | Feature on, files present | Feature on, files absent |
+|---|---|---|---|
+| `hash-64` (or any `hash-<n>`) | `Ready(HashEmbedder)` | same | same |
+| any other name | `Degraded("not compiled")` | `Ready(FastEmbed)` | `Degraded("model not found in <dir>")` |
+| `[embedding] enabled = false` | `Degraded("disabled in janus.toml")` | same | same |
+
+`HashEmbedder` is compiled unconditionally and is reachable by name, because the fixture corpus and
+half the integration tests need a deterministic embedder without a model (P2). That makes it
+selectable in production, so `resolve` emits a `ConfigWarning`: "`model = hash-64` is a test
+double; its vectors are bag-of-words, not semantic". §3.6's matrix is keyed on the **resolved**
+embedder, not on the feature, so a missing vectors file is a consequence of `Degraded` (on a first
+build, or after a degraded build that changed a document), never of the build flag alone — which is
+what the first draft got wrong when it wrote "feature off ⇒ no `vectors.f32`" while also giving the
+fixture a working hash embedder, and again when it let a degraded `index` delete a good file.
 
 **The writer normalises and validates (V-7).** `Embedder::embed` may return any L2 norm; the
 builder normalises every row and checks it against `id().dim`, finiteness, and the norm rule of
@@ -402,6 +451,22 @@ guess now (V-16). `search --json` reports the query-wide `alpha` so a reader can
 `relevance` from `scores.semantic` and `scores.lexical`; without it the breakdown is not
 recomputable, which defeats the point of reporting it.
 
+**The admission rule has a cost, and M3's notes change meaning under it.** With a real embedder
+nearly every chunk has `relevance > 0`, so:
+
+- `matched` approaches the corpus size, and the note `"N more document(s) matched; raise --limit"`
+  becomes a corpus-count line nobody can act on. It stays (one line is not a flood) but its text
+  names the basis: `"N more document(s) have relevance > 0; raise --limit to see them"`.
+- `src/search/mod.rs` currently allocates one `Breakdown` and two `Vec` entries per admitted chunk.
+  Under lexical-only that was one entry per *matching* chunk; under hybrid it is one per chunk,
+  ~200k per query at the reference vault. That is a per-candidate cost the 77 MFLOP figure does
+  not cover, so **P2 measures the whole `query()` call, not the dot product**, and prints it.
+- **Pre-declared fix if the measurement misses p50 ≤ 100 ms** (§13): two passes — pass 1 computes
+  `relevance` alone (an `f64` per chunk, no `Breakdown`, no `Vec`) and keeps each document's
+  argmax; pass 2 builds a `Breakdown` for the winners only. It is the shape §8.3.1 already
+  prescribes ("top-k without a full sort"), it does not change any score, and it is deliberately
+  **not** written now, because D29 forbids optimising before the measurement exists.
+
 **Empty query ⇒ no embedder call.** `facts` and the eval's exhaustive pass query with no text; the
 query vector is `None`, `semantic = 0` for every chunk, and admission falls back to lexical. This
 keeps those commands at M3 cost and removes `embed("")` from the hot path.
@@ -409,42 +474,72 @@ keeps those commands at M3 cost and removes `embed("")` from the hot path.
 ### 3.4 Vector reuse: the key must include everything that is embedded
 
 M3 keys token reuse per document on `lex_key = blake3(tokenizer_fp ‖ chunker_fp ‖ title)` plus the
-chunk-id set and count (§3.4 of M3, S-9), because `ChunkId` excludes the title while the indexed
-text includes it. Embeddings have the same defect plus one of their own, so they get their own key:
+chunk-id set, the chunk count and the file's `content_hash` (§3.4 of M3, S-9), because `ChunkId`
+excludes the title while the indexed text includes it. Embeddings have that defect plus two of
+their own, so they get their own key:
 
 | Identity | Formula | Purpose |
 |---|---|---|
-| `ChunkId` | `blake3(heading_path ‖ 0x00 ‖ normalized_text)` | content identity; **never** an embedding-cache key |
+| `ChunkId` | `blake3(heading_path ‖ 0x00 ‖ normalized_text)` | content identity, and the **content component** of a cache key — never the whole key |
 | `lex_key` | `blake3(tokenizer_fp ‖ chunker_fp ‖ title)` | "the tokens this document contributes are unchanged" |
-| `vec_key` | `blake3(embedder_id ‖ 0x00 ‖ title)` | "the text this document asks the embedder for is unchanged" |
+| `vec_key` | `blake3(embedder_id.to_bytes() ‖ 0x00 ‖ title)` | "the text this document asks the embedder for is unchanged" |
 
-`vec_key` needs exactly three things and no more: the embedder (a different model is a different
-vector), the title (the only input to `embed_text` that `ChunkId` excludes), and — through the
-document-level conjuncts below — the chunk set, which carries breadcrumb and text. It deliberately
-does **not** include the tokenizer fingerprint: a tokenizer change alters `lex_key` and must
-re-tokenize, but it does not change `embed_text`, so re-embedding everything would be pure waste.
+`vec_key` needs the embedder (a different model is a different vector) and the title (the only
+input to `embed_text` that `ChunkId` excludes). It deliberately does **not** include the tokenizer
+fingerprint: a tokenizer change alters `lex_key` and must re-tokenize, but it does not change
+`embed_text`, so re-embedding everything would be pure waste.
 
-Reuse is per document, and it is a contract with the same shape as §3.4 of M3:
+**`EmbedderId::to_bytes()` is a function, not a concatenation (V-22).** `EmbedderId` has four
+fields, and `"hash" + "-64"` must not hash the same as `"hash-" + "64"`. The encoding
+length-prefixes every field with `to_le_bytes`, exactly as `chunk_id` and `lex_key` already do, and
+both §3.4 and V-11 cite that one function instead of spelling a formula twice.
+
+**`ChunkId` covers normalised text; `embed_text` contains raw text (V-23).** `chunk_id` hashes
+`normalize(text)` — CRLF folded to LF, trailing whitespace stripped, edges trimmed — while
+`Chunk::embed_text` appends `Chunk::text(body)`, which is the **raw** span. So an EOL-only or
+trailing-whitespace-only rewrite of a file (a `git checkout` under a different `core.autocrlf`,
+SPEC §8.7 and CH-9) keeps every `ChunkId` byte-identical and changes every embedded text. This is
+why the predicate below carries `content_hash`: it is the cheap, file-level witness for "the bytes
+the embedder will see are the bytes it saw last time", and M3's `reusable` already relies on it for
+the same reason.
+
+Reuse is per document, and it is a contract with the same shape as §3.4 of M3 — **the conjuncts are
+ordered cheapest first**, and the chunk comparison is a **sequence**, not a set:
 
 ```
-reuse_vectors(doc) ⟺  old.vec_key == new.vec_key
-                   ∧  old.embedder == new.embedder          (also in the manifest check)
-                   ∧  every new ChunkId of the document is present in the old snapshot
-                   ∧  the document's chunk count is unchanged
+reuse_vectors(doc) ⟺  old.content_hash == new.content_hash      (cheap, and catches raw-text drift)
+                   ∧  old.vec_key == new.vec_key                 (embedder + title)
+                   ∧  old.embedder == new.embedder               (also in the manifest check)
+                   ∧  the old chunk-id sequence == the new one    (order included, V-24)
                    ∧  the previous generation's vectors validated
+                   ∧  the old row range has room for every new row
 ```
 
-What is reused is **rows only**, copied by ordinal into the new snapshot positions. Everything
-else about a vector row is derived from the snapshot: a row is addressed by chunk position, so a
-reused document whose chunks moved position must have its rows copied to the new positions. If the
-old generation has no vectors, or its array failed validation, or its row count does not match, the
-whole corpus re-embeds — a wrong row order would silently attach one document's vector to another,
-which is the worst failure this milestone can produce.
+**A set is not enough, and M3 has the same latent bug (V-24).** The first draft required only that
+every new `ChunkId` be *present* in the old snapshot and that the count match — then copied rows
+by ordinal. Reordering two sections of a body leaves the set of `(heading_path, text)` pairs and
+the count unchanged, so reuse fires and section A's vector is attached to section B's chunk. That
+is exactly "the worst failure this milestone can produce", permitted by the rule that names it. The
+comparison is therefore `old_chunks.iter().map(|c| c.id).eq(chunks.iter().map(|c| c.id))`: one
+iterator, no allocation, and the same one-line tightening belongs in M3's `build::reusable`, whose
+`all(|chunk| old_chunks.iter().any(...))` has the identical hole for **tokens** — a reordered
+document currently keeps the wrong term frequencies on the wrong spans. P4 fixes both, with a
+reorder test for each; it is one predicate, owned by one phase, and leaving the M3 half broken
+while writing the correct M4 half would be indefensible.
+
+What is reused is **rows only**, copied into the new snapshot positions. Rows are addressed by
+chunk position, so a reused document whose chunks moved must have its rows copied to the new
+positions; with the sequence conjunct, ordinal *is* that mapping. If the old generation has no
+vectors, or its array failed validation, or its row count does not match, the whole corpus
+re-embeds — a wrong row order silently attaches one document's vector to another.
 
 **No cross-document dedupe (V-12).** Two documents that share a `ChunkId` and a title produce
 identical rows; M4 still writes two, exactly as postings are per occurrence (§3.4 of M3). Deduping
 would need a second key and a second index to undo it, for a saving that only exists in corpora
-full of copied documents. Recorded as a known, harmless redundancy.
+full of copied documents. Recorded as a known, harmless redundancy. Note what follows: "identical
+`ChunkId` and title produce identical rows" is **not** a claim this plan makes, because identical
+`ChunkId`s with different titles or different line endings do **not** (V-23); see §9's correction
+to D24/D48, which phrased the old contract more strongly than the code can honour.
 
 **Acceptance** (each compares the incremental result with a clean rebuild: identical snapshot after
 normalising `built_at`, identical `vectors.f32` bytes, and the named counter):
@@ -465,6 +560,16 @@ normalising `built_at`, identical `vectors.f32` bytes, and the named counter):
 7. **Two documents, identical bodies, different titles** → two rows, and the rows differ.
 8. **`--rebuild`** → `embedded_chunks == total chunks`, and the published `vectors.f32` is
    byte-identical to case 7's clean build.
+9. **EOL rewrite (V-23).** A CRLF file rewritten with LF, and a file whose trailing spaces are
+   stripped, each keep every `ChunkId` and change every embedded text → that document re-embeds
+   and **nothing is reused**; a clean rebuild's `vectors.f32` is byte-identical to the incremental
+   one. The M3 counterpart asserts `retokenized_chunks == chunks(doc)` for the same rewrite, which
+   pins the `content_hash` conjunct in both predicates.
+10. **Section reorder (V-24).** Swap two sections of one body (same text, same heading paths, new
+    order) → the document re-embeds or its rows are re-permuted so that **row *i* still belongs to
+    chunk *i***; the published array equals a clean rebuild's byte for byte. The token half of the
+    same test asserts the reordered document's term frequencies follow their own chunks, which is
+    the M3 fix.
 9. **Vectors and index stay in step**: after every incremental build, `vectors.len() ==
    snapshot.chunks.len()`, and for every row *i*, `snapshot.chunks[i].doc` names a document whose
    span/text produced it. Asserted structurally over the whole fixture and by a property test over
@@ -525,30 +630,54 @@ needed beyond a floor, it is a milestone of its own.
 ### 3.6 Degradation, as a matrix rather than a sentence
 
 `degraded` is the field SPEC §9.4 puts in every response; the matrix below is what each state
-writes into it. `α` is what the scorer receives.
+writes into it. `α` is what the scorer receives. The rows are keyed on the **resolved** embedder
+(§3.2's dispatch table), never on the build flag alone: `hash-64` resolves even when the feature is
+off, and `enabled = false` degrades even when it is on.
 
-| State | `janus index` | `janus search` | α | `degraded` entry |
-|---|---|---|---|---|
-| Feature off | lexical generation, **no** `vectors.f32` | lexical | 0.0 | `embeddings not compiled; lexical only` |
-| Feature on, `[embedding] enabled = false` | lexical generation | lexical | 0.0 | `embeddings disabled in janus.toml; lexical only` |
-| Feature on, model files absent | lexical generation, one stderr line naming the directory | lexical | 0.0 | `model not found in <dir>; lexical only` |
-| Feature on, model present | generation with vectors | hybrid | 0.65 | *(empty)* |
-| `--no-embeddings` on `index` | lexical generation; an existing `vectors.f32` is **removed** after the manifest rename | — | — | — |
-| `--no-embeddings` on `search`/`facts` | — | lexical, `.janus/` untouched | 0.0 | `--no-embeddings: lexical only` |
-| Index has no vectors, embeddings available | — | stale → rebuild (one `stale:` line) | 0.65 | *(empty after the rebuild)* |
+| # | State | `janus index` | `janus search` | α | `degraded` entry |
+|---|---|---|---|---|---|
+| 1 | No embedder resolved (feature off, `enabled = false`, or model absent) | lexical generation | lexical | 0.0 | the resolving reason: `embeddings not compiled; lexical only` / `embeddings disabled in janus.toml; lexical only` / `model not found in <dir>; lexical only` |
+| 2 | Embedder resolved | generation with vectors | hybrid | 0.65 | *(empty)* |
+| 3 | No embedder on **this build** (feature off, disabled, or `--no-embeddings`) while the previous generation had vectors | **carry the rows forward; drop `vectors.f32` only if a document changed** (below) | — | — | — |
+| 4 | `--no-embeddings` on `search`/`facts` | — | lexical; `.janus/` written **only** by an S-8 build, which is published without vectors | 0.0 | `--no-embeddings: lexical only` |
+| 5 | Index has no vectors, embedder resolved | — | stale → rebuild (one `stale:` line) | 0.65 | *(empty after the rebuild)* |
+| 6 | **Index has vectors, no embedder resolved** | row 3's rule | **loads, never rebuilds** | 0.0 | reason from row 1 |
 
-The last row is a decision (V-21), not an accident. `Expected.embedder` is the id this process
-*would* embed with, or `None` when it cannot; a generation built without vectors therefore fails
-`Expected::check` for a process that can embed, and S-8's existing rule rebuilds it. The
-alternatives are worse: silently serving α = 0 when the user has embeddings is a lie, and treating
-`None` as fresh forever means vectors never appear without a manual `--rebuild`. The cost is one
-model load and one build, announced on one stderr line. `--no-rebuild` still refuses and writes
-nothing.
+**V-21 is one-directional, and that is the fix rather than a caveat.** The first draft said
+"`Expected.embedder` is the id this process would embed with, or `None` when it cannot", and
+evaluated it as plain equality. A feature-off binary reading a vectors-bearing generation would
+then compare `None` against `Some(id)`, rebuild without vectors, **delete `vectors.f32`**, and hand
+the featured binary a generation it must rebuild and re-embed (SPEC §13: ≤60 s, 307 MB). Two
+binaries on one machine would ping-pong the cache forever, and the matrix had no row for the state
+that starts it. The rule is therefore an ordering, not an equality:
+
+```
+manifest.embedder == Some(id)  ∧  resolved == None      →  acceptable (row 6): load, α = 0, say why
+manifest.embedder == None      ∧  resolved == Some(id)  →  stale   (row 5): rebuild once, then stable
+manifest.embedder == Some(a)   ∧  resolved == Some(b)   →  stale when a ≠ b (different vectors)
+```
+
+A generation that *has* vectors is never stale for a process that cannot embed: the vectors are
+strictly more information than that process is reading, and rebuilding would destroy them. A
+generation *without* vectors is stale for a process that can embed, because otherwise vectors would
+never appear without a manual `--rebuild`; the cost is one model load and one build, announced on
+one `stale:` line, and `--no-rebuild` still refuses and writes nothing.
+
+**Row 3: carry vectors forward, drop only what cannot be carried.**
+The first draft removed `vectors.f32` unconditionally, which turns one degraded `janus index` into
+a full re-embed for the next featured run. Instead the build reuses rows exactly as P4 does, and
+the file is removed **only when at least one document's rows cannot be carried forward** (its
+`content_hash` or chunk sequence changed). The manifest then says `embedder: None`, and one stderr
+line says `vectors dropped: N document(s) changed and this build cannot embed`. If nothing changed,
+the vectors survive a degraded `index` untouched — which is also why row 6 is safe.
 
 `--no-embeddings` means two different things and the plan says so in one place (V-14): on `index` it
-*is* a statement about the generation ("do not write vectors"), and on `search`/`facts` it is a
-statement about the query ("do not use them"), with `.janus/` left byte-identical. A single flag
-that silently rewrote the cache on a read would be the worse of the two.
+*is* a statement about the generation, and on `search`/`facts` it is a statement about the query.
+Row 4's honesty note: a **first** `janus search --no-embeddings` has no index, so S-8 builds one
+and `.janus/` is written — the row says "touches nothing except an S-8 build" rather than the
+first draft's "touch nothing", which was false and which DoD 9 asserted. The alternative (making
+`--no-embeddings` on a read imply `--no-rebuild`) couples two unrelated things: a user who asks not
+to *use* vectors has not asked not to *build* an index.
 
 ### 3.7 The move-detection correction
 
@@ -588,13 +717,20 @@ Windows cross-check ever sees `tantivy` (which pulls a C-toolchain compression b
 tree). If the gate ever says "swap", `tantivy` becomes a real dependency with a real justification
 and the script is retired; until then it is a measurement, not a dependency.
 
-**Fixed preconditions, so the comparison means something:** same corpus, same chunk texts
-(`janus chunks --json --text` feeds both), same 35 queries with the same graded expectations, same
-`nDCG@10` and `FixedClock(2025-04-01)`, same document-level grading (a document's score is its max
-chunk, M3 §3.1), `tantivy`'s own tokenizer and default BM25 — i.e. **out-of-the-box tantivy against
-out-of-the-box janus**, which is the swap decision anybody would actually face. Differences in
-tokenization are part of the result, not a bug to normalise away. The script prints both numbers
-with denominators and the ratio.
+**Fixed preconditions, so the comparison means something:** same corpus, same chunk texts, same 35
+queries with the same graded expectations, same `nDCG@10` and `FixedClock(2025-04-01)`, same
+document-level grading (a document's score is its max chunk, M3 §3.1), `tantivy`'s own tokenizer and
+default BM25 — i.e. **out-of-the-box tantivy against out-of-the-box janus**, which is the swap
+decision anybody would actually face. Differences in tokenization are part of the result, not a bug
+to normalise away. The script prints both numbers with denominators and the ratio.
+
+**"Same chunk texts" means the whole text, so the baseline cannot use `--text`.**
+`chunk::dump` renders a preview capped at `PREVIEW_CHARS = 120` with whitespace collapsed
+(`src/chunk/dump.rs`), so `janus chunks --json --text` would hand `tantivy` a 120-character prefix
+while janus scores the whole chunk — and the difference would then be attributed to BM25. The
+baseline crate depends on `janus-mem` by path and calls `chunk_body` + `Chunk::embed_text` directly,
+so both systems index byte-identical text. That is also why it is a crate and not a shell script:
+the chunker is the thing that must not be re-implemented.
 
 ## 4. Decisions
 
@@ -610,69 +746,95 @@ with denominators and the ratio.
 | V-8 | Cosine | `dot` over unit rows, clamped to `[0,1]`; a zero row scores 0.0, never `NaN`. | `src/index/vectors.rs`, `score.rs` |
 | V-9 | Admission rule | `relevance > 0`, not `lexical > 0`. This is what lets a semantic-only match enter, and what makes α = 0 exactly M3. | `src/search/mod.rs` |
 | V-10 | α | `[embedding] alpha`, default `0.65`, clamped to `[0,1]` with a config warning; `0.0` whenever there is no embedder. `α = 0` is the exact M3 path. | `src/config.rs`, `src/search/mod.rs` |
-| V-11 | Vector reuse key | Per document: `vec_key = blake3(embedder_id ‖ title)` + chunk-id set + chunk count + validated previous vectors. **Never `ChunkId` alone** — it excludes the title, which is in the embedded text. | `src/index/build.rs` |
-| V-12 | Cross-document vector dedupe | None in M4. One row per chunk occurrence, mirroring postings; a copied document is embedded twice. | `src/index/build.rs` |
-| V-13 | The `embeddings` feature | **Not default.** `fastembed` is optional; the Windows cross-check and default `cargo test` never build it. No download, ever; the model is read from disk or the build degrades. | `Cargo.toml`, `src/index/embed.rs` |
-| V-14 | `--no-embeddings` | On `index`: publish a lexical generation and remove `vectors.f32`. On `search`/`facts`: α = 0 and **touch nothing** on disk. | `src/cli.rs`, `src/index/cmd.rs`, `src/search/mod.rs` |
+| V-11 | Vector reuse key | Per document: `vec_key = blake3(EmbedderId::to_bytes() ‖ 0x00 ‖ title)` **+ `content_hash` + the chunk-id sequence + a validated previous generation**. **Never `ChunkId` alone** — it excludes the title and it hashes normalised text while `embed_text` is raw. | `src/index/build.rs` |
+| V-12 | Cross-document vector dedupe | None in M4. One row per chunk occurrence, mirroring postings; a copied document is embedded twice. "Same `ChunkId` and title ⇒ identical row" is **not** claimed: different line endings break it (V-23). | `src/index/build.rs` |
+| V-13 | The `embeddings` feature | **Not default.** `fastembed` is optional; the Windows cross-check and default `cargo test` never build it. **No runtime download and no socket**; the model is read from disk or the build degrades. The feature job's build may fetch `ort` (§6). | `Cargo.toml`, `src/index/embed.rs` |
+| V-14 | `--no-embeddings` | On `index`: publish lexically, **carrying vectors forward** and dropping them only when a document's rows cannot be carried. On `search`/`facts`: α = 0, and `.janus/` written only by an S-8 build. | `src/cli.rs`, `src/index/cmd.rs`, `src/search/mod.rs` |
 | V-15 | `facts --query` under hybrid | **Lexical only** (α = 0). `facts` is a listing of authoritative facts whose order is authority; semantic narrowing would surface every active decision for any query. Recorded as reversible if the eval disagrees. | `src/search/facts.rs` |
 | V-16 | Rayon / parallel top-k | **Not in M4.** Scalar `chunks_exact(dim)` fold; the sweep prints the latency. A measurement that needs parallelism is an M8 decision, and SPEC's "rayon top-k" row moves there. | §9 |
 | V-17 | Where quality is measured | CI keeps the lexical report; the hybrid number is a local acceptance run with a real model; the α sweep is the instrument; the fixture is a smoke test only. No quality floor in `cargo test`. | §3.5, `scripts/eval.sh` |
 | V-18 | The `tantivy` baseline | `scripts/baseline/`, a standalone crate outside the dependency graph, run by hand and by `scripts/eval.sh --baseline`. D20's gate is read from its output. | `scripts/baseline/` |
 | V-19 | Report shape | `search --json` gains a top-level `alpha` and `degraded` becomes a list of reasons; `scores.semantic` becomes non-zero. Additive, so `api` stays `1`. | `src/search/mod.rs` |
 | V-20 | Embedder identity vs model weights | `EmbedderId` = name/dim/dtype/normalisation. The model file is not hashed (100 ms/process); swapping weights under the same name needs `--rebuild`, documented. | `src/index/embed.rs` |
-| V-21 | A vectors-less generation seen by a process that can embed | **Stale** → rebuild with one `stale: embedder … != embedder none` line; `--no-rebuild` refuses. | `src/index/store.rs` |
+| V-21 | Embedder staleness is an **ordering**, not an equality | `Some(id)` manifest + no embedder resolved → **acceptable**, load at α = 0 with the reason in `degraded` (row 6). `None` manifest + an embedder resolved → stale, rebuild once (row 5). Both `Some` and different → stale. This is what stops a feature-off binary and a featured one from deleting each other's vectors. | `src/index/store.rs` |
+| V-22 | Cache-key encoding | `EmbedderId::to_bytes()` length-prefixes every field (as `chunk_id`/`lex_key` already do); `vec_key` cites that one function. A bare concatenation lets `"hash"+"-64"` and `"hash-"+"64"` collide. | `src/index/embed.rs`, `build.rs` |
+| V-23 | `ChunkId` is not a proxy for the embedded text | `chunk_id` hashes `normalize(text)`; `embed_text` appends the raw span, and prepends the title. So the vector predicate carries `content_hash` (raw bytes) and `vec_key` carries the title. An EOL-only rewrite re-embeds. | `src/index/build.rs` |
+| V-24 | The chunk comparison is a **sequence** | `old_chunks.iter().map(|c| c.id).eq(new.iter().map(|c| c.id))`, because a set plus a count permits a reorder and rows are copied by ordinal. The identical tightening lands in M3's `build::reusable` for tokens in the same PR (P4): shipped code currently reuses the wrong term frequencies after a section reorder. | `src/index/build.rs` |
+| V-25 | Model directories are an argument | `resolve(&Config, &ModelDirs)`; `ModelDirs` is built in `main` from `[embedding] model_dir` → `JANUS_MODEL_DIR` → the cache dir. No `std::env` below `main`, which is what makes the no-env test possible. | `src/main.rs`, `src/index/embed.rs` |
 
 ## 5. Phases
 
-Five phases. Each is one PR, branched from `main` after the previous merge. The seams are chosen so
-that no phase needs a model to be reviewable, and so that the two genuinely risky pieces — the
-two-file publication (P1) and the blend (P2) — do not share a diff.
+Five phases, **six PRs** — phase 1 is P1a + P1b (§8). Each PR is branched from `main` after the
+previous merge. The seams are chosen so that no phase needs a model to be reviewable, and so that
+the two genuinely risky pieces — the two-file publication (P1b) and the blend (P2) — do not share a
+diff.
 
-**Budget note, from M3's own log.** Both M3's phase 5 and phase 6 measured roughly 2× their written
-estimate, and phase 6 had to split into four PRs after the fact (W-1). The estimates below are
-therefore stated as upper bounds with a named split seam, and the rule is: **if a phase measures
-over ~450 logic lines before tests, split it along the seam in the same session rather than
-discovering it at `scripts/pr-size.sh` time.**
+**Budget note, from M3's own log, with the real factors.** M3's phase 5 measured **597** logic
+lines against a ~200 estimate (**3.0×**), and phase 6 measured **1384** against ~320 (**4.3×**) and
+had to split into four PRs after the fact (W-1). "Roughly 2×" was the first draft's summary and it
+understated the error by half. So: the estimates below are upper bounds with a named split seam,
+**P1 is already split into two PRs** rather than hoped to fit, and the rule is: **if a phase
+measures over ~450 logic lines before tests, split it along the seam in the same session rather
+than discovering it at `scripts/pr-size.sh` time.**
 
 ### Phase 1 — `Embedder`, `HashEmbedder`, `vectors.f32`, two-file publication
 
+**Two PRs, not one (P1a, P1b), because review round 1 showed the estimate was the M3 mistake
+again.** P1 contains everything M3's phase 5 contained — six-stage publication, unique temps,
+reader retry, recovery — *plus* a new binary format, a trait, and a manifest change. M3 measured
+that protocol at **597** logic lines against a ~200 estimate. An "~430" estimate for strictly more
+work is not an upper bound, it is a hope. The split is along the protocol boundary P-9 already
+recommended: **P1a is the pure modules** (`embed.rs`, `vectors.rs`, no I/O, unit tests), **P1b is
+the store protocol** (manifest, publication stages, reader validation, recovery tests).
+
 **Goal:** the format and the trait, end to end through the real binary, with no model and no
-scoring change. After this phase `janus index` can write a `vectors.f32` and a reader can load and
-validate it; nothing uses the vectors yet, so a regression is a storage bug and nothing else.
+scoring change. After these two PRs `janus index` can write a `vectors.f32` and a reader can load
+and validate it; nothing uses the vectors yet, so a regression is a storage bug and nothing else.
 
 **Files:** `src/index/embed.rs` (new), `src/index/vectors.rs` (new), `src/index/mod.rs`,
 `src/index/store.rs`, `src/index/build.rs` (plumbing only), `src/config.rs` (the `hash` model name
-and `model_dir`), `src/lib.rs`, `tests/publish.rs`, `tests/vectors.rs` (new).
+and `model_dir`), `src/lib.rs`, `src/main.rs` (`ModelDirs`), `tests/publish.rs`,
+`tests/vectors.rs` (new).
 
-**Build (~430 logic lines):**
-1. `EmbedderId`, `Embedder`, `EmbedError`, `HashEmbedder` (blake3 bucket + sign, tokenizer terms,
-   normalise), `embed::resolve` returning `Ready`/`Degraded` (V-5, V-6, V-13).
-2. `vectors.rs`: `Vectors::{new, encode, decode, row, len, dim}`, `normalize`, `dot`, and the
-   §3.1 validation set. `to_le_bytes`/`from_le_bytes` over `chunks_exact(4)`; no `unsafe`, no
+**Build (~430 logic lines, P1a ~200 + P1b ~230):**
+1. **P1a.** `EmbedderId` with `to_bytes()` (V-22), `Embedder`, `EmbedError`, `HashEmbedder`
+   (blake3 bucket + sign, tokenizer terms, normalise), `EmbedderId` → `ConfigWarning` for the test
+   double (§3.2 table).
+2. **P1a.** `vectors.rs`: `Vectors::{new, encode, decode, row, len, dim}`, `normalize`, `dot`, and
+   the §3.1 validation set. `to_le_bytes`/`from_le_bytes` over `chunks_exact(4)`; no `unsafe`, no
    `transmute`, no `bytemuck` (M8).
-3. `Manifest`: `embedder: Option<EmbedderId>`, `vectors_sha`, `vectors_len`; `format_version = 2`;
-   `Expected` compares the embedder id and the manifest's three-way consistency.
-4. `store::publish`: three new `Stage`s, `vectors.f32` written and renamed first, manifest last,
-   `vectors_sha` from the bytes actually written, and the best-effort removal of a stale
-   `vectors.f32` when the new generation has none.
-5. `store::load`: `want_vectors` + `embedder` in `LoadOptions`; read, hash, decode and validate
-   `vectors.f32` when wanted; the retry/refuse outcomes of V-3 with the file name in the message.
-6. `build::plan` carries `Option<Vectors>` through unchanged (produced by an embedder only in
-   tests this phase); `Publication.vectors`; `BuildStats` counters default to zero.
-7. `main.rs`: resolve the embedder **once**, pass it down; the CLI gains `--no-embeddings` on
+3. **P1a.** `embed::resolve(&Config, &ModelDirs)` returning `Ready`/`Degraded` for the dispatch
+   table's three rows (V-5, V-6, V-13, V-25).
+4. **P1b.** `Manifest`: `embedder: Option<EmbedderId>`, `vectors_sha`, `vectors_len`;
+   `format_version = 2`; `Expected` implements **V-21's ordering** (acceptable / stale / stale) and
+   checks the manifest's three-way consistency.
+5. **P1b.** `store::publish`: three new `Stage`s, `vectors.f32` written and renamed first, manifest
+   last, `vectors_sha` from the bytes actually written, and the **carry-forward** rule of row 3 of
+   §3.6: a generation without vectors keeps the old file when every row can be carried, and removes
+   it (with one stderr line) only when one cannot.
+6. **P1b.** `store::load`: `want_vectors` + `embedder` in `LoadOptions`; read, hash, decode and
+   validate `vectors.f32` when wanted; the retry/refuse outcomes of V-3 with the file name in the
+   message; row 6 of §3.6 (vectors-bearing generation, no embedder) never rebuilds.
+7. **P1b.** `build::plan` carries `Option<Vectors>` through unchanged (produced by an embedder only
+   in tests this phase); `Publication.vectors`; `BuildStats` counters default to zero; `main.rs`
+   builds `ModelDirs` and resolves the embedder **once**; the CLI gains `--no-embeddings` on
    `index` only (V-14, `search`/`facts` in P2).
 
 **Tests (~380 lines):** `Vectors` round-trip and validation (wrong length, non-multiple-of-4,
 `NaN`, `inf`, wrong row count, un-normalised row, `dim = 0`); `dot`/`normalize` hand-computed
-values including the zero row and `cos(a,a) = 1`; `HashEmbedder` determinism, unit norm,
-`cos(a,a)`/ordering properties, empty text; `resolve` degradation for each absent-model case with
-no network; publication stage order (vectors before index before manifest) through
-`publish_with_hook`; a reader at every stage still sees one validated generation; the four rows of
-the §3.1 recovery table, with the post-interruption states **built directly** (never by racing a
-publisher); a flipped byte, a truncation, a zeroed file and a missing `vectors.f32` each rebuild
-with one cause and exit 0, while `--no-rebuild` refuses and leaves `.janus/` byte-identical;
-`format_version = 1` is refused with a warning; `want_vectors = false` never opens the file
-(asserted by deleting it and reading successfully).
+values including the zero row and `cos(a,a) = 1`; `EmbedderId::to_bytes` distinguishes
+`("hash","-64")` from `("hash-","64")`; `HashEmbedder` determinism, unit norm, `cos(a,a)`/ordering
+properties, empty text; `resolve` for every row of the dispatch table, including that `hash-64`
+resolves with the feature off and that an absent model directory degrades without a socket;
+publication stage order (vectors before index before manifest) through `publish_with_hook`; a
+reader at every stage still sees one validated generation; **every row of the §3.1 table in both
+"wants vectors" and "lexical only" form**, with the post-interruption states **built directly**
+(never by racing a publisher); flipped byte, truncation, zeroed file, missing `vectors.f32`, wrong
+row count; `format_version = 1` refused with a warning; `want_vectors = false` never opens the file
+(asserted by deleting it and reading successfully); **row 6**: a feature-free read of a
+vectors-bearing generation loads, reports `degraded`, and leaves `.janus/` byte-identical; **row 3**:
+a degraded `index` with no document changes leaves `vectors.f32` byte-identical, and one with a
+changed document drops it with exactly one stderr line.
 
 **Handoff (paste):** "Implement Phase 1 of M4 for janus-mem per `docs/m4-breakdown.md` §3.1, §3.2
 and Phase 1. Read `src/index/store.rs` (publication + reader) and `docs/m3-breakdown.md` §3.5
@@ -683,10 +845,13 @@ network. A bad vector row fails the publish; a corrupt file rebuilds. Tests buil
 directly and never sleep. Record deviations in the M4 phase log, not a new journal."
 
 **Accept:** `cargo test --all-targets` green; a `janus index` writes a `vectors.f32` whose
-`blake3` matches the manifest and whose row count equals `chunks`; `--no-embeddings` writes none
-and removes an existing one; the Windows cross-check green with default features.
-**Split seam if over budget:** P1a = `embed.rs` + `vectors.rs` + unit tests (pure, no I/O),
-P1b = manifest + publication + reader + integration tests.
+`blake3` matches the manifest and whose row count equals `chunks`; `--no-embeddings` on an unchanged
+corpus **keeps** the existing file and on a changed one removes it with one line; the Windows
+cross-check green with default features.
+
+**Split seam, now permanent:** P1a = `embed.rs` + `vectors.rs` + their unit tests (pure, no I/O);
+P1b = manifest + publication + reader + integration tests. Both are in §8's table with their own
+estimates.
 
 ---
 
@@ -703,21 +868,30 @@ report fields), `src/search/facts.rs` (α = 0, V-15), `src/config.rs` (alpha + c
 
 **Build (~260 logic lines):** query embedding (one call, `None` for an empty query); the semantic
 scan (`chunks_exact(dim)` fold, V-16); α resolution (`[embedding] alpha`, clamp + warning, `0.0`
-without an embedder); the V-9 admission change; `degraded` as `Vec<String>` and the top-level
-`alpha` in the report (V-19); `Options.no_embeddings`; `want_vectors` wiring; the fixture config
-gains `[embedding] model = "hash-64"` so the corpus is hermetic and hybrid end to end.
+without an embedder); the V-9 admission change; the reworded "more matched" note and the
+per-candidate cost measurement (§3.3); `degraded` as `Vec<String>` and the top-level `alpha` in the
+report (V-19); `Options.no_embeddings`; `want_vectors` wiring; the fixture config gains
+`[embedding] model = "hash-64"` so the corpus is hermetic and hybrid end to end — which is safe
+because `HashEmbedder` compiles without the feature and `resolve` warns that it is a test double
+(§3.2).
 
 **Tests (~340 lines):** table-driven α endpoint and midpoint values against hand-computed
 `relevance` (including the five rows of §3.3); `relevance` recomputed from the JSON DTO for every
-hit and compared within `1e-12`; **α = 0 is score-identical to M3** — `search --json
---no-embeddings` has a `results` array byte-identical to the committed snapshot under the same
-redactions, with `alpha` and `degraded` as the only permitted differences;
+hit of **the hybrid golden** and compared within `1e-12` (on the α = 0 golden the identity reduces
+to `relevance == lexical` and would pass with a broken formula); **α = 0 is score-identical to
+M3** — `search --json --no-embeddings` has a `results` array byte-identical to the M3 snapshot
+under the same redactions, with `alpha` and `degraded` as the only permitted differences;
 a semantic-only document is admitted at α = 0.65 and is absent at α = 0; the zero-row document
 scores `semantic = 0` with no `NaN`; an empty query calls no embedder and leaves `semantic = 0`;
-`facts` reports `alpha = 0` and its `--query` narrowing is unchanged; the degradation matrix's rows
-are each asserted through the CLI (feature-off is the default build, so this is the common case);
-`degraded` is empty with a working embedder; the golden `search --json` is regenerated and its diff
-reviewed field by field.
+`facts` reports `alpha = 0` and its `--query` narrowing is unchanged; every row of §3.6's matrix is
+asserted through the CLI, with the rows that need a real model marked `#[ignore]`d and named in P3's
+handoff; `degraded` is empty with a working embedder; the reworded "more matched" note is asserted
+verbatim.
+
+**Two snapshots, not one.** `tests/golden_search.rs` keeps the M3 file as the α = 0 reference
+(`search_no_embeddings`, regenerated once for `alpha`/`degraded` only) and adds
+`search_hybrid` for the default intent at α = 0.65 with `semantic > 0`. A single snapshot cannot be
+both "unchanged from M3" and "regenerated for hybrid", and the first draft asked it to be both.
 
 **Handoff (paste):** "Implement Phase 2 of M4 per `docs/m4-breakdown.md` §3.3, §3.6 and Phase 2.
 `semantic = clamp(dot,0,1)` over unit rows; `relevance = α·semantic + (1−α)·lexical`; **admission
@@ -726,8 +900,8 @@ not with a new one. α comes from `[embedding] alpha` (default 0.65, clamped wit
 `0.0` without an embedder. `facts --query` stays lexical. Report a top-level `alpha` and make
 `degraded` a list of reasons. No wall clock, no sleeps, no quality floor in `cargo test`."
 
-**Accept:** all §3.3 rows green; α = 0 score-identical to M3 (`results` array unchanged); clippy
-clean; the golden diff is only the fields P2 intends to move.
+**Accept:** all §3.3 rows green; α = 0 score-identical to M3 (`results` array unchanged); both
+goldens reviewed; clippy clean; the golden diff is only the fields P2 intends to move.
 
 ---
 
@@ -742,11 +916,18 @@ any test's network path.
 
 **Build (~300 logic lines):** `#[cfg(feature = "embeddings")] pub mod fastembed`; `FastEmbed`
 holding the model, an `EmbedderId { dim, dtype: "f32", normalisation: "l2" }`, and `embed()`
-delegating to the model; model resolution from `[embedding] model_dir` → `JANUS_MODEL_DIR` →
-fastembed's cache dir, **read-only, no download** (V-13); batching in `build` driven by
-`[embedding] batch_size` with one progress line per build (never per batch); a `CountingEmbedder`
-test wrapper that records batch sizes and text lengths; error mapping so a model failure names the
-path and the embedder.
+delegating to the model; model resolution **from `ModelDirs`** (V-25), **read-only, no download**
+(V-13); batching in `build` driven by `[embedding] batch_size` with one progress line per build
+(never per batch); a `CountingEmbedder` test wrapper that records batch sizes and text lengths;
+error mapping so a model failure names the path and the embedder.
+
+**How the feature job gets `ort`, stated so "no network" is not a false claim.** `fastembed` →
+`ort` fetches a prebuilt ONNX Runtime archive during the **build**. That is a build-time dependency,
+not a runtime one, and it is why the feature is non-default. Phase 3 names exactly one job that is
+allowed to reach the network (`embeddings`, ubuntu, `cargo check`/`clippy`/`test --features
+embeddings`), and `SWATINEM/rust-cache` caches the result so it is not fetched every run. If the
+archive cannot be fetched in CI, the fallback is `ort`'s system-library path against a
+preinstalled runtime, recorded as a decision; the default path never depends on it.
 
 **Tests (~180 lines):** `resolve` returns `Degraded` for each absent-model case and never blocks or
 downloads; batching splits by `batch_size`, preserves order, and sends every chunk exactly once
@@ -758,15 +939,17 @@ stated rather than pretended.
 
 **Handoff (paste):** "Implement Phase 3 of M4 per `docs/m4-breakdown.md` §3.2 and Phase 3. The
 `embeddings` feature is **not** default: the Windows cross-check and default `cargo test` must
-never build `fastembed`. **No download path anywhere** — model files are read from disk or the
-build degrades with a reason naming the directory it looked in. Batch by `[embedding]
-batch_size`; validate every row (dim, finite, norm) and fail the publish on a violation. CI gets a
-feature job that runs `cargo check`/`clippy --all-targets --features embeddings` on Linux; Windows
-stays feature-free. Tests use `CountingEmbedder`, never a real model, never the network."
+never build `fastembed`. **No runtime download and no socket** — model files are read from
+`ModelDirs` or the build degrades with a reason naming the directory it looked in; the only
+network use is the `embeddings` CI job fetching the `ort` archive at build time. Batch by
+`[embedding] batch_size`; validate every row (dim, finite, norm) and fail the publish on a
+violation. CI gets the `embeddings` job for `cargo check`/`clippy --all-targets`/`cargo test
+--features embeddings` on Linux; Windows stays feature-free. Tests use `CountingEmbedder`, never a
+real model."
 
 **Accept:** `cargo check --all-targets` (no features) and `cargo check --all-targets --features
 embeddings` both green; the Windows cross-check green without the feature; `cargo test
---all-targets` green on both feature sets with no network.
+--all-targets` green on both feature sets, with no test opening a socket.
 
 ---
 
@@ -779,32 +962,40 @@ checkable numbers rather than claims.
 previous vectors), `src/index/cmd.rs` (receipt, `--dry-run` planning), `src/search/mod.rs`
 (`LoadOptions` plumbing), `tests/cli_index.rs`, `tests/incremental.rs` (new).
 
-**Build (~280 logic lines):** `vec_key`; the document-level reuse predicate of §3.4; row copying by
-ordinal into the new positions; `embedded_chunks`/`reused_vector_chunks`; `plan` becomes fallible
+**Build (~280 logic lines):** `EmbedderId::to_bytes` feed into `vec_key` (V-22); the two-part reuse
+predicate of §3.4 — `content_hash`, `vec_key`, and the **chunk-id sequence** (V-23, V-24); row
+copying into the new positions; `embedded_chunks`/`reused_vector_chunks`; `plan` becomes fallible
 (the embedder can fail) and every caller updates; `--dry-run` computes the reuse decision and
 reports `would_embed` **without calling the embedder**; the receipt gains `dim`, `embedded`,
 `reused_vectors`, `vectors_bytes`; `--rebuild` drops the previous vectors as well as the previous
 snapshot.
 
-**Tests (~380 lines):** the nine acceptance cases of §3.4, each comparing incremental against a
-clean rebuild (snapshot equality after normalising `built_at`, byte equality of `vectors.f32`, and
+**Tests (~380 lines):** the **eleven** acceptance cases of §3.4, each comparing incremental against
+a clean rebuild (snapshot equality after normalising `built_at`, byte equality of `vectors.f32`, and
 the named counter); case 5 (derived-title rename re-embeds) is the §3.7 correction pinned as a test,
-and case 2 (tags-only edit re-embeds nothing) is the counterweight; the in-step assertion over the
-whole fixture plus a property test that generates random document edits and checks
-`vectors.len() == chunks.len()` and row-to-chunk correspondence after every incremental build; a
-tampered previous generation (wrong row count, un-normalised row) forces a full re-embed rather than
-a silently misaligned array; `--dry-run` writes nothing and reports a non-zero `would_embed` after a
-body edit.
+case 2 (tags-only edit re-embeds nothing) is the counterweight, and cases 9–10 (EOL rewrite,
+section reorder) are the two defects review round 1 found the predicate missing; **two** reorder
+tests — one for vectors, one asserting M3's `build::reusable` now compares the id sequence rather
+than a set, so a reordered document's term frequencies follow their own chunks; the in-step
+assertion over the whole fixture plus a property test that generates random document edits and
+checks `vectors.len() == chunks.len()` and row-to-chunk correspondence after every incremental
+build; a tampered previous generation (wrong row count, un-normalised row) forces a full re-embed
+rather than a silently misaligned array; `--dry-run` writes nothing and reports a non-zero
+`would_embed` after a body edit.
 
 **Handoff (paste):** "Implement Phase 4 of M4 per `docs/m4-breakdown.md` §3.4 and Phase 4. Reuse is
-per document and keyed on `vec_key = blake3(embedder_id ‖ title)` **plus** the chunk-id set and the
-chunk count — `ChunkId` alone is wrong because it excludes the title, which is in `embed_text`.
-Reused rows are copied by ordinal into the new snapshot positions; a row is addressed by chunk
-position, so a misalignment is the worst bug this milestone can produce — assert the invariant after
-every build. `--dry-run` never calls the embedder. Deviations go in the phase log."
+per document and keyed on **all three**: `content_hash` (raw bytes — `ChunkId` hashes *normalised*
+text while `embed_text` is raw), `vec_key = blake3(EmbedderId::to_bytes() ‖ 0x00 ‖ title)` (the title
+because `ChunkId` excludes it), and the **chunk-id sequence** (a set plus a count permits a reorder,
+and rows are copied by position). Apply the same sequence tightening to M3's `build::reusable` for
+tokens in this PR; a reordered document currently keeps the wrong term frequencies on the wrong
+spans. A row is addressed by chunk position, so a misalignment is the worst bug this milestone can
+produce — assert the invariant after every build. `--dry-run` never calls the embedder. Deviations
+go in the phase log."
 
-**Accept:** nine acceptance cases green; a second `janus index` reports `embedded 0`; a
-single-document body edit reports `embedded = chunks(that doc)`; the receipt is stable across runs.
+**Accept:** eleven acceptance cases green; a second `janus index` reports `embedded 0`; a
+single-document body edit reports `embedded = chunks(that doc)`; an EOL-only rewrite re-embeds and
+reuses nothing; a section reorder leaves row *i* on chunk *i*; the receipt is stable across runs.
 
 ---
 
@@ -843,8 +1034,11 @@ in §10–§14."
 
 ## 6. Cross-cutting requirements
 
-- **No network, anywhere.** Not in the crate, not in tests, not in CI (§10 of SPEC). Model files are
-  read from disk; absence is a stated degradation, never a download.
+- **No network at runtime.** No socket and no model download in the crate or its tests (§10 of
+  SPEC). Model files are read from `ModelDirs`; absence is a stated degradation. The **one**
+  exception is the `embeddings` CI job, whose *build* fetches the `ort` archive; the first draft's
+  "not in CI" made that job and this rule mutually exclusive, so the rule now says what it means.
+  No other job, and no test, reaches the network.
 - **No `unsafe`, no `bytemuck`, no `transmute`.** `f32` bytes are converted with
   `to_le_bytes`/`from_le_bytes` over `chunks_exact(4)`.
 - **Determinism.** No float `==`; `HashEmbedder` and the normaliser are deterministic by
@@ -878,22 +1072,29 @@ Blocking (CI / `cargo test`):
 3. **§3.7's conditional is pinned both ways.** A pure rename with a declared `title:` reports
    `embedded_chunks == 0`; a pure rename with a derived title re-embeds exactly that document and
    nothing else.
-4. **α = 0 is score-identical to M3.** The `results` array of `search --json --no-embeddings` is
-   byte-identical to the M3 golden under the same redactions, with `alpha` and `degraded` as the
-   only permitted differences; and `relevance == α·semantic + (1−α)·lexical` holds for every hit
-   of every committed golden within `1e-12`.
+4. **α = 0 is score-identical to M3, and the hybrid golden is where the formula is checked.** The
+   `results` array of `search --json --no-embeddings` is byte-identical to the M3 snapshot under the
+   same redactions, with `alpha` and `degraded` as the only permitted differences; and
+   `relevance == α·semantic + (1−α)·lexical` holds within `1e-12` for every hit of the **hybrid**
+   golden, where α = 0.65 and `semantic > 0`. Checking the identity only on the α = 0 golden would
+   reduce it to `relevance == lexical` and pass with a broken formula.
 5. **A semantic-only match is admitted and ranks.** A fixture chunk that shares no query term but
    has a non-zero cosine appears at α = 0.65 and is absent at α = 0.
-6. **The two files are one generation.** A new-vectors/old-index pair, a new-index/old-manifest
-   pair, a flipped byte, a truncated file, a missing file, a wrong row count, a `NaN` row and an
-   un-normalised row each either rebuild with one cause line and exit 0, or refuse under
-   `--no-rebuild` while leaving `.janus/` byte-identical. Never a panic, never a silent misalignment.
+6. **The two files are one generation**, in **both** read modes. A new-vectors/old-index pair, a
+   new-index/old-manifest pair, a flipped byte, a truncated file, a missing file, a wrong row count,
+   a `NaN` row and an un-normalised row each either rebuild with one cause line and exit 0, or
+   refuse under `--no-rebuild` while leaving `.janus/` byte-identical. A **lexical-only** read of the
+   new-vectors/old-index state loads, because the pair it validated agrees with itself (V-4). Never
+   a panic, never a silent misalignment.
 7. **`format_version = 2`.** An index built by M3 is refused with a warning and rebuilt; an index
    built by M4 is never read as v1.
-8. **Vectors and index stay in step** after every incremental build (§3.4 case 9), asserted
-   structurally over the fixture and by a property test over generated edits.
+8. **Vectors and index stay in step** after every incremental build (§3.4 cases 9–10), asserted
+   structurally over the fixture and by a property test over generated edits; an EOL-only rewrite
+   re-embeds, and a section reorder leaves row *i* on chunk *i*.
 9. **Degradation is the matrix of §3.6**, one row per state, asserted through the CLI, including
-   `--no-embeddings` on all three commands and the vectors-less-generation rebuild (V-21).
+   `--no-embeddings` on all three commands, the vectors-less-generation rebuild (V-21 row 5), the
+   vectors-bearing generation read by a non-embedding binary (row 6, which must **not** rebuild),
+   and a degraded `index` that carries vectors forward (row 3).
 10. **No network, no wall clock, no sleeps.** `tests/no_wall_clock.rs` stays green; no test opens a
     socket or reads a model.
 11. **Gates:** `cargo fmt --all --check`; `cargo clippy --all-targets -- -D warnings`; the same two
@@ -921,17 +1122,52 @@ upper bounds; the seam column says where to split **in the same session** if the
 
 | PR | Branch | Logic est. | Tests est. | Why it splits here | Split seam |
 |---|---|---|---|---|---|
-| P1 | `m4-vectors` | ~430 | ~380 | The format plus the two-file publication: the only new correctness risk that is not about ranking. | P1a pure modules / P1b store protocol |
+| P1a | `m4-embed-vectors` | ~200 | ~200 | Pure modules: `EmbedderId`, the trait, `HashEmbedder`, `Vectors` encode/decode/validate. No I/O, so no recovery test and no chance of a storage bug hiding a trait bug. | none needed; if it exceeds ~300, the hashing double ships separately |
+| P1b | `m4-two-file-publish` | ~230 | ~380 | The protocol: manifest fields, three new stages, dual-hash validation, V-21's ordering, the carry-forward rule. M3 measured this protocol at 597 lines on its own; here it is the smaller half because P1a carries the format. | manifest + stages / reader + recovery |
 | P2 | `m4-hybrid` | ~260 | ~340 | The ranking contract; a mistake here is invisible in a green suite, so it gets its own diff. | α + admission / report + goldens |
 | P3 | `m4-fastembed` | ~300 | ~180 | Build, portability and model-availability risk, isolated from scoring and storage. | `fastembed` module / CI matrix |
-| P4 | `m4-incremental-vectors` | ~280 | ~380 | The cache contract and the row-alignment invariant; belongs beside P1's format, not inside it. | `vec_key` + reuse / receipt + `--dry-run` |
+| P4 | `m4-incremental-vectors` | ~280 | ~380 | The cache contract and the row-alignment invariant, including M3's sequence tightening. | reuse predicate / receipt + `--dry-run` |
 | P5 | `m4-eval-baseline` | ~150 | ~260 | Measurements and prose; changes shared eval files and SPEC, so it lands alone. | sweep / baseline script |
 
-Total ≈ 1 420 logic lines across five PRs, every one under the 600 ceiling with room for review
-fixes. Compare M3: ~1 580 across six. If the review adds a contract (it will — M2 and M3 both did),
-the added work goes to the phase that owns the contract, not to a new phase.
+Total ≈ 1 420 logic lines across **six** PRs on five phases, every one under the 600 ceiling with
+room for review fixes. P1 is two PRs on the strength of M3's measurement, not on the strength of
+this estimate; a phase estimating "~430" and containing M3's 597-line protocol plus a new file
+format is not an upper bound. If the review adds a contract (it will — M2, M3 and round 1 here all
+did), the added work goes to the phase that owns the contract, not to a new phase.
 
-## 9. SPEC corrections and gaps
+## 9. Review round 1, SPEC corrections, and gaps
+
+### 9.0 Review round 1 — resolutions
+
+One independent reviewer (pi, `deepseek-v4.1-flash`, read-only, briefed to verify claims against the
+code rather than trust the plan) returned 15 findings and the verdict *needs another round*. Every
+finding was re-verified here before being accepted; none was rejected. The three blockers were real
+defects in the first draft, and two of them were defects in **shipped M3 code** that M4's predicate
+was about to copy.
+
+| # | Finding (short) | Resolution | Where |
+|---|---|---|---|
+| 1 | `vec_key` misses `content_hash`: `ChunkId` hashes *normalised* text while `embed_text` is *raw*, so an EOL-only rewrite reuses stale vectors | **Accepted, blocker.** `content_hash` is the first conjunct; new decision V-23; acceptance case 9 (EOL rewrite); `reuse_vectors` re-ordered cheapest-first. | §3.4, §3.7, V-11/V-23, P4 |
+| 2 | "Copied by ordinal" + a set-based predicate misaligns rows after a section reorder | **Accepted, blocker.** The comparison is the chunk-id **sequence**; acceptance case 10. The same hole exists in M3's `build::reusable` for **tokens** — P4 fixes both. | §3.4, V-24, P4 |
+| 3 | V-21 is one-directional, and the missing direction makes a feature-off and a featured binary delete each other's vectors | **Accepted, blocker.** Embedder staleness is an ordering, not an equality; row 6 added to the matrix; degraded `index` carries vectors forward and drops only what it cannot carry. | §3.6, V-14/V-21, P1, DoD 9 |
+| 4 | `resolve`'s model dispatch was undefined; `hash-64` + feature-off contradicted "feature off ⇒ no vectors" | **Accepted.** Explicit dispatch table, keyed on the *resolved* embedder; `hash-64` always compiles, is selectable, and warns that it is a test double. | §3.2, §3.6, P2 |
+| 5 | The §3.1 recovery table ignored V-4: a lexical-only read of "new vectors, old index" loads | **Accepted.** The table has two "next read" columns; the lexical path loads the consistent pair it validated, and DoD 6 asserts both modes. | §3.1, DoD 6 |
+| 6 | DoD 4 asked one golden to be both unchanged and regenerated, so its identity check was vacuous | **Accepted.** Two snapshots: `search_no_embeddings` (the M3 reference) and `search_hybrid` (where the α identity is asserted at α = 0.65 with `semantic > 0`). | §7, P2 |
+| 7 | Three of the thirteen SPEC corrections were already in the SPEC; item 2 over-claimed `--dry-run` | **Accepted.** Items 4/5/7 rewritten to name only what is missing, `--dry-run` removed from item 2. | §9.1 |
+| 8 | The plan contradicts D24, D48, `m3-breakdown` §3.4 and `m2-breakdown` CH-10 on the embedding cache, and corrects none | **Accepted.** Four corrections added; the honest phrasing is "`ChunkId` is the content component of the key, not the whole key". | §3.4, §9.1 items 14–17 |
+| 9 | "No network in CI" contradicts the feature job that fetches `ort` at build time | **Accepted.** The rule is scoped to runtime; the `embeddings` job is the one named exception and its fetch path is stated. | §6, P3 |
+| 10 | The baseline cannot get the same chunk texts: `--text` truncates at 120 characters | **Accepted.** The baseline crate calls `chunk_body`/`embed_text` through the library instead of parsing a preview. | §3.8, P5 |
+| 11 | `relevance > 0` admits nearly every chunk, so M3's "more matched" note becomes a corpus count and the per-candidate cost is unaccounted | **Accepted.** The note names its basis; the per-candidate cost is named and measured; the two-pass fix is pre-declared, not implemented (D29). | §3.3, P2 |
+| 12 | The budget rationale said "roughly 2×" when M3 measured 3.0× and 4.3×; P1 did not survive its own data | **Accepted.** Real factors stated; P1 is now two PRs (P1a/P1b) in §8, estimated from the protocol's steps. | §5, §8 |
+| 13 | `embed::resolve` read `JANUS_MODEL_DIR` below `main`, contradicting the plan's own no-env rule | **Accepted.** `ModelDirs` is built in `main` and passed in (V-25). | §3.2, §6, V-25 |
+| 14 | "touch nothing on disk" is false when the index is absent and S-8 auto-builds | **Accepted.** The row says "touches nothing except an S-8 build", and the alternative (implying `--no-rebuild`) is rejected with a reason. | §3.6, V-14 |
+| 15 | `vec_key` has no canonical byte encoding, and two spellings disagreed | **Accepted.** `EmbedderId::to_bytes()` with length-prefixed fields, cited from both places (V-22). | §3.4, V-11/V-22 |
+
+Nothing was rejected. That is not a sign the review was perfect; it is a sign the first draft was
+long enough to hide three alignment bugs behind prose that read confidently — which is the same
+failure M3's review round found, one milestone later.
+
+### 9.1 SPEC corrections and gaps
 
 None of these is an edit in *this* PR: this PR is the plan. Each is either a correction the code
 already implies, or a gap the M4 implementation PR should close with one line.
@@ -942,57 +1178,77 @@ already implies, or a gap the M4 implementation PR should close with one line.
    Move "exact-hash move detection (`path_history`)" to §11-M5 (§6.9 already assigns move handling
    there). Reason: §3.7 — the condition is only true when the document declares a `title:`.
 2. **§11-M4's list is partly M3.** "`Index` metadata via `bincode`", "incremental reindex" and
-   "`janus index`" shipped in M3 (D13, S-6, S-9). Delete them from M4 and add the two things M4
-   actually adds: hybrid scoring and vector reuse.
+   "`janus index`" shipped in M3 (D13, S-6, S-9). Delete them and add the two things M4 actually
+   adds: hybrid scoring and vector reuse.
 3. **§11-M4's "<10 ms warm at 100k chunks" is an aspiration, not this milestone's gate** (§13 calls
    single-digit ms aspirational and forbids optimizing before measurement). Restate it as a printed
    measurement at 200k chunks with the two-file read path, and put the target where §13 already puts
    it: p50 ≤ 100 ms.
-4. **§8.3 does not describe `vectors.f32`'s bytes.** Add: headerless, little-endian `f32`,
-   row-major, row *i* = chunk *i*, `dim`/`len`/`sha` in the manifest, no padding; and that a
-   generation is validated over **both** payloads because a new-vectors/old-index pair is otherwise
+4. **§8.3's `vectors.f32` comment is true and incomplete.** It already says "raw little-endian f32,
+   row-major, L2-normalized, dim known". What is missing: **headerless**, **row *i* = snapshot
+   chunk *i*** (`vectors_sha`/`vectors_len` in the manifest), no padding, and that a generation is
+   validated over both payloads because a new-vectors/old-index pair is otherwise
    indistinguishable from a good one.
-5. **§8.3's rebuild-trigger list** gains "an embedder id, dim, dtype or normalisation mismatch" and
-   "a `vectors_sha` mismatch observed by a reader".
+5. **§8.3's rebuild triggers are nearly complete** — it already lists `embedder`/dim/dtype
+   mismatch. Add only what it lacks: a normalisation mismatch, and "a `vectors_sha` mismatch
+   observed by a reader".
 6. **§8.3.1's heap budget is exceeded by M4's load path** (~307 MB at 200k × 384, §3.1). Add one
    sentence saying the whole array is read onto the heap until M8's mmap, so the table describes
    M8 and not M4. Without it, the next reader concludes the code violates the spec.
-7. **§7.2 does not say that α is configurable or what it is when there is no embedder.** Add: α is
-   `[embedding] alpha`, default `0.65`, and `0.0` whenever no embedder is available.
-8. **§7.2 does not state the admission rule.** Wrap the cosine formula and the clamped range in
-   SPEC's own words, then add: "a chunk is a candidate when `relevance > 0`, so a semantic-only
-   match can enter the result set" — a real behaviour change from lexical-only that the spec should
-   contain.
+7. **§7.2 gives α = 0.65 and "0.0 if no embedder" but never says α is configurable.** Add: α is
+   `[embedding] alpha`; the default is the number §7.2 already states; it is clamped to `[0,1]` with
+   a config warning.
+8. **§7.2 does not state the admission rule.** Add after the formula block: "a chunk is a candidate
+   when `relevance > 0`, so a semantic-only match can enter the result set" — a real behaviour
+   change from lexical-only that the spec should contain.
 9. **§7.2's `"lexical": 12.4` in the §9.4 example is raw BM25**, while the code reports the
    normalised `[0,1]` value (M3 S-5). Fix the example; it is the one place where a reader
    implementing against the spec would get the DTO's meaning wrong.
 10. **§8.2 lists `fastembed` as "Feature `embeddings`" without saying whether it is default, and
-    D22 says the model is downloaded separately.** Add: **non-default** feature, and **no download
-    from inside the tool in M4** — the model is read from `JANUS_MODEL_DIR`/`[embedding] model_dir`
-    or the build degrades. This is the row that keeps the Windows gate honest.
+    D22 says the model is downloaded separately.** Add: **non-default** feature; **no runtime
+    download** — the model is read from `JANUS_MODEL_DIR`/`[embedding] model_dir` or the build
+    degrades. This is the row that keeps the Windows gate honest.
 11. **§11-M4 and §12.1 name `rayon`; M4 does not use it.** Move "rayon top-k" and the "concurrency
     without the GIL / rayon over 200k dot products" learn row to M8, together with the measurement
     that would justify them (V-16). M4's learn target is traits, `dyn`, `Send + Sync` and Cargo
     features.
 12. **§9.1 lists `--no-embeddings` on `index` only**, and M3 did not implement it. M4 implements it
-    on `index` *and* adds it to `search`/`facts`; §9.1 plus one sentence in §3.6
-    (of this plan) is the contract.
+    on `index` *and* adds it to `search`/`facts`; §9.1 plus §3.6 of this plan is the contract.
 13. **§8.3.1's "Document text: 0 B" stays true, but vectors are a derived copy of text.** One
     sentence in §8.5 or §8.6 saying that `.janus/vectors.f32` is derived from document content and
     is covered by the same "never vault content" rule as the rest of `.janus/`, since a vector is a
     lossy encoding of the passage.
+14. **D24 over-states what the cache can do.** It says "embedding cache reuse across edits, moves,
+    and copies becomes automatic and identity-free". True of the *content*; not sufficient: the
+    embedded text also contains the effective title and the raw line endings, so the cache key is
+    `content_hash` + `vec_key` + the chunk-id sequence — `ChunkId` is the content component, not
+    the key. **Proposed SPEC edit:** one clause in D24's rationale.
+15. **D48's rationale cites a property M4 has to qualify.** "Content-addressing by text is what
+    makes the embedding cache free across edits, moves, renames and copies" — free across *content*
+    edits, and free across renames only when the title does not change with them (§3.7). Input that
+    is not normalised (CRLF) is not free either. **Proposed SPEC edit:** replace "free" with "free
+    whenever the embedded text is unchanged", and point at §11-M4's corrected sentence.
+16. **`docs/m3-breakdown.md` §3.4 lists `ChunkId`'s purpose as "embedding cache, cross-references,
+    span lookup".** Two of three hold. The plan must not leave a merged document asserting that M4
+    keys its cache on `ChunkId` alone. **Proposed edit in the M4 phase-5 docs commit:** change it to
+    "content identity, the content component of the embedding-cache key, cross-references, span
+    lookup".
+17. **`docs/m2-breakdown.md` CH-10 says "the M4 embedding cache dedupes by id".** V-12 says it
+    does not dedupe at all in M4, and V-23 says two identical ids need not produce identical rows.
+    **Proposed edit in the M4 phase-5 docs commit:** "…and the M4 vector table keeps one row per
+    occurrence, so a repeated id is harmless there too".
 
 Remaining open questions this plan does **not** resolve, listed so they are not silently decided:
 
-14. **Should `--diversity`/MMR ever arrive?** §7.2 keeps it optional and off; §3.1 of M3 keeps one
+18. **Should `--diversity`/MMR ever arrive?** §7.2 keeps it optional and off; §3.1 of M3 keeps one
     hit per document. With vectors available, MMR becomes cheap to implement — and it is still not
     in any milestone. It needs a product decision (does a caller want two passages from one
     document?), not a technical one.
-15. **A real-vault eval corpus.** `tests/eval/queries.jsonl` is 35 fixture queries over 18
+19. **A real-vault eval corpus.** `tests/eval/queries.jsonl` is 35 fixture queries over 18
     keyword-rich documents (M3 W-10). The α decision (§3.5) is taken on the author's vault, which
     means it is not reproducible in CI. If the number ever needs to gate anything, the eval corpus
     becomes a milestone.
-16. **Model-file integrity.** V-20 records the cost argument for not hashing the weights. If M8
+20. **Model-file integrity.** V-20 records the cost argument for not hashing the weights. If M8
     finds a cheap partial hash acceptable, it becomes a manifest field and a rebuild trigger.
 
 ## 10. Implementation log — Phase 1 (trait, `vectors.f32`, publication)
