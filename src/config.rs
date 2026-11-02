@@ -715,6 +715,13 @@ pub enum ConfigWarning {
         /// The configured value.
         value: String,
     },
+    /// `[embedding] model` resolved to the built-in test double rather than a
+    /// semantic model (§3.2). Its vectors are a bag of tokens, so it is fine
+    /// for plumbing and unusable for calibration.
+    TestDoubleEmbedder {
+        /// The configured model name, e.g. `hash-64`.
+        model: String,
+    },
 }
 
 impl fmt::Display for ConfigWarning {
@@ -738,6 +745,10 @@ impl fmt::Display for ConfigWarning {
             Self::InvalidCorpusId { value } => write!(
                 f,
                 "corpus_id `{value}` should be non-empty and contain no ':' and no whitespace"
+            ),
+            Self::TestDoubleEmbedder { model } => write!(
+                f,
+                "`model = {model}` is a test double; its vectors are bag-of-words, not semantic"
             ),
         }
     }

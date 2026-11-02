@@ -877,9 +877,13 @@ and `model_dir`), `src/lib.rs`, `src/main.rs` (`ModelDirs`), `tests/publish.rs`,
    double (§3.2 table).
 2. **P1a.** `vectors.rs`: `Vectors::{new, encode, decode, row, len, dim}`, `normalize`, `dot`, and
    the §3.1 validation set. `to_le_bytes`/`from_le_bytes` over `chunks_exact(4)`; no `unsafe`, no
-   `transmute`, no `bytemuck` (M8).
+   `transmute`, no `bytemuck` (M8). `Vectors::is_empty` accompanies `len` (clippy's
+   `len_without_is_empty`); an empty payload is a valid zero-row generation.
 3. **P1a.** `embed::resolve(&Config, &ModelDirs)` returning `Ready`/`Degraded` for the dispatch
-   table's three rows (V-5, V-6, V-13, V-25).
+   table's three rows (V-5, V-6, V-13, V-25). **P1a implements the feature-off column only**;
+   P3 owns the feature-on arms and their tests. Its one `config.rs` edit is the
+   `ConfigWarning::TestDoubleEmbedder` variant, emitted by `resolve` through `tracing` because the
+   fixed `Resolved` return type has no warnings channel (P1a-4).
 4. **P1b.** `Manifest`: `embedder: Option<EmbedderId>`, `vectors_sha`, `vectors_len`;
    `format_version = 2`; `Expected` implements **V-21's ordering** (acceptable / stale / stale) and
    checks the manifest's three-way consistency. `DocMeta.body_hash` lands here too — a layout field
@@ -1421,8 +1425,27 @@ Remaining open questions this plan does **not** resolve, listed so they are not 
 
 ## 10. Implementation log — Phase 1 (trait, `vectors.f32`, publication)
 
-_Nothing recorded yet. Decisions taken during implementation go here as `V-*` rows with a one-line
-why, and any deviation from this plan is amended in the plan text in the same PR._
+### P1a — the embedder trait and the payload format
+
+Branch: `bb/m4-p1a-embedder-trait-vectors-f32-thr_za9nny6u2i`. Scope is `src/index/embed.rs` and
+`src/index/vectors.rs` (new), their unit tests, one public-API round-trip in `tests/vectors.rs`,
+the module declarations in `src/index/mod.rs`, and the one `ConfigWarning` variant in
+`src/config.rs` noted below. No store, build, search, CLI, manifest, feature or dependency change:
+P1b owns the publication protocol and P3 owns the `fastembed` module.
+
+| ID | decision | why |
+|---|---|---|
+| P1a-1 | `EmbedderId::to_bytes` writes, in declaration order, a little-endian `u64` length followed by each field's bytes: `name`, `dim` (`u32` LE), `dtype`, `normalisation`. | V-22 requires an unambiguous length-prefixed encoding. `u64` matches `chunk_id`'s existing text prefix; prefixing `dim` too means a future field cannot shift an old decode. |
+| P1a-2 | `HashEmbedder` takes the bucket from the first 8 digest bytes as a little-endian `u64` modulo `dim`, and the sign from bit 0 of digest byte 8. | The bucket and sign each depend only on `blake3(term)`, so iteration order cannot affect the row; integer counts plus one index-order norm pass keep the bytes deterministic. |
+| P1a-3 | `HashEmbedder::new(dim)` returns `Option<Self>` and refuses `dim == 0`; `resolve` reports `hash-0` as `"invalid model"`. | §3.1 requires `dim > 0`; a zero-dimension id cannot describe a valid `vectors.f32` generation, so refusal is safer than an embedder every writer must reject. |
+| P1a-4 | Added `ConfigWarning::TestDoubleEmbedder` in `src/config.rs`; `EmbedderId::config_warning` constructs it and `resolve` logs it with `tracing::warn!`. | §3.2 requires the `hash-64` warning, but no existing variant means it, and the fixed `Resolved` signature cannot return warnings. This is the only `config.rs` edit in P1a, narrower than the combined P1 file list expected. |
+| P1a-5 | `resolve` implements the dispatch table's feature-off column. A non-`hash-<n>` model degrades to `"not compiled"`, and the detail names the configured model directories. | P3 owns the `fastembed` module, so fabricating feature-on behaviour now would need a fake feature or a test-only branch. Naming the directories keeps the degradation diagnostic useful without opening them. |
+| P1a-6 | A zero-row `Vectors` is valid, and `is_empty` exists beside `len`. | An empty corpus has an empty payload rather than a missing one, and clippy's `len_without_is_empty` is part of the `-D warnings` gate. |
+| P1a-7 | `Vectors::decode` keeps `chunks_exact(4)` with a documented `clippy::chunks_exact_to_as_chunks` allow. | The phase text names `chunks_exact(4)`, and the constant width is checked by the alignment rule immediately above; the allow records the plan reference instead of silently changing the mechanism. |
+| P1a-8 | `normalize` returns a non-finite norm without dividing and leaves the row untouched. | It keeps the helper total for an unchecked caller; the read path rejects non-finite values first, so no writer can publish such a row. |
+| P1a-9 | Review fix: pin `HashEmbedder::new(4)` over `"a b"` to a literal row instead of versioning the `hash-<n>` name in §3.2. | A literal makes any bucket or sign change fail loudly, and the `HashEmbedder` docs now say such a change must also change the name so P4's reuse key cannot accept old vectors. Keeping `hash-<n>` stable avoids a config/fixture rename in P1b. |
+| P1a-10 | Review fix: every `hash-`-prefixed model name that does not parse as a positive `u32` degrades to `"invalid model"`, not `"not compiled"`. | The `embeddings` feature cannot fix a typo or an overflowing dimension, so the reason must name the configuration error. |
+| P1a-11 | Review fix: `dot` debug-asserts equal widths and keeps the release `zip`. | P2's `dot(q_vec, row)` with vectors from two models is a bug; truncating it would produce a plausible wrong score. Both widths come from one `EmbedderId`, so debug builds can assert it at no release cost. |
 
 ## 11. Implementation log — Phase 2 (hybrid scoring)
 

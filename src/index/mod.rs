@@ -13,7 +13,9 @@
 //! output.
 //!
 //! This module contains no I/O. The phase-4 snapshot in [`store`] persists
-//! exactly these values, and [`build`] rebuilds them incrementally.
+//! exactly these values, and [`build`] rebuilds them incrementally. The M4
+//! embedding seam lives in [`embed`], and the separate flat payload format it
+//! writes lives in [`vectors`].
 //!
 //! [`LexicalIndex`]: crate::index::LexicalIndex
 //! [`LexicalIndex::build`]: crate::index::LexicalIndex::build
@@ -27,8 +29,10 @@ use crate::id::{Blake3Hash, ChunkId, DocId};
 
 pub mod build;
 pub mod cmd;
+pub mod embed;
 mod lexical;
 pub mod store;
+pub mod vectors;
 
 pub use lexical::{LexicalIndex, squash};
 
