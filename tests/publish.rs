@@ -21,9 +21,11 @@ use janus_mem::config::{Config, resolve_index_dir};
 use janus_mem::error::JanusError;
 use janus_mem::index::Snapshot;
 use janus_mem::index::build::{self, BuildPlan, BuildStats};
+use janus_mem::index::embed::{Embedder, HashEmbedder};
 use janus_mem::index::store::{
     self, INDEX_FILE, Load, LoadOptions, Lock, MANIFEST_FILE, Policy, Publication, Stage,
 };
+use janus_mem::index::vectors::{VECTORS_FILE, Vectors};
 use janus_mem::vault::{self, WalkOptions, identity, resolve};
 
 /// A pinned build time, so no manifest in this file depends on the clock.
@@ -68,27 +70,33 @@ fn index_dir(root: &Path) -> PathBuf {
 /// A clean build from the vault: the independent oracle a recovery is compared
 /// against, not the code under test.
 fn clean_plan(root: &Path) -> BuildPlan {
+    plan_with(root, None)
+}
+
+/// The same, embedding every chunk through `embedder` when there is one.
+fn plan_with(root: &Path, embedder: Option<&dyn Embedder>) -> BuildPlan {
     let config = config(root);
     let walk = vault::walk(root, &config, WalkOptions::default()).expect("walk the vault");
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, &config);
     identity::derive_identity(&mut documents, &config);
-    build::plan(&config, &documents, None)
+    build::plan(&config, &documents, None, embedder).expect("the fixture documents build")
 }
 
-fn publish(root: &Path, plan: &BuildPlan) {
-    publish_hooked(root, plan, &mut |_stage| {});
+fn publish(root: &Path, plan: &BuildPlan) -> store::Manifest {
+    publish_hooked(root, plan, &mut |_stage| {})
 }
 
-fn publish_hooked(root: &Path, plan: &BuildPlan, hook: &mut dyn FnMut(Stage)) {
+fn publish_hooked(root: &Path, plan: &BuildPlan, hook: &mut dyn FnMut(Stage)) -> store::Manifest {
     let dir = index_dir(root);
     let publication = Publication {
         dir: &dir,
         root,
         snapshot: &plan.snapshot,
         chunker: plan.chunker,
+        vectors: plan.vectors.as_ref(),
         built_at: BUILT_AT,
     };
-    store::publish_with_hook(&publication, hook).expect("publish");
+    store::publish_with_hook(&publication, hook).expect("publish")
 }
 
 fn load(root: &Path, config: &Config) -> Load {
@@ -478,4 +486,174 @@ fn the_index_rename_precedes_the_manifest_rename() {
         index_rename < manifest_rename,
         "the manifest must be renamed last"
     );
+}
+
+// ──────────────────────── the two-file generation (§3.1) ────────────────────
+
+/// The deterministic test double, constructed directly: these cases are about
+/// the store protocol, and `resolve` is covered by its own unit tests.
+fn embedder() -> HashEmbedder {
+    HashEmbedder::new(64).expect("64 is a valid dimension")
+}
+
+fn vectors_path(root: &Path) -> PathBuf {
+    index_dir(root).join(VECTORS_FILE)
+}
+
+#[test]
+fn publish_writes_the_payload_its_manifest_describes() {
+    let vault = temp_vault(&[
+        ("a.md", "Alpha", "alpha cache body"),
+        ("b.md", "Beta", "beta store body"),
+    ]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    let plan = plan_with(&root, Some(&embedder));
+    assert_eq!(
+        plan.stats.embedded_chunks,
+        plan.snapshot.chunks.len(),
+        "P1b embeds every chunk on every build"
+    );
+    let manifest = publish(&root, &plan);
+
+    // 2 documents × 1 chunk × 64 dims × 4 bytes, derived by hand.
+    let bytes = fs::read(vectors_path(&root)).expect("the payload exists");
+    assert_eq!(bytes.len(), 2 * 64 * 4);
+    assert_eq!(manifest.vectors_len, Some(bytes.len() as u64));
+    assert_eq!(manifest.chunks, 2);
+    assert_eq!(
+        manifest.vectors_sha,
+        Some(blake3::hash(&bytes).to_hex().to_string()),
+        "vectors_sha names the bytes actually written"
+    );
+    assert_eq!(manifest.embedder.as_ref(), Some(embedder.id()));
+
+    let rows = plan
+        .vectors
+        .as_ref()
+        .expect("a plan with an embedder")
+        .rows();
+    let decoded = Vectors::decode(&bytes, 64, plan.snapshot.chunks.len())
+        .expect("the published payload validates against the manifest's shape");
+    assert_eq!(&decoded, rows, "row i belongs to chunk i");
+}
+
+#[test]
+fn the_vectors_rename_precedes_the_index_and_manifest_renames() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    publish(&root, &plan_with(&root, Some(&embedder)));
+
+    write_doc(&root, "b.md", "Beta", "alpha store body");
+    let post = plan_with(&root, Some(&embedder));
+    let dir = index_dir(&root);
+    let old_index = fs::read(dir.join(INDEX_FILE)).expect("read the old index");
+    let old_manifest = fs::read(dir.join(MANIFEST_FILE)).expect("read the old manifest");
+    let post_sha = post
+        .vectors
+        .as_ref()
+        .map(|set| blake3::hash(&set.rows().encode()).to_hex().to_string())
+        .expect("vectors");
+
+    let mut stages = Vec::new();
+    {
+        let mut hook = |stage: Stage| {
+            stages.push(stage);
+            if stage == Stage::VectorsRenamed {
+                // The new payload is visible while the pair the manifest names
+                // is still the previous generation: row 2 of §3.1's table.
+                let on_disk = fs::read(dir.join(VECTORS_FILE)).expect("read new vectors");
+                assert_eq!(blake3::hash(&on_disk).to_hex().to_string(), post_sha);
+                assert_eq!(
+                    fs::read(dir.join(INDEX_FILE)).expect("read index"),
+                    old_index
+                );
+                assert_eq!(
+                    fs::read(dir.join(MANIFEST_FILE)).expect("read manifest"),
+                    old_manifest
+                );
+            }
+        };
+        publish_hooked(&root, &post, &mut hook);
+    }
+
+    assert_eq!(
+        stages,
+        [
+            Stage::VectorsWritten,
+            Stage::VectorsRenamed,
+            Stage::VectorsDirSynced,
+            Stage::IndexWritten,
+            Stage::IndexRenamed,
+            Stage::IndexDirSynced,
+            Stage::ManifestWritten,
+            Stage::ManifestRenamed,
+            Stage::ManifestDirSynced,
+        ],
+        "vectors first, index next, manifest (the commit record) last"
+    );
+}
+
+/// The embedder name the on-disk manifest currently records, if any.
+fn on_disk_embedder(root: &Path) -> Option<String> {
+    let path = index_dir(root).join(MANIFEST_FILE);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read the manifest"))
+            .expect("the manifest is JSON");
+    manifest["embedder"]["name"].as_str().map(str::to_owned)
+}
+
+#[test]
+fn a_degraded_publish_drops_the_payload_after_the_commit_record() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    publish(&root, &plan_with(&root, Some(&embedder)));
+    let payload = vectors_path(&root);
+    assert!(payload.exists());
+
+    let plan = clean_plan(&root);
+    let mut stages = Vec::new();
+    {
+        let mut hook = |stage: Stage| {
+            stages.push(stage);
+            if stage == Stage::VectorsDropped {
+                assert!(!payload.exists(), "the drop is the last stage");
+                return;
+            }
+            // A reader that wants vectors must never meet a manifest naming a
+            // file that is already gone. The old manifest is authoritative
+            // until its rename, and the payload outlives it by one step.
+            assert!(
+                payload.exists(),
+                "{stage:?}: the payload vanished before the commit record changed"
+            );
+            if matches!(stage, Stage::ManifestRenamed | Stage::ManifestDirSynced) {
+                assert_eq!(on_disk_embedder(&root), None, "{stage:?}");
+            } else {
+                assert_eq!(
+                    on_disk_embedder(&root).as_deref(),
+                    Some("hash-64"),
+                    "{stage:?}: the old manifest still names the payload"
+                );
+            }
+        };
+        publish_hooked(&root, &plan, &mut hook);
+    }
+
+    assert_eq!(
+        stages,
+        [
+            Stage::IndexWritten,
+            Stage::IndexRenamed,
+            Stage::IndexDirSynced,
+            Stage::ManifestWritten,
+            Stage::ManifestRenamed,
+            Stage::ManifestDirSynced,
+            Stage::VectorsDropped,
+        ],
+        "a degraded publish removes the payload only after the commit record"
+    );
+    assert!(!payload.exists());
 }

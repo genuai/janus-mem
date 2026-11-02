@@ -15,10 +15,12 @@ use std::path::Path;
 use crate::chunk::{Chunk, chunk_body};
 use crate::config::Config;
 use crate::document::Document;
-use crate::id::{ChunkId, DocId};
+use crate::id::{Blake3Hash, ChunkId, DocId};
 use crate::tokenize::{Stemmer, Tokenizer, TokenizerFingerprint, Tokens};
 
-use super::store::{Corrupt, Manifest};
+use super::embed::Embedder;
+use super::store::{Corrupt, Manifest, Payloads, VectorSet};
+use super::vectors::{Vectors, normalize};
 use super::{
     ChunkMeta, ChunkingFingerprint, DocMeta, LexicalIndex, Posting, Snapshot, StringId, StringPool,
     TermMeta,
@@ -33,6 +35,11 @@ pub struct BuildStats {
     pub reused_documents: usize,
     /// Documents whose chunks were tokenized again.
     pub rebuilt_documents: usize,
+    /// Chunks that actually went through `Embedder::embed`.
+    pub embedded_chunks: usize,
+    /// Rows copied from the previous generation. Always zero in P1b: the reuse
+    /// predicate and the carry-forward belong to P4.
+    pub reused_vector_chunks: usize,
 }
 
 /// A snapshot plus its build statistics, before anything is written.
@@ -44,6 +51,9 @@ pub struct BuildPlan {
     pub stats: BuildStats,
     /// The chunker fingerprint the manifest should record.
     pub chunker: ChunkingFingerprint,
+    /// The rows to publish beside the snapshot, or `None` when no embedder was
+    /// resolved (§3.1).
+    pub vectors: Option<VectorSet>,
 }
 
 impl BuildPlan {
@@ -54,35 +64,56 @@ impl BuildPlan {
     /// [`Corrupt`] when the snapshot cannot be encoded.
     pub fn manifest(&self, root: &Path, built_at: &str) -> Result<Manifest, Corrupt> {
         let bytes = self.snapshot.to_bytes()?;
+        let vectors = self.vectors.as_ref().map(|set| set.artifact().1);
         Ok(Manifest::new(
             root,
             &self.snapshot,
             self.chunker,
-            blake3::hash(&bytes).to_hex().to_string(),
-            bytes.len() as u64,
+            Payloads {
+                index_sha: blake3::hash(&bytes).to_hex().to_string(),
+                index_len: bytes.len() as u64,
+                vectors,
+            },
             built_at,
         ))
     }
 }
 
 /// Computes the next snapshot, reusing tokens where §3.4 allows.
+///
 /// An invalid `previous` is treated as absent; computing a plan performs no I/O.
-#[must_use]
-pub fn plan(config: &Config, docs: &[Document], previous: Option<&Snapshot>) -> BuildPlan {
-    plan_forced(config, docs, previous, &BTreeSet::new())
+/// Every chunk is embedded on every build (§5 P1b item 7): reuse, `body_hash`
+/// and the carry-forward arrive in P4.
+///
+/// # Errors
+///
+/// [`Corrupt`] when the embedder breaks its contract (wrong row count, wrong
+/// width, a non-finite value). The build publishes nothing in that case: a
+/// substituted zero row would be invisible quality loss (§3.2 V-7).
+pub fn plan(
+    config: &Config,
+    docs: &[Document],
+    previous: Option<&Snapshot>,
+    embedder: Option<&dyn Embedder>,
+) -> Result<BuildPlan, Corrupt> {
+    plan_forced(config, docs, previous, &BTreeSet::new(), embedder)
 }
 
 /// [`plan`] with a set of documents whose tokens must be recomputed anyway.
 ///
 /// `janus index PATHS` uses this for a targeted refresh: reuse still applies to
 /// every other document, so the index stays complete and the save is real.
-#[must_use]
+///
+/// # Errors
+///
+/// Exactly [`plan`]'s.
 pub fn plan_forced(
     config: &Config,
     docs: &[Document],
     previous: Option<&Snapshot>,
     force: &BTreeSet<DocId>,
-) -> BuildPlan {
+    embedder: Option<&dyn Embedder>,
+) -> Result<BuildPlan, Corrupt> {
     let tokenizer = Tokenizer::new();
     let tokenizer_fp = tokenizer.fingerprint();
     let chunker = ChunkingFingerprint {
@@ -109,6 +140,10 @@ pub fn plan_forced(
     let mut stats = BuildStats::default();
     let mut tokens = Tokens::default();
     let mut drafts = Vec::with_capacity(ordered.len());
+    // Every chunk's embedded text, in snapshot order: row `i` of `vectors.f32`
+    // belongs to chunk `i`, so this sequence is the payload's key. P4 replaces
+    // the unconditional walk with the §3.4 reuse predicate.
+    let mut embed_texts = Vec::new();
 
     for doc in ordered {
         let (chunks, _notes) = chunk_body(doc.id, &doc.body, &config.chunking);
@@ -139,6 +174,7 @@ pub fn plan_forced(
         let old_range = old_match.map(|(_, old_doc)| old_doc.chunk_range);
         let mut chunk_drafts = Vec::with_capacity(chunks.len());
         for (ordinal, chunk) in chunks.iter().enumerate() {
+            let text = chunk.embed_text(&doc.body, &doc.title);
             let (terms, length) = if reused {
                 let index = old_range
                     .and_then(|(start, _)| start.checked_add(u32::try_from(ordinal).ok()?));
@@ -150,7 +186,7 @@ pub fn plan_forced(
                 (pairs, length)
             } else {
                 stats.retokenized_chunks += 1;
-                tokenizer.tokenize_into(&chunk.embed_text(&doc.body, &doc.title), &mut tokens);
+                tokenizer.tokenize_into(&text, &mut tokens);
                 let mut terms: BTreeMap<String, u32> = BTreeMap::new();
                 for term in tokens.iter() {
                     let count = terms.entry(term.to_owned()).or_insert(0);
@@ -159,6 +195,7 @@ pub fn plan_forced(
                 let length = u32::try_from(tokens.len()).unwrap_or(u32::MAX);
                 (terms, length)
             };
+            embed_texts.push(text);
             chunk_drafts.push(ChunkDraft {
                 id: chunk.id,
                 span: chunk.span,
@@ -277,6 +314,9 @@ pub fn plan_forced(
             effective_from: doc.effective_from,
             timeless: doc.type_spec.timeless,
             content_hash: doc.content_hash,
+            // Raw body bytes: a normalised body would fold line endings and
+            // reopen the hole V-23 closes (V-26).
+            body_hash: Blake3Hash::of_bytes(doc.body.as_bytes()),
             lex_key: draft.lex_key,
             chunk_range: (start, end),
         });
@@ -290,11 +330,72 @@ pub fn plan_forced(
         docs_meta,
         chunks_meta,
     );
-    BuildPlan {
+    let vectors = match embedder {
+        Some(embedder) => {
+            let set = embed_all(embedder, &embed_texts, config.embedding.batch_size)?;
+            stats.embedded_chunks = embed_texts.len();
+            Some(set)
+        }
+        None => None,
+    };
+    Ok(BuildPlan {
         snapshot,
         stats,
         chunker,
+        vectors,
+    })
+}
+
+/// Embeds every chunk text and assembles the validated payload (§3.2 V-7).
+///
+/// The rows are normalised here, not trusted from the embedder, and every
+/// contract violation fails the build with a message naming the embedder and the
+/// chunk index. Nothing is published when this returns an error.
+fn embed_all(
+    embedder: &dyn Embedder,
+    texts: &[String],
+    batch_size: usize,
+) -> Result<VectorSet, Corrupt> {
+    let id = embedder.id();
+    let dim = id.dim as usize;
+    let mut flat: Vec<f32> = Vec::with_capacity(texts.len().saturating_mul(dim));
+    let step = batch_size.max(1);
+
+    for (batch, slice) in texts.chunks(step).enumerate() {
+        let refs: Vec<&str> = slice.iter().map(String::as_str).collect();
+        let rows = embedder
+            .embed(&refs)
+            .map_err(|error| Corrupt::new(error.to_string()))?;
+        if rows.len() != refs.len() {
+            return Err(Corrupt::new(format!(
+                "embedder `{}` returned {} rows for {} texts in batch {batch}",
+                id.name,
+                rows.len(),
+                refs.len()
+            )));
+        }
+        for (offset, mut row) in rows.into_iter().enumerate() {
+            let chunk = batch.saturating_mul(step).saturating_add(offset);
+            if row.len() != dim {
+                return Err(Corrupt::new(format!(
+                    "embedder `{}` chunk {chunk} has {} values, expected {dim}",
+                    id.name,
+                    row.len()
+                )));
+            }
+            if let Some(index) = row.iter().position(|value| !value.is_finite()) {
+                return Err(Corrupt::new(format!(
+                    "embedder `{}` chunk {chunk} value {index} is not finite",
+                    id.name
+                )));
+            }
+            let _ = normalize(&mut row);
+            flat.extend_from_slice(&row);
+        }
     }
+
+    let rows = Vectors::new(id.dim, flat)?;
+    VectorSet::new(id.clone(), rows)
 }
 
 /// One document being assembled, before term ids and the string pool exist.
@@ -459,6 +560,11 @@ mod tests {
         plan.snapshot.to_bytes().expect("valid snapshot")
     }
 
+    /// A plan built with no embedder: the token-side cases do not embed.
+    fn built(docs: &[Document], previous: Option<&Snapshot>) -> BuildPlan {
+        plan(&config(), docs, previous, None).expect("a build without an embedder cannot fail")
+    }
+
     /// Compares the encoded snapshots. `built_at` lives only in the manifest, so
     /// the snapshot itself has no timestamp to normalise.
     fn assert_same_as_clean(incremental: &BuildPlan, clean: &BuildPlan) {
@@ -472,10 +578,10 @@ mod tests {
     #[test]
     fn a_frontmatter_title_edit_rebuilds_to_the_clean_snapshot() {
         let old_docs = [document("a.md", "Cache", "alpha cache body")];
-        let old = plan(&config(), &old_docs, None).snapshot;
+        let old = built(&old_docs, None).snapshot;
         let new_docs = [document("a.md", "Cache v2", "alpha cache body")];
-        let incremental = plan(&config(), &new_docs, Some(&old));
-        let clean = plan(&config(), &new_docs, None);
+        let incremental = built(&new_docs, Some(&old));
+        let clean = built(&new_docs, None);
 
         assert!(incremental.stats.retokenized_chunks > 0);
         assert_same_as_clean(&incremental, &clean);
@@ -484,10 +590,10 @@ mod tests {
     #[test]
     fn a_derived_title_rename_rebuilds_to_the_clean_snapshot() {
         let old_docs = [document("cache.md", "cache", "alpha cache body")];
-        let old = plan(&config(), &old_docs, None).snapshot;
+        let old = built(&old_docs, None).snapshot;
         let new_docs = [document("renamed.md", "renamed", "alpha cache body")];
-        let incremental = plan(&config(), &new_docs, Some(&old));
-        let clean = plan(&config(), &new_docs, None);
+        let incremental = built(&new_docs, Some(&old));
+        let clean = built(&new_docs, None);
 
         assert_same_as_clean(&incremental, &clean);
     }
@@ -498,7 +604,7 @@ mod tests {
             document("a.md", "Alpha", "shared cache body"),
             document("b.md", "Beta", "shared cache body"),
         ];
-        let clean = plan(&config(), &docs, None);
+        let clean = built(&docs, None);
 
         assert_eq!(clean.snapshot.docs.len(), 2);
         assert_eq!(clean.snapshot.chunks.len(), 2);
@@ -532,10 +638,10 @@ mod tests {
     #[test]
     fn a_pure_move_reuses_every_chunk() {
         let old_docs = [document("a/cache.md", "Cache", "alpha cache body")];
-        let old = plan(&config(), &old_docs, None).snapshot;
+        let old = built(&old_docs, None).snapshot;
         let moved_docs = [document("b/cache.md", "Cache", "alpha cache body")];
-        let incremental = plan(&config(), &moved_docs, Some(&old));
-        let clean = plan(&config(), &moved_docs, None);
+        let incremental = built(&moved_docs, Some(&old));
+        let clean = built(&moved_docs, None);
 
         assert_eq!(incremental.stats.retokenized_chunks, 0);
         assert_eq!(incremental.stats.reused_documents, 1);
@@ -549,13 +655,13 @@ mod tests {
             document("a.md", "Alpha", "alpha cache"),
             document("b.md", "Beta", "beta store"),
         ];
-        let old = plan(&config(), &old_docs, None).snapshot;
+        let old = built(&old_docs, None).snapshot;
         let new_docs = [
             document("a.md", "Alpha", "alpha cache changed"),
             document("b.md", "Beta", "beta store"),
         ];
-        let incremental = plan(&config(), &new_docs, Some(&old));
-        let clean = plan(&config(), &new_docs, None);
+        let incremental = built(&new_docs, Some(&old));
+        let clean = built(&new_docs, None);
 
         assert_eq!(incremental.stats.retokenized_chunks, 1);
         assert_eq!(incremental.stats.reused_documents, 1);
@@ -569,12 +675,12 @@ mod tests {
             document("a.md", "Alpha", "alpha cache"),
             document("b.md", "Beta", "beta store"),
         ];
-        let mut old = plan(&config(), &docs, None).snapshot;
+        let mut old = built(&docs, None).snapshot;
         let chunks = old.chunks.len();
         old.tokenizer.algorithm = "v2";
 
-        let incremental = plan(&config(), &docs, Some(&old));
-        let clean = plan(&config(), &docs, None);
+        let incremental = built(&docs, Some(&old));
+        let clean = built(&docs, None);
         assert_eq!(incremental.stats.retokenized_chunks, chunks);
         assert_eq!(incremental.stats.reused_documents, 0);
         assert_eq!(incremental.stats.rebuilt_documents, docs.len());
@@ -582,10 +688,62 @@ mod tests {
     }
 
     #[test]
+    fn the_body_hash_is_the_raw_body_never_a_normalised_one() {
+        // CRLF plus trailing spaces: `chunk_id` hashes the normalised text, so
+        // a normalised witness would make an EOL-only rewrite look unchanged
+        // (V-23, V-26).
+        let body = "line one\r\nline two  \r\n";
+        let docs = [document("a.md", "Alpha", body)];
+        let computed = built(&docs, None);
+
+        let stored = computed.snapshot.docs[0].body_hash;
+        assert_eq!(stored, Blake3Hash::of_bytes(body.as_bytes()));
+        assert_ne!(
+            stored,
+            Blake3Hash::of_bytes(b"line one\nline two"),
+            "a normalised body must not produce the same witness"
+        );
+        // `content_hash` stays the whole-file fact, which a test document sets
+        // to the body: the two agree here only because nothing else is hashed.
+        assert_eq!(computed.snapshot.docs[0].content_hash, stored);
+    }
+
+    #[test]
+    fn a_build_without_an_embedder_writes_no_vectors() {
+        let docs = [document("a.md", "Alpha", "alpha cache")];
+        let computed = built(&docs, None);
+
+        assert!(computed.vectors.is_none());
+        assert_eq!(computed.stats.embedded_chunks, 0);
+        assert_eq!(computed.stats.reused_vector_chunks, 0);
+    }
+
+    #[test]
+    fn an_embedder_gets_every_chunk_and_the_rows_align_with_it() {
+        let embedder = crate::index::embed::HashEmbedder::new(8).expect("8 is valid");
+        let docs = [
+            document("a.md", "Alpha", "alpha cache body"),
+            document("b.md", "Beta", "# Heading\n\nbeta store body"),
+        ];
+        let computed =
+            plan(&config(), &docs, None, Some(&embedder)).expect("the double cannot fail");
+        let chunks = computed.snapshot.chunks.len();
+        assert_eq!(chunks, 2, "one chunk per document at this chunk size");
+        assert_eq!(computed.stats.embedded_chunks, chunks);
+
+        let rows = computed.vectors.as_ref().expect("vectors").rows();
+        assert_eq!(rows.len(), chunks, "one row per chunk occurrence");
+        assert_eq!(rows.dim(), 8);
+        for index in 0..chunks {
+            assert_eq!(rows.row(index).map(<[f32]>::len), Some(8));
+        }
+    }
+
+    #[test]
     fn computing_a_plan_writes_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let docs = [document("a.md", "Alpha", "alpha cache")];
-        let computed = plan(&config(), &docs, None);
+        let computed = built(&docs, None);
 
         assert!(computed.stats.retokenized_chunks > 0);
         assert!(!dir.path().join(".janus").exists());
@@ -601,7 +759,7 @@ mod tests {
         let first = tempfile::tempdir().expect("first root");
         let second = tempfile::tempdir().expect("second root");
         let docs = [document("a.md", "Alpha", "alpha cache")];
-        let computed = plan(&config(), &docs, None);
+        let computed = built(&docs, None);
         let first_manifest = computed
             .manifest(first.path(), "2025-04-01T00:00:00Z")
             .expect("first manifest");

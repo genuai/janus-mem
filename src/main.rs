@@ -4,6 +4,7 @@
 //! the same operations can be exposed over MCP and JSON-RPC without duplicating
 //! decisions (§9.5).
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -11,8 +12,45 @@ use janus_mem::cli::{Cli, Command};
 use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
+use janus_mem::index::embed::{self, ModelDirs, Resolved};
 use janus_mem::{chunk, index, scan, search, vault};
 use tracing_subscriber::EnvFilter;
+
+/// The directories a model may be read from, highest precedence first (V-25).
+///
+/// Built here, at the edge, so nothing below `main` reads `std::env`. The cache
+/// is the same well-known location the model download of a later phase writes,
+/// and it is never opened by `resolve` unless the configured name needs it.
+fn model_dirs(config: &Config) -> ModelDirs {
+    ModelDirs {
+        config: config.embedding.model_dir.clone(),
+        env: std::env::var_os("JANUS_MODEL_DIR").map(PathBuf::from),
+        cache: model_cache(),
+    }
+}
+
+/// The platform's model cache, without a dependency just to find it (§3.2).
+fn model_cache() -> PathBuf {
+    let base = match std::env::var_os("XDG_CACHE_HOME")
+        .or_else(|| std::env::var_os("LOCALAPPDATA"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+    {
+        Some(base) => base,
+        None => std::env::temp_dir(),
+    };
+    base.join("fastembed")
+}
+
+/// Resolves config × feature × model availability once, at the edge (§3.2).
+///
+/// Resolution itself is silent; each caller decides what to say. `janus index`
+/// announces a degraded resolution (§3.6 row 1), a read leaves it to P2's
+/// `degraded` field, and `--no-embeddings` is an explicit choice that earns no
+/// line at all.
+fn resolve_embedder(config: &Config) -> Resolved {
+    embed::resolve(config, &model_dirs(config))
+}
 
 fn init_tracing() {
     tracing_subscriber::fmt()
@@ -79,6 +117,7 @@ fn run(cli: Cli) -> Result<(), JanusError> {
         // exactly, so the index cannot disagree with the report (§3.4).
         Command::Index {
             rebuild,
+            no_embeddings,
             dry_run,
             json,
             paths,
@@ -87,10 +126,25 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             tracing::info!(vault = %root.display(), "corpus resolved");
 
             let config = Config::load(&root)?;
+            // `--no-embeddings` is a statement about the generation, so it skips
+            // resolution entirely: no model is loaded for a lexical build, and
+            // the flag is an explicit choice, so it prints nothing.
+            let embedder = if no_embeddings {
+                None
+            } else {
+                match resolve_embedder(&config) {
+                    Resolved::Ready(embedder) => Some(embedder),
+                    Resolved::Degraded(reason, detail) => {
+                        tracing::warn!("embeddings unavailable ({reason}): {detail}; lexical only");
+                        None
+                    }
+                }
+            };
             index::cmd::run(
                 &root,
                 &config,
                 &SystemClock,
+                embedder.as_deref(),
                 &index::cmd::Options {
                     rebuild,
                     dry_run,

@@ -402,6 +402,11 @@ impl Config {
                     .embedding
                     .model
                     .unwrap_or_else(|| "AllMiniLML6V2".to_owned()),
+                model_dir: raw
+                    .embedding
+                    .model_dir
+                    .filter(|dir| !dir.trim().is_empty())
+                    .map(PathBuf::from),
                 batch_size: raw.embedding.batch_size.unwrap_or(32),
             },
             mcp: McpConfig {
@@ -516,6 +521,10 @@ pub struct EmbeddingConfig {
     pub enabled: bool,
     /// Model identifier recorded in the index manifest.
     pub model: String,
+    /// Where the model files live, when configured (§3.2 V-25). `None` falls
+    /// back to `JANUS_MODEL_DIR`, then the model cache; the precedence is
+    /// resolved at the binary edge, never here.
+    pub model_dir: Option<PathBuf>,
     /// Texts per embedding call.
     pub batch_size: usize,
 }
@@ -856,6 +865,7 @@ struct RawChunking {
 struct RawEmbedding {
     enabled: Option<bool>,
     model: Option<String>,
+    model_dir: Option<String>,
     batch_size: Option<usize>,
 }
 

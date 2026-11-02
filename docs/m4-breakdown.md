@@ -854,6 +854,12 @@ than discovering it at `scripts/pr-size.sh` time.**
 
 ### Phase 1 — `Embedder`, `HashEmbedder`, `vectors.f32`, two-file publication
 
+**Three PRs, not two (P1a, P1b, P1c): P1b measured 680 logic lines and the pre-authorised
+writer/reader seam was therefore taken.** The split point is the one §8 named: P1b is the manifest,
+the nine publication stages, the degraded drop and the first-time embed wiring; P1c is `Expected`'s
+V-21 ordering, the payload read/hash/decode and the recovery tests. Both halves ship in the same
+session and the P1c branch is stacked on P1b.
+
 **Two PRs, not one (P1a, P1b), because review round 1 showed the estimate was the M3 mistake
 again.** P1 contains everything M3's phase 5 contained — six-stage publication, unique temps,
 reader retry, recovery — *plus* a new binary format, a trait, and a manifest change. M3 measured
@@ -884,18 +890,19 @@ and `model_dir`), `src/lib.rs`, `src/main.rs` (`ModelDirs`), `tests/publish.rs`,
    P3 owns the feature-on arms and their tests. Its one `config.rs` edit is the
    `ConfigWarning::TestDoubleEmbedder` variant, emitted by `resolve` through `tracing` because the
    fixed `Resolved` return type has no warnings channel (P1a-4).
-4. **P1b.** `Manifest`: `embedder: Option<EmbedderId>`, `vectors_sha`, `vectors_len`;
-   `format_version = 2`; `Expected` implements **V-21's ordering** (acceptable / stale / stale) and
-   checks the manifest's three-way consistency. `DocMeta.body_hash` lands here too — a layout field
-   belongs with the version bump, and putting it in P4 would make two layout changes share one
-   `format_version` (V-1, round-3 fix).
+4. **P1b (split).** `Manifest`: `embedder: Option<EmbedderId>`, `vectors_sha`, `vectors_len`;
+   `format_version = 2`; `DocMeta.body_hash` lands here too — a layout field belongs with the
+   version bump, and putting it in P4 would make two layout changes share one `format_version`
+   (V-1, round-3 fix). **`Expected`'s V-21 ordering and the three-way consistency check moved to
+   P1c** when the measured diff forced the writer/reader split (§10 P1b).
 5. **P1b.** `store::publish`: three new `Stage`s, `vectors.f32` written and renamed first, manifest
    last, `vectors_sha` from the bytes actually written, and a degraded publish **drops** any existing
-   file with one stderr line. The **carry-forward** half of row 3 of §3.6 is P4's, because it needs
+   file with one stderr line — **after** the manifest rename, so the old commit record never names a
+   file that is gone (review fix, P1b-10). The **carry-forward** half of row 3 of §3.6 is P4's, because it needs
    the reuse predicate to be correct.
-6. **P1b.** `store::load`: `want_vectors` + `embedder` in `LoadOptions`; read, hash, decode and
-   validate `vectors.f32` when wanted; the retry/refuse outcomes of V-3 with the file name in the
-   message; row 6 of §3.6 (vectors-bearing generation, no embedder) never rebuilds.
+6. **P1c (split from P1b).** `store::load`: `want_vectors` + `embedder` in `LoadOptions`; read,
+   hash, decode and validate `vectors.f32` when wanted; the retry/refuse outcomes of V-3 with the
+   file name in the message; row 6 of §3.6 (vectors-bearing generation, no embedder) never rebuilds.
 7. **P1b.** `build::plan` **embeds every chunk on every build** through the resolved embedder — no
    reuse, no predicate — so a real CLI build produces `vectors.f32` and Phase 2 has something to
    rank. **`plan` becomes fallible here** (the embedder can fail) and every caller updates in this
@@ -1226,6 +1233,7 @@ upper bounds; the seam column says where to split **in the same session** if the
 |---|---|---|---|---|---|
 | P1a | `m4-embed-vectors` | ~200 | ~200 | Pure modules: `EmbedderId`, the trait, `HashEmbedder`, `Vectors` encode/decode/validate. No I/O, so no recovery test and no chance of a storage bug hiding a trait bug. | none needed; if it exceeds ~300, the hashing double ships separately |
 | P1b | `m4-two-file-publish` | ~320 | ~380 | The protocol delta **plus the first-time embed wiring**: manifest fields, three new stages, dual-hash validation, V-21's ordering, `build::plan` embedding every chunk with no reuse. **~320, not ~230** (round 2), and **not 230+carry-forward** either (round 4): carry-forward is P4's, and the estimate is re-based on the work that is actually here. | writer (manifest + stages + embed wiring) / reader (validation + recovery table) — **pre-authorised as P1c if the diff measures over 450** |
+| P1c | `m4-two-file-read` | ~240 | ~340 | The reader half of the same protocol: V-21's ordering in `Expected`, the three-way manifest check, `want_vectors` + `embedder` in `LoadOptions`, payload read/hash/decode, and the §3.1 recovery table asserted in both read modes. | taken: P1b measured **680 logic / 820 tests** against `main`, over the pre-authorised 450 seam |
 | P2 | `m4-hybrid` | ~260 | ~340 | The ranking contract; a mistake here is invisible in a green suite, so it gets its own diff. | α + admission / report + goldens |
 | P3 | `m4-fastembed` | ~300 | ~180 | Build, portability and model-availability risk, isolated from scoring and storage. | `fastembed` module / CI matrix |
 | P4 | `m4-incremental-vectors` | ~320 | ~380 | The cache contract and the row-alignment invariant: the reuse predicate, the `body_hash` switch that both caches then share (V-26), and row 3's carry-forward, which needs the predicate to exist. | reuse predicate / carry-forward + receipt + `--dry-run` |
@@ -1446,6 +1454,33 @@ P1b owns the publication protocol and P3 owns the `fastembed` module.
 | P1a-9 | Review fix: pin `HashEmbedder::new(4)` over `"a b"` to a literal row instead of versioning the `hash-<n>` name in §3.2. | A literal makes any bucket or sign change fail loudly, and the `HashEmbedder` docs now say such a change must also change the name so P4's reuse key cannot accept old vectors. Keeping `hash-<n>` stable avoids a config/fixture rename in P1b. |
 | P1a-10 | Review fix: every `hash-`-prefixed model name that does not parse as a positive `u32` degrades to `"invalid model"`, not `"not compiled"`. | The `embeddings` feature cannot fix a typo or an overflowing dimension, so the reason must name the configuration error. |
 | P1a-11 | Review fix: `dot` debug-asserts equal widths and keeps the release `zip`. | P2's `dot(q_vec, row)` with vectors from two models is a bug; truncating it would produce a plausible wrong score. Both widths come from one `EmbedderId`, so debug builds can assert it at no release cost. |
+
+### P1b — the two-file generation, writer half
+
+Branch: `bb/m4-p1b-publish-vectors-f32-thr_q2fyy3ptxm`, stacked P1c on top. Scope is the manifest
+fields and `format_version = 2`, `DocMeta::body_hash`, the nine publication stages, the degraded
+drop, `build::plan` embedding every chunk, `main`'s `ModelDirs`/`resolve` seam, `--no-embeddings` on
+`index`, the fixture's `hash-64`, and the writer-side tests. The reader half is P1c.
+
+**The 680-logic measurement forced the split.** `scripts/pr-size.sh` against `main` reported 680
+logic / 820 tests over the whole phase. That is past both the 450 seam and the 600 hard ceiling, so
+the diff was split at the seam §8 pre-authorised rather than shaved: comments and tests were not
+trimmed to fit, and no test was dropped. P1b measures the numbers in its own PR; P1c is measured
+against P1b (`BASE=origin/<p1b branch>`).
+
+| ID | decision | why |
+|---|---|---|
+| P1b-1 | `Publication.vectors` is `Option<&VectorSet>`, where `VectorSet` is `{ EmbedderId, Vectors }`, not the plan's bare `Option<&Vectors>`. `VectorSet::new` refuses rows whose width is not `id.dim`. | `Vectors` deliberately carries no identity, but the manifest records both the id and the shape, so a writer must hold them together. A pair of loose fields could disagree, and the width check makes "the manifest describes the payload" true by construction. |
+| P1b-2 | `Manifest::new` takes `Payloads { index_sha, index_len, vectors: Option<VectorArtifact> }` instead of five loose fields. | The three manifest vector fields are one fact (§3.1). One `Option<VectorArtifact>` cannot be built half-populated, so the writer never emits the corrupt state P1c's reader rejects. |
+| P1b-3 | The `vectors::Corrupt` → `store::Corrupt` bridge is a `From` impl carrying the enum's `Display` text; `Corrupt::new` is widened to `pub(crate)` for `build::plan`. | One corruption vocabulary, and the enum's specific message ("vectors byte length 40 does not match 2 rows × 4 dimensions × 4 bytes") survives. The alternative accessor would have duplicated the formatting. |
+| P1b-4 | `build::plan`/`plan_forced` return `Result<_, Corrupt>`, embed in batches of `[embedding] batch_size` (clamped to ≥ 1), normalise every row and reject a wrong row count, a wrong width or a non-finite value with the embedder name and the chunk index. Nothing is published. | V-7 and §3.1: a substituted zero row is invisible quality loss, so the build must fail closed. `EmbedError` already names the batch, so the batch loop keeps that diagnostic meaningful. |
+| P1b-5 | The degraded drop announces itself with `tracing::warn!`, one line, only when a payload was actually removed. | `publish` has no stderr and both callers (the `index` command and a read's rebuild) must announce it; this is the channel `resolve`'s test-double warning already uses. The consequence is recorded: the line is visible only where the binary installs a subscriber, so the test asserts it through the CLI with tracing on. |
+| P1b-6 | `[embedding] model_dir` lands here, not in P1a: `EmbeddingConfig.model_dir: Option<PathBuf>`; the cache path is computed in `main` from `XDG_CACHE_HOME`, `LOCALAPPDATA`, `HOME/.cache`, else the temp dir, without a new dependency. | P1a did not add it, and V-25's precedence needs the config value. Computing the cache in `main` keeps `std::env` out of the library. |
+| P1b-7 | A degraded (no-embedder) build that changes nothing still drops `vectors.f32`, unconditionally. | P1b has no reuse predicate, so it cannot know which rows survive; §3.6 row 3's carry-forward is P4's, with the predicate that makes it correct. Unconditional and announced beats silent staleness. |
+| P1b-8 | `BuildStats` gains `embedded_chunks` and `reused_vector_chunks`; the latter is always zero here. The `index` receipt is unchanged. | The counters are P4's receipt fields and cost nothing now; the JSON receipt stays P4's, so no `--json` consumer sees an empty field. |
+| P1b-9 | The P1b reader (unchanged M3 `Expected`/`load`) does not validate the payload and never asks for one, so a read's auto-build is lexical. | It is the writer half by design; P1c adds `want_vectors`/`embedder` and the validation. `search`/`facts` therefore pass no embedder until P2, which is what keeps the α = 0 path byte-identical. |
+| P1b-10 | **Review fix.** The degraded drop runs after the manifest rename and its directory sync, and reports itself through a ninth stage, `Stage::VectorsDropped`, which fires last and only when a file was actually removed. | Dropping with the other payload work left the old manifest naming a file that was already gone: a concurrent reader with `want_vectors = true` saw `is missing`, retried, then rebuilt a state it should never have observed — and a publish that failed after the drop had destroyed a good payload for nothing. After the commit record changes, the new manifest says `embedder: None`, so no reader opens the file, and an orphan from a crash between the two steps is unreachable and overwritten by the next vectors-bearing publish. `a_degraded_publish_drops_the_payload_after_the_commit_record` asserts the payload outlives every pre-commit stage and fails on the old order. |
+| P1b-11 | **Review fix.** `janus index` prints one `embeddings unavailable (<reason>): <detail>; lexical only` line when resolution degrades, and nothing when `--no-embeddings` was passed. `resolve_embedder` returns `Resolved` so each caller decides; only the `index` arm announces. | §3.6 row 1 promises one line for a lexical build, and the `index` receipt has no `degraded` field, so without this line a wrong `model_dir` or a missing feature produced a silent lexical generation. The flag is an explicit choice, so it stays quiet. A read still says nothing here: P2's `degraded` field is its channel. |
 
 ## 11. Implementation log — Phase 2 (hybrid scoring)
 
