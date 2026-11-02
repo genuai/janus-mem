@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use chrono::NaiveDate;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::TypeSpec;
 use crate::id::{Blake3Hash, DocId};
@@ -212,7 +212,7 @@ impl fmt::Display for DateSource {
 /// Modelled as an enum because only these five values change behaviour. An
 /// unrecognised value is not an error — it becomes [`Status::Unknown`] with a
 /// 0.8× gate factor and a doctor note, so one typo cannot hide a document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Status {
     /// Current and in force.
     #[default]

@@ -18,6 +18,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use blake3::Hash;
+use serde::{Deserialize, Serialize};
 
 /// Byte length of a [`DocId`]. 16 bytes (128 bits) of blake3 output — far more
 /// than a local vault can exhaust, and small enough to sort and store cheaply.
@@ -41,7 +42,7 @@ const BLAKE3_HEX_LEN: usize = BLAKE3_LEN * 2;
 ///
 /// Ordered and `Hash` so it can key maps (`path_history`) and sort output
 /// deterministically.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct DocId([u8; DOC_ID_LEN]);
 
 impl DocId {
@@ -103,7 +104,7 @@ impl FromStr for DocId {
 /// This is the vault's *etag*: `read_document` returns it and
 /// `update_frontmatter` refuses to write without it, so an agent can never
 /// silently overwrite a file it read before someone else changed it (D18).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Blake3Hash([u8; BLAKE3_LEN]);
 
 impl Blake3Hash {
@@ -164,7 +165,7 @@ impl FromStr for Blake3Hash {
 /// Deliberately **excludes** `DocId`, which is what makes the embedding cache
 /// free across edits, moves, renames and copies: the same text in two documents
 /// is one chunk, and one embedding (D24). Filled in by the chunker in M2.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChunkId([u8; BLAKE3_LEN]);
 
 impl ChunkId {
