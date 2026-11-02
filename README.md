@@ -50,6 +50,7 @@ normalized text alone, so editing frontmatter or renaming a file re-keys nothing
   the decisions taken while building them.
 - [docs/m3-breakdown.md](docs/m3-breakdown.md) — the M3 phase plan: tokenizer, BM25, scoring,
   the index format, and the retrieval eval.
+- [docs/ideas.md](docs/ideas.md) — parked ideas. Not plans, not decisions.
 
 ## Gates
 
