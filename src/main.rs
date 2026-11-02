@@ -8,9 +8,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use janus_mem::cli::{Cli, Command};
+use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
-use janus_mem::{chunk, scan, vault};
+use janus_mem::{chunk, index, scan, vault};
 use tracing_subscriber::EnvFilter;
 
 fn init_tracing() {
@@ -69,6 +70,31 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                     json,
                     text,
                     limit,
+                    paths,
+                },
+            )
+        }
+
+        // The only command that writes the cache. Discovery matches `scan`
+        // exactly, so the index cannot disagree with the report (§3.4).
+        Command::Index {
+            rebuild,
+            dry_run,
+            json,
+            paths,
+        } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let config = Config::load(&root)?;
+            index::cmd::run(
+                &root,
+                &config,
+                &SystemClock,
+                &index::cmd::Options {
+                    rebuild,
+                    dry_run,
+                    json,
                     paths,
                 },
             )

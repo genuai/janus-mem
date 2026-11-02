@@ -69,6 +69,20 @@ impl BuildPlan {
 /// An invalid `previous` is treated as absent; computing a plan performs no I/O.
 #[must_use]
 pub fn plan(config: &Config, docs: &[Document], previous: Option<&Snapshot>) -> BuildPlan {
+    plan_forced(config, docs, previous, &BTreeSet::new())
+}
+
+/// [`plan`] with a set of documents whose tokens must be recomputed anyway.
+///
+/// `janus index PATHS` uses this for a targeted refresh: reuse still applies to
+/// every other document, so the index stays complete and the save is real.
+#[must_use]
+pub fn plan_forced(
+    config: &Config,
+    docs: &[Document],
+    previous: Option<&Snapshot>,
+    force: &BTreeSet<DocId>,
+) -> BuildPlan {
     let tokenizer = Tokenizer::new();
     let tokenizer_fp = tokenizer.fingerprint();
     let chunker = ChunkingFingerprint {
@@ -104,17 +118,18 @@ pub fn plan(config: &Config, docs: &[Document], previous: Option<&Snapshot>) -> 
                 .get(&doc.id)
                 .and_then(|&index| snapshot.docs.get(index).map(|meta| (snapshot, meta)))
         });
-        let reused = old_match.is_some_and(|(snapshot, old_doc)| {
-            reusable(
-                snapshot,
-                old_doc,
-                &old_forward,
-                doc,
-                &chunks,
-                &tokenizer_fp,
-                &chunker,
-            )
-        });
+        let reused = !force.contains(&doc.id)
+            && old_match.is_some_and(|(snapshot, old_doc)| {
+                reusable(
+                    snapshot,
+                    old_doc,
+                    &old_forward,
+                    doc,
+                    &chunks,
+                    &tokenizer_fp,
+                    &chunker,
+                )
+            });
         if reused {
             stats.reused_documents += 1;
         } else {

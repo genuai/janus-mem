@@ -66,4 +66,23 @@ pub enum Command {
         #[arg(value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
+
+    /// Build or refresh the lexical index (M3)
+    Index {
+        /// Re-tokenize every chunk instead of reusing tokens (§3.4)
+        #[arg(long)]
+        rebuild: bool,
+
+        /// Report the receipt without writing anything
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit one JSON receipt on stdout instead of the summary
+        #[arg(long)]
+        json: bool,
+
+        /// Re-tokenize these documents only; the index still covers the corpus
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
 }
