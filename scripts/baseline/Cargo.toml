@@ -1,0 +1,27 @@
+[package]
+name = "janus-baseline"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Deliberately its own workspace: this crate is NOT a member of the repository's
+# build. `cargo test`, `cargo clippy --all-targets` and the Windows cross-check
+# at the repo root never see it, and therefore never see `tantivy` (§3.8, V-18).
+# `scripts/eval.sh --baseline` runs it by hand; it is a measurement, not a
+# dependency.
+[workspace]
+
+[dependencies]
+# The chunker must not be re-implemented: the comparison is only fair if both
+# systems index byte-identical chunk texts, and `janus chunks --text` truncates
+# at 120 characters (§3.8). Path dependency, not published.
+janus-mem = { path = "../.." }
+# The eval's fixed clock date. `FixedClock` takes a `chrono::NaiveDate`, so a
+# consumer of the library's public API needs the same crate.
+chrono = "0.4"
+# `tests/eval/queries.jsonl` is JSON Lines.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The baseline itself. Out-of-the-box tantivy with its own tokenizer and default
+# BM25 is exactly what a "swap" decision would adopt (§3.8).
+tantivy = "0.27"

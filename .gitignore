@@ -30,3 +30,8 @@ rustc-ice-*.txt
 
 # Misc
 .janus
+
+# The D20 baseline crate is standalone (§3.8): its lockfile and target directory
+# are measurement artefacts, not repository content.
+scripts/baseline/Cargo.lock
+scripts/baseline/target/
