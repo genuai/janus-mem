@@ -1,9 +1,10 @@
 name: ci
 on:
   push:
+  # Any PR base, not just main: a stacked PR is measured against its own base by
+  # the pr-size job, which fetches origin/<base_ref>. Heavy jobs stay on push so
+  # the run is not duplicated.
   pull_request:
-    branches:
-      - main
 
 jobs:
   changes:
@@ -26,7 +27,7 @@ jobs:
 
   test:
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: ${{ github.event_name == 'push' && needs.changes.outputs.rust == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,7 +46,7 @@ jobs:
   # soft check - windows is not supported right now
   windows-compile:
     needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    if: ${{ github.event_name == 'push' && needs.changes.outputs.rust == 'true' }}
     runs-on: windows-latest
     continue-on-error: true
     steps:
