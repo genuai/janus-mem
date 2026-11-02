@@ -1443,6 +1443,9 @@ P1b owns the publication protocol and P3 owns the `fastembed` module.
 | P1a-6 | A zero-row `Vectors` is valid, and `is_empty` exists beside `len`. | An empty corpus has an empty payload rather than a missing one, and clippy's `len_without_is_empty` is part of the `-D warnings` gate. |
 | P1a-7 | `Vectors::decode` keeps `chunks_exact(4)` with a documented `clippy::chunks_exact_to_as_chunks` allow. | The phase text names `chunks_exact(4)`, and the constant width is checked by the alignment rule immediately above; the allow records the plan reference instead of silently changing the mechanism. |
 | P1a-8 | `normalize` returns a non-finite norm without dividing and leaves the row untouched. | It keeps the helper total for an unchecked caller; the read path rejects non-finite values first, so no writer can publish such a row. |
+| P1a-9 | Review fix: pin `HashEmbedder::new(4)` over `"a b"` to a literal row instead of versioning the `hash-<n>` name in §3.2. | A literal makes any bucket or sign change fail loudly, and the `HashEmbedder` docs now say such a change must also change the name so P4's reuse key cannot accept old vectors. Keeping `hash-<n>` stable avoids a config/fixture rename in P1b. |
+| P1a-10 | Review fix: every `hash-`-prefixed model name that does not parse as a positive `u32` degrades to `"invalid model"`, not `"not compiled"`. | The `embeddings` feature cannot fix a typo or an overflowing dimension, so the reason must name the configuration error. |
+| P1a-11 | Review fix: `dot` debug-asserts equal widths and keeps the release `zip`. | P2's `dot(q_vec, row)` with vectors from two models is a bug; truncating it would produce a plausible wrong score. Both widths come from one `EmbedderId`, so debug builds can assert it at no release cost. |
 
 ## 11. Implementation log — Phase 2 (hybrid scoring)
 

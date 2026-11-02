@@ -257,11 +257,13 @@ pub fn normalize(row: &mut [f32]) -> f32 {
 
 /// Computes the dot product of two rows.
 ///
-/// On L2-normalised rows this is the cosine (§7.2). Both slices are expected
-/// to have the same width; values beyond the shorter slice are ignored, which
-/// is how this stays panic-free when a caller passes mismatched sizes.
+/// On L2-normalised rows this is the cosine (§7.2). Both slices must have the
+/// same width: a query vector and a row come from one
+/// [`super::embed::EmbedderId`]. A mismatch is a bug, so debug builds assert it;
+/// release builds keep the zip and stay panic-free.
 #[must_use]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len(), "dot widths must come from one EmbedderId");
     a.iter().zip(b).map(|(left, right)| left * right).sum()
 }
 

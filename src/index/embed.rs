@@ -130,7 +130,9 @@ pub struct EmbedError {
 ///
 /// Construct it with [`HashEmbedder::new`]. The dimension is the only knob; the
 /// name is derived from it, so `new(64)` reports `hash-64` in the manifest and
-/// in any warning.
+/// in any warning. The exact row for a fixed input is pinned by a literal test:
+/// any change to the bucket or sign is a different embedder and must change the
+/// name, or P4's reuse key would accept vectors from the old scheme.
 #[derive(Debug, Clone)]
 pub struct HashEmbedder {
     id: EmbedderId,
@@ -260,8 +262,10 @@ pub fn resolve(config: &Config, dirs: &ModelDirs) -> Resolved {
         );
     }
 
-    if let Some(dim) = hash_model_dim(&config.embedding.model) {
-        if let Some(embedder) = HashEmbedder::new(dim) {
+    if config.embedding.model.starts_with("hash-") {
+        if let Some(dim) = hash_model_dim(&config.embedding.model).filter(|dim| *dim > 0)
+            && let Some(embedder) = HashEmbedder::new(dim)
+        {
             if let Some(warning) = embedder.id.config_warning() {
                 tracing::warn!("{warning}");
             }
@@ -270,7 +274,7 @@ pub fn resolve(config: &Config, dirs: &ModelDirs) -> Resolved {
         return Resolved::Degraded(
             "invalid model",
             format!(
-                "model `{}` has zero dimensions; use hash-<n> with n >= 1",
+                "model `{}` is not a valid hash-<n> dimension; use n >= 1",
                 config.embedding.model
             ),
         );
@@ -426,6 +430,17 @@ mod tests {
     }
 
     #[test]
+    fn hash_embedder_output_is_pinned_to_a_literal_row() {
+        let embedder = HashEmbedder::new(4).expect("4 is valid");
+        let rows = embedder.embed(&["a b"]).expect("hashing cannot fail");
+
+        // blake3("a")[0..8] LE = 6027058585768261143, % 4 = 3; byte 8 bit 0 = 0, so +1.
+        // blake3("b")[0..8] LE = 11479545966530389264, % 4 = 0; byte 8 bit 0 = 0, so +1.
+        // Counts [1, 0, 0, 1]; norm sqrt(2); row [1/sqrt(2), 0, 0, 1/sqrt(2)].
+        assert_eq!(rows[0], vec![0.707_106_77, 0.0, 0.0, 0.707_106_77]);
+    }
+
+    #[test]
     fn hash_embedder_returns_the_requested_shape() {
         let embedder = HashEmbedder::new(7).expect("7 is valid");
         let rows = embedder
@@ -549,11 +564,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_degrades_unknown_hash_shaped_names_as_not_compiled() {
+    fn resolve_degrades_malformed_hash_names_as_invalid_models() {
         for model in ["hash-", "hash-abc", "hash-999999999999999999999"] {
             let config = config(&format!("[embedding]\nmodel = \"{model}\"\n"));
             match resolve(&config, &dirs("/tmp")) {
-                Resolved::Degraded(reason, _) => assert_eq!(reason, "not compiled"),
+                Resolved::Degraded(reason, detail) => {
+                    assert_eq!(reason, "invalid model");
+                    assert!(detail.contains(model), "{detail}");
+                }
                 Resolved::Ready(_) => panic!("`{model}` is not a valid hash dimension"),
             }
         }
