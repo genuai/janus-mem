@@ -449,6 +449,9 @@ separately” option without a second cache): rebuild one pass over the decoded
 then tokenize only non-reused chunks, then re-invert everything. Two linear passes,
 **zero re-tokenization** — which is the cost that matters; the passes are ~10 ms at
 200k chunks. A build-stat counter (`retokenized_chunks`) makes the claim testable.
+Term ids are assigned in lexicographic text order in the snapshot, not first-appearance
+order, because only that order is recoverable from term-major postings (I-4); phase 2’s
+first-appearance order remains true of `LexicalIndex::build`.
 
 **Acceptance (each compares incremental output with a clean rebuild, byte-for-byte
 on the snapshot after normalizing `built_at`):**
