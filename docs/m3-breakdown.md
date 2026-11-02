@@ -449,6 +449,9 @@ separately” option without a second cache): rebuild one pass over the decoded
 then tokenize only non-reused chunks, then re-invert everything. Two linear passes,
 **zero re-tokenization** — which is the cost that matters; the passes are ~10 ms at
 200k chunks. A build-stat counter (`retokenized_chunks`) makes the claim testable.
+Term ids are assigned in lexicographic text order in the snapshot, not first-appearance
+order, because only that order is recoverable from term-major postings (I-4); phase 2’s
+first-appearance order remains true of `LexicalIndex::build`.
 
 **Acceptance (each compares incremental output with a clean rebuild, byte-for-byte
 on the snapshot after normalizing `built_at`):**
@@ -1480,6 +1483,95 @@ hold. `Intent` deliberately has no `as_str`/`Display` yet: JSON rendering is
 phase 6's DTO concern and the enum is not user-visible in phase 3.
 
 ## 13. Implementation log — Phase 4 (snapshot + incremental)
+
+Branches: `bb/m3-phase-4-store-thr_dqfeu8btnh` (4a, from `main` at `cf3e4de`) and
+`bb/m3-phase-4-snapshot-rebuild-thr_dqfeu8btnh` (4b, stacked on 4a). The split is a
+size decision, not a scope change: the single-branch diff measured 885 logic lines
+against the 600 ceiling, so storage/validation and incremental build became two
+reviewable PRs. Scope across the pair is `src/index/store.rs` (new),
+`src/index/build.rs` (new), `src/index/mod.rs`, `src/index/lexical.rs` (the
+`from_parts`/accessor seam), the serde derives on `src/id.rs` and `document::Status`,
+and `Cargo.toml`. Squarely absent: the advisory lock, temp-file publication, fsync
+ordering, reader retry, and `--no-rebuild`; [`write_generation`] has one
+`TODO(phase 5)` at the plain write, and `fd-lock`/`tempfile` were not added. The
+file-read path also stays with phase 5's reader protocol; 4a owns `from_bytes`
+validation and the plain write.
+
+§3.4, §3.5 (load validation only), and the §2 snapshot shape are implemented as
+written. Reuse is per document on the five conjuncts; tokens only are reused; postings
+are per chunk occurrence; every offset read from disk is checked before use.
+
+### Decisions taken
+
+- **I-1 — `TokenizerFingerprint` gets a custom `Serialize`/`Deserialize`, not an owned
+  DTO stored in its place.** The wire form is `(algorithm: String, stemmer: String)`,
+  and deserialization accepts only known names (`v1`, `none`); an unknown name is
+  `Corrupt`. This keeps the §2 field type (`TokenizerFingerprint`, still `Copy + Eq`)
+  instead of adding a parallel persisted type and a conversion the rest of phase 4
+  would have to carry. T-4's other option — a DTO with an owned `String` converted at
+  load — is rejected because it makes the in-memory snapshot type differ from the
+  requested data model for no gain. The cost is that a future tokenizer must extend
+  the accepted-name list; that is exactly the rebuild boundary S-2a wants.
+- **I-2 — bincode is `1.3.3`, and the comment says why.** crates.io currently reports
+  `3.0.0`; the plan offered `1.3` (serde) or `2.x` (`Encode`/`Decode`). `1.3.3` is
+  chosen because `chrono::NaiveDate` already has a serde implementation enabled in
+  this crate, while bincode 2's `Encode`/`Decode` would require newtype wrappers for
+  a foreign chrono type — a second serialization path for a local cache, with no
+  format or performance requirement behind it. bincode 1.3's default fixint encoding
+  is deterministic, and `format_version` owns compatibility, not the crate.
+- **I-3 — the manifest carries nothing beyond §2's list.** A field with no consumer
+  would become a promise the next milestone must keep. `schema_version` is `1`,
+  documenting the v1 frontmatter vocabulary this build reads; it is not a user
+  document's `doc_version`. `built_at` is accepted as an argument to
+  `Manifest::new`/`BuildPlan::write`, so manifests in tests are pinned and no library
+  path invents a timestamp.
+- **I-4 — term ids are sorted lexicographically by term text.** This is the one place
+  the plan's mechanism was insufficient. A snapshot stores postings term-major; it
+  cannot recover which of two terms in the same old chunk appeared first in the token
+  stream. Re-inverting in old term-id order can therefore produce different term ids
+  from a clean build after an edit or a reorder — even though the tokens are identical.
+  A text-sorted vocabulary is fully recoverable from the old postings and independent
+  of chunk order, so clean and incremental builds agree byte-for-byte. Phase 2's
+  first-appearance order remains true of `LexicalIndex::build`; the snapshot's order is
+  its canonical form. (Sorting by first chunk occurrence, then text, would also work,
+  but lexicographic order is simpler and equally canonical.)
+- **I-5 — `DocMeta.status` reuses `document::Status` through the `StatusCode` alias,
+  with serde derived on `Status`.** §2 sketched a separate `StatusCode` enum, but a
+  duplicate five-variant enum plus two exhaustive conversions would be a second source
+  of truth with no behaviour behind it. The alias keeps the §2 field name and makes an
+  added status a compile error at every `match`; `format_version` owns the on-disk
+  compatibility if the variant set ever changes.
+- **I-6 — `StringPool` serializes only its insertion-order `Vec<String>`.** The reverse
+  `BTreeMap` is derived data and is rebuilt on load. A hand-edited or corrupt map can
+  therefore never produce a `StringId` that disagrees with `get`; it also makes the
+  pool's wire form the minimal one.
+- **I-7 — documents are ordered by `rel_path`, then `DocId`, before building.** The
+  scan already emits that order, but the build does not rely on it. A pure move
+  changing a path can move a document in the snapshot; reuse is still zero-token
+  because the lookup is by `DocId` and the reuse key excludes the path. The ordering
+  is part of “always rebuild metadata and ordering” in §3.4.
+- **I-8 — validation is slightly stricter than §3.5's minimum.** In addition to every
+  named check, `terms.len() <= strings.len()` (term id = pool id), `df == end - start`,
+  and every `posting.chunk` bound are required. All are violations of the same shape
+  as the named ones: a rebuild, never a loaded bad offset. The checksum comparison and
+  retry belong to phase 5's reader; 4a validates the decoded bytes only.
+
+### Tests and gates
+
+15 new unit tests across the pair: the six §3.4 acceptances (title edit,
+derived-title rename, identical bodies/different titles with both occurrences and
+hand-derived `df`/`tf`/`avgdl`, pure move with `retokenized_chunks == 0`, body edit
+retokenizing one document, fingerprint bump retokenizing all), the five
+crafted-invalid snapshots (bad `StringId`, inverted postings, out-of-order
+`chunk_range`, non-finite `avgdl`, wrong `format_version`), the moved-vault manifest
+check, the readable-JSON write round-trip, the snapshot score round-trip, the
+`--dry-run` shape writing nothing, and a `proptest` over arbitrary term content
+asserting snapshot identity after `Snapshot -> bytes -> Snapshot`.
+
+Both PRs pass `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test --all-targets`, `cargo doc --no-deps`, the Windows cross-check and
+`scripts/pr-size.sh` (4a 497 logic / 197 tests; 4b 390 logic / 218 tests).
+Markdown is not budgeted.
 
 ## 14. Implementation log — Phase 5 (publication)
 

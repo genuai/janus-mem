@@ -13,7 +13,7 @@
 //! output.
 //!
 //! This module contains no I/O. The phase-4 snapshot in [`store`] persists
-//! exactly these values.
+//! exactly these values, and [`build`] rebuilds them incrementally.
 //!
 //! [`LexicalIndex`]: crate::index::LexicalIndex
 //! [`LexicalIndex::build`]: crate::index::LexicalIndex::build
@@ -25,6 +25,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::id::{Blake3Hash, ChunkId, DocId};
 
+pub mod build;
 mod lexical;
 pub mod store;
 
