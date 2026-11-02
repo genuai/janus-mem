@@ -446,7 +446,7 @@ once):
 | 0.0 | 1.0 (perfect lexical, no semantic) | 0.350 |
 | 1.0 (perfect semantic, no lexical) | 0.0 | 0.650 |
 | 0.4 (typical cosine for unrelated text) | 0.0 | 0.260 |
-| 0.4 (typical cosine for unrelated text) | 1.0 | 0.480 |
+| 0.4 (typical cosine for unrelated text) | 1.0 | 0.610 |
 
 The third and second rows are the claim: a perfect semantic match with no shared term outranks a
 perfect lexical match with no semantic signal by 1.86×. Row 4 is the danger: a *real* sentence
@@ -680,7 +680,7 @@ off, and `enabled = false` degrades even when it is on.
 | 1 | No embedder resolved (feature off, `enabled = false`, or model absent) | lexical generation | lexical | 0.0 | the resolving reason: `embeddings not compiled; lexical only` / `embeddings disabled in janus.toml; lexical only` / `model not found in <dir>; lexical only` |
 | 2 | Embedder resolved | generation with vectors | hybrid | 0.65 | *(empty)* |
 | 3 | No embedder on **this build** (feature off, disabled, or `--no-embeddings`) while the previous generation had vectors | **carry the rows forward; drop `vectors.f32` only if a document changed** (below) | — | — | — |
-| 4 | `--no-embeddings` on `search`/`facts` | — | lexical; `.janus/` written **only** by an S-8 build, which is published without vectors | 0.0 | `--no-embeddings: lexical only` |
+| 4 | `--no-embeddings` on `search`/`facts` | — | lexical; `.janus/` written **only** by an S-8 build, which is published without vectors and, until P4's carry-forward, **drops an existing `vectors.f32`** because this build cannot embed | 0.0 | `--no-embeddings: lexical only` |
 | 5 | Index has no vectors, embedder resolved | — | stale → rebuild (one `stale:` line) | 0.65 | *(empty after the rebuild)* |
 | 6 | **Index has vectors, no embedder resolved** | row 3's rule | **loads, never rebuilds** | 0.0 | reason from row 1 |
 
@@ -1504,7 +1504,28 @@ CLI-flag or feature change.
 
 ## 11. Implementation log — Phase 2 (hybrid scoring)
 
-_Nothing recorded yet._
+Branch: `bb/m4-p2-hybrid-scoring-thr_uxwcx2u3g4`. Scope is `src/config.rs` (α), `src/score.rs`
+(docs and the α table test), `src/search/mod.rs` (query vector, semantic scan, admission, report),
+`src/search/facts.rs` (V-15), `src/cli.rs`/`src/main.rs` (`--no-embeddings`, the resolution
+reason), `tests/hybrid_search.rs` (new), `tests/golden_search.rs` and its two snapshots. No store,
+build, vectors, embed, manifest, feature or `SPEC.md` change.
+
+| ID | decision | why |
+|---|---|---|
+| P2-1 | `EmbeddingConfig.alpha` is `f64`, default `0.65`, clamped to `[0, 1]` with `ConfigWarning::AlphaOutOfRange`; `NaN` warns and falls back to the default. `EmbeddingConfig` drops `Eq` because `f64` has none. | V-10: a bad weight is a preference error, never a refusal to start. `NaN` has no meaningful clamp and would poison every score. |
+| P2-2 | `Options.no_embeddings` skips resolution entirely and `Options.embedding_reason` carries the adapter's own `Resolved::Degraded` reason into `degraded`. `prepare` now takes `want_vectors` and returns the loaded rows. | The flag's purpose includes a machine with no model (V-14), so it must not resolve one. The reason has to come from the edge; `search` cannot reconstruct "model not found" from config. |
+| P2-3 | The query is embedded once, verbatim, only when α > 0 and the text is non-blank; an embedder contract violation (wrong row count or width) is a runtime error, not a zero vector. | The embedder owns tokenization (§3.3). Empty text contributes `semantic = 0` anyway, so skipping it keeps the exhaustive pass at M3 cost. |
+| P2-4 | The semantic scan iterates `Vectors::row(i)` and calls the existing `dot`, clamped to `[0, 1]`; a zero row scores `0.0`. `vectors.rs` is untouched. | `Vectors` owns private flat storage, and P2 is explicitly not allowed to change it. `row(i)` is that module's public seam; the scan is still single-threaded, one `f64` per chunk, with no rayon or prefilter (V-16). |
+| P2-5 | Admission is `breakdown.relevance > 0`, computed once per chunk; the status gate still counts a hidden document rather than scoring it zero. If α > 0 but the loaded generation has no rows, α falls back to 0 for that query and `degraded` says so. | V-9 makes a semantic-only match admissible and keeps α = 0 score-identical to M3. The fallback is the only path that can avoid a wrong-width `dot`, which is a debug assertion. |
+| P2-6 | The report gains top-level `alpha`; `degraded` is `Vec<String>`. `facts` always reports `alpha = 0.0` and, when an embedder resolved, `facts: lexical only (V-15)`; a degraded resolution uses the adapter's reason, and `--no-embeddings` uses the row-4 wording. | V-15 makes facts lexical by policy, not by accident, so its report must say why it is not hybrid. `api` stays `1`: the fields are additive. |
+| P2-7 | The truncation note is now `"N more document(s) have relevance > 0; raise --limit to see them"`. | Under hybrid the admitted set is no longer the lexical match set; the old text claimed more than the code can know (§3.3, review finding 11). |
+| P2-8 | **Plan correction.** §3.3's fifth α row was wrong: `0.65·0.4 + 0.35·1.0 = 0.610`, not `0.480`. The table and the test use `0.610`. | The expected value is derived by hand, and a literal copied from prose would have pinned the error. |
+| P2-9 | `tests/golden_search.rs` now has `search_no_embeddings` (the M3 reference, run with `--no-embeddings`) and `search_hybrid` (α = 0.65). The α = 0 snapshot's `results` array is byte-identical to the old `search` snapshot; its top-level `alpha`, `degraded` and the P2-7 note text are the intended differences. The hybrid test asserts the blend identity within `1e-12` and that a semantic signal is present. | One snapshot cannot be both unchanged and hybrid (review finding 6). The note change is mandated by P2-7, so "only α/degraded differ" is scoped to `results`, exactly as §3.3 states. |
+| P2-10 | A semantic-only fixture case is built by finding, at test time, a `semanticN` term whose `HashEmbedder` row has the same bucket and sign as `zebra`; the document shares no query term. It appears at α = 0.65 and disappears under `--no-embeddings`. | A hand-built `ScoreInput` would not prove admission end to end. Searching for the collision keeps the test independent of a committed literal that a hash change would silently invalidate. |
+| P2-11 | **§3.6 row 4 consequence.** A rebuild triggered by `search --no-embeddings` publishes a lexical generation and **drops** an existing `vectors.f32`; `a_no_embeddings_rebuild_publishes_a_lexical_generation_and_drops_the_payload` pins it. | P1b has no carry-forward. P4's predicate will preserve the rows and make this test fail, which is the visible signal that carry-forward landed. |
+| P2-12 | The `[embedding] alpha` line in SPEC §16.1 is deliberately **not** edited. | P5 owns the spec close-out; this log records the gap so the line is not forgotten. |
+| P2-13 | The ignored `report_hybrid_cost_and_semantic_shape` measurement is committed with the phase. Release build on the fixture, query `cache`: `query()` **5.1 ms**; `alpha = 0.65`; matched **4 of 19** documents; top-10 semantic min/median/max **0.0000 / 0.5303 / 0.5547**; semantic-only document winners **0**; semantic-only chunk admissions **0 of 1533**. | D29 says measure before optimising. `HashEmbedder` is sparse, so these are not real-model numbers; they do show that no prefilter is needed at fixture scale. The collision fixture is the separate proof that semantic-only admission works. |
+| P2-14 | No split. | The diff is well under the pre-authorised 450-logic seam; see the PR size numbers. |
 
 ## 12. Implementation log — Phase 3 (real embedder behind a feature)
 

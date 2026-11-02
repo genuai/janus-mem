@@ -52,15 +52,31 @@ fn resolve_embedder(config: &Config) -> Resolved {
     embed::resolve(config, &model_dirs(config))
 }
 
-/// The embedder when resolution succeeded, with no output.
+/// Resolves the embedder for a read, keeping the reason for `degraded`.
 ///
-/// A read stays silent about a degraded resolution: P2's `degraded` field is
-/// where that reason belongs, and printing it twice would make the response and
-/// stderr disagree about the same fact.
-fn embedder_only(resolved: Resolved) -> Option<Box<dyn Embedder>> {
-    match resolved {
-        Resolved::Ready(embedder) => Some(embedder),
-        Resolved::Degraded(..) => None,
+/// A read stays silent about a degraded resolution: the response's `degraded`
+/// field is where that reason belongs, and printing it twice would make the
+/// response and stderr disagree about the same fact. `--no-embeddings` resolves
+/// nothing at all, so a machine without the model can still run it (V-14).
+fn read_embedder(
+    config: &Config,
+    no_embeddings: bool,
+) -> (Option<Box<dyn Embedder>>, Option<String>) {
+    if no_embeddings {
+        return (None, None);
+    }
+    match resolve_embedder(config) {
+        Resolved::Ready(embedder) => (Some(embedder), None),
+        Resolved::Degraded(reason, detail) => (None, Some(degraded_reason(reason, &detail))),
+    }
+}
+
+/// The §3.6 row-1 wording for a reason `resolve` returned.
+fn degraded_reason(reason: &str, detail: &str) -> String {
+    match reason {
+        "disabled" => "embeddings disabled in janus.toml; lexical only".to_owned(),
+        "not compiled" => "embeddings not compiled; lexical only".to_owned(),
+        other => format!("{other}: {detail}; lexical only"),
     }
 }
 
@@ -179,6 +195,7 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             decay_half_life,
             include_superseded,
             no_rebuild,
+            no_embeddings,
             json,
         } => {
             let root = vault::resolve_corpus(cli.vault)?;
@@ -186,9 +203,9 @@ fn run(cli: Cli) -> Result<(), JanusError> {
 
             let config = Config::load(&root)?;
             // A read passes the embedder so a rebuild it triggers still produces
-            // the generation this process would build (V-21 row 5); it does not
-            // ask for the rows, because α is 0 until P2.
-            let embedder = embedder_only(resolve_embedder(&config));
+            // the generation this process would build (V-21 row 5); whether it
+            // asks for the rows is `search`'s decision from α.
+            let (embedder, embedding_reason) = read_embedder(&config, no_embeddings);
             search::run(
                 &root,
                 &config,
@@ -205,6 +222,8 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                     decay_half_life,
                     include_superseded,
                     no_rebuild,
+                    no_embeddings,
+                    embedding_reason,
                     json,
                 },
             )
@@ -217,13 +236,14 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             scope_only,
             limit,
             no_rebuild,
+            no_embeddings,
             json,
         } => {
             let root = vault::resolve_corpus(cli.vault)?;
             tracing::info!(vault = %root.display(), "corpus resolved");
 
             let config = Config::load(&root)?;
-            let embedder = embedder_only(resolve_embedder(&config));
+            let (embedder, embedding_reason) = read_embedder(&config, no_embeddings);
             search::facts::run(
                 &root,
                 &config,
@@ -236,6 +256,8 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                     scope_only,
                     limit,
                     no_rebuild,
+                    no_embeddings,
+                    embedding_reason,
                     json,
                 },
             )

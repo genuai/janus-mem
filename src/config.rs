@@ -110,6 +110,9 @@ const DEFAULT_CONFIG: &str = include_str!("../janus.toml");
 /// Default number of days at which relevance halves for decaying types (§16.1).
 const DEFAULT_HALF_LIFE_DAYS: f64 = 180.0;
 
+/// Default semantic weight for hybrid scoring (§7.2, §3.3).
+const DEFAULT_ALPHA: f64 = 0.65;
+
 /// Upper bound on alias-chain length. A vault with a 16-deep alias chain is not
 /// expressing vocabulary, it is expressing a bug; the cap turns a potential
 /// infinite loop into a deterministic fallback.
@@ -387,6 +390,21 @@ impl Config {
         let path_hints = build_path_hints(raw.paths, &mut warnings);
         let excludes = build_excludes(raw.index.exclude.as_deref().unwrap_or(&[]), &mut warnings);
 
+        // Alpha is a scoring preference, not a hard boundary: a bad value is a
+        // warning and a clamp, never a refusal to start. NaN has no meaningful
+        // clamp, so it falls back to the shipped default.
+        let configured_alpha = raw.embedding.alpha.unwrap_or(DEFAULT_ALPHA);
+        let alpha = if configured_alpha.is_nan() {
+            DEFAULT_ALPHA
+        } else {
+            configured_alpha.clamp(0.0, 1.0)
+        };
+        if configured_alpha.is_nan() || !(0.0..=1.0).contains(&configured_alpha) {
+            warnings.push(ConfigWarning::AlphaOutOfRange {
+                value: configured_alpha,
+            });
+        }
+
         Self {
             corpus_id,
             index_dir,
@@ -408,6 +426,7 @@ impl Config {
                     .filter(|dir| !dir.trim().is_empty())
                     .map(PathBuf::from),
                 batch_size: raw.embedding.batch_size.unwrap_or(32),
+                alpha,
             },
             mcp: McpConfig {
                 allow_write: raw.mcp.allow_write.unwrap_or(false),
@@ -515,7 +534,7 @@ pub struct ChunkingConfig {
 }
 
 /// Embedding parameters (§8.2). Consumed in M4.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingConfig {
     /// Whether to embed at all; `false` runs lexical-only.
     pub enabled: bool,
@@ -527,6 +546,9 @@ pub struct EmbeddingConfig {
     pub model_dir: Option<PathBuf>,
     /// Texts per embedding call.
     pub batch_size: usize,
+    /// Weight of the semantic signal in `relevance` (§3.3, V-10); `0.0` is the
+    /// exact lexical path. Clamped to `[0, 1]` with a warning.
+    pub alpha: f64,
 }
 
 /// MCP-server parameters (§9.3). Consumed in M6.
@@ -731,6 +753,12 @@ pub enum ConfigWarning {
         /// The configured model name, e.g. `hash-64`.
         model: String,
     },
+    /// `[embedding] alpha` was outside `[0, 1]` or not a number; the resolved
+    /// config uses a clamped value (or the default for `NaN`).
+    AlphaOutOfRange {
+        /// The configured value.
+        value: f64,
+    },
 }
 
 impl fmt::Display for ConfigWarning {
@@ -758,6 +786,10 @@ impl fmt::Display for ConfigWarning {
             Self::TestDoubleEmbedder { model } => write!(
                 f,
                 "`model = {model}` is a test double; its vectors are bag-of-words, not semantic"
+            ),
+            Self::AlphaOutOfRange { value } => write!(
+                f,
+                "`embedding.alpha` is {value}; expected a number in [0, 1]"
             ),
         }
     }
@@ -867,6 +899,7 @@ struct RawEmbedding {
     model: Option<String>,
     model_dir: Option<String>,
     batch_size: Option<usize>,
+    alpha: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1657,6 +1690,52 @@ mod tests {
         );
         // The valid pattern still works.
         assert!(config.is_excluded("ok/file.md"));
+    }
+
+    // ────────────────────────────── embedding alpha ──────────────────────
+
+    #[test]
+    fn alpha_defaults_to_the_spec_value() {
+        let config = parse("");
+        assert_eq!(config.embedding.alpha, 0.65);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn alpha_is_read_from_the_embedding_table() {
+        let config = parse("[embedding]\nalpha = 0.35\n");
+        assert_eq!(config.embedding.alpha, 0.35);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn an_out_of_range_alpha_warns_and_is_clamped() {
+        for (text, expected) in [("-0.5", 0.0), ("1.5", 1.0)] {
+            let config = parse(&format!("[embedding]\nalpha = {text}\n"));
+            assert_eq!(config.embedding.alpha, expected, "alpha {text}");
+            assert!(
+                config
+                    .warnings
+                    .iter()
+                    .any(|w| matches!(w, ConfigWarning::AlphaOutOfRange { .. })),
+                "alpha {text} should warn: {:?}",
+                config.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn a_nan_alpha_warns_and_uses_the_default() {
+        let config = parse("[embedding]\nalpha = nan\n");
+        assert_eq!(config.embedding.alpha, 0.65);
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ConfigWarning::AlphaOutOfRange { .. })),
+            "{:?}",
+            config.warnings
+        );
     }
 
     // ───────────────────────────── corpus id ─────────────────────────────

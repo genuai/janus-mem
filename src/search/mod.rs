@@ -29,6 +29,7 @@ use crate::error::JanusError;
 use crate::id::{ChunkId, DocId};
 use crate::index::embed::Embedder;
 use crate::index::store::{self, LoadOptions, Policy};
+use crate::index::vectors::{Vectors, dot};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
 use crate::scan::API_VERSION;
 use crate::score::{self, Breakdown, Intent, ScopeFilter, ScoreDoc, ScoreInput};
@@ -60,6 +61,11 @@ pub struct Options {
     pub include_superseded: bool,
     /// Refuse instead of rebuilding; a read stays a read (S-8).
     pub no_rebuild: bool,
+    /// Run lexically without resolving or loading a model (V-14).
+    pub no_embeddings: bool,
+    /// Why the adapter could not resolve an embedder, when it tried. `None`
+    /// means resolution succeeded or the caller never resolved one.
+    pub embedding_reason: Option<String>,
     /// Emit one JSON object on stdout instead of the table.
     pub json: bool,
 }
@@ -92,6 +98,8 @@ pub fn run(
         query: Some(&options.query),
         intent: Some(outcome.intent),
         limit: options.limit,
+        alpha: outcome.alpha,
+        degraded: outcome.degraded,
         notes: outcome.notes,
     })
 }
@@ -106,6 +114,10 @@ pub struct Outcome {
     pub hits: Vec<Hit>,
     /// What the intent hid and what `--limit` truncated.
     pub notes: Vec<String>,
+    /// The semantic weight actually applied to this query.
+    pub alpha: f64,
+    /// Why this query is not fully hybrid; empty when nothing is degraded.
+    pub degraded: Vec<String>,
     /// The resolved query intent.
     pub intent: Intent,
     /// The generation this outcome was computed from.
@@ -130,7 +142,47 @@ pub fn query(
     let intent = parse_intent(options.intent.as_deref())?;
     require_scope(options.scope_only, &options.scopes)?;
 
-    let prepared = prepare(root, config, clock, embedder, options.no_rebuild)?;
+    // `--no-embeddings` is a statement about the query: do not resolve, load or
+    // call a model at all (V-14, §3.6 row 4).
+    let load_embedder = if options.no_embeddings {
+        None
+    } else {
+        embedder
+    };
+    let configured_alpha = if load_embedder.is_some() {
+        config.embedding.alpha
+    } else {
+        0.0
+    };
+    let prefetch = configured_alpha > 0.0 && load_embedder.is_some();
+    let prepared = prepare(
+        root,
+        config,
+        clock,
+        load_embedder,
+        prefetch,
+        options.no_rebuild,
+    )?;
+
+    let mut alpha = configured_alpha;
+    let mut degraded = degraded_reasons(
+        options.no_embeddings,
+        load_embedder.is_some(),
+        options.embedding_reason.as_deref(),
+    );
+    if alpha > 0.0 && prepared.vectors.is_none() {
+        // A race could leave a generation without the rows this query wants.
+        // Falling back keeps the dot product from ever seeing two widths.
+        alpha = 0.0;
+        degraded.push("index has no usable vectors; lexical only for this query".to_owned());
+    }
+    let query_vector = query_vector(load_embedder, &options.query, alpha > 0.0)?;
+    let semantics = semantic_scores(
+        prepared.vectors.as_ref(),
+        query_vector.as_deref(),
+        prepared.snapshot.chunks.len(),
+    );
+
     let rows = doc_rows(&prepared.snapshot, config);
     let filter = Filter::new(
         config,
@@ -158,7 +210,22 @@ pub fn query(
         };
         let raw = scores.get(index).copied().unwrap_or(0.0);
         let doc = &docs[*doc_index];
-        if raw <= 0.0 {
+        // Compute the score once, then use the quantity that decides the
+        // ranking: `relevance > 0` admits a semantic-only match, and at α = 0
+        // it is exactly M3's `lexical > 0` (V-9).
+        let breakdown = score::score(
+            clock,
+            &ScoreInput {
+                doc,
+                lexical: crate::index::squash(raw, reference),
+                semantic: semantics.get(index).copied().unwrap_or(0.0),
+                intent,
+                alpha,
+                half_life_days: options.decay_half_life,
+                include_superseded: options.include_superseded,
+            },
+        );
+        if breakdown.relevance <= 0.0 {
             continue;
         }
         if !policy.includes(doc.status) {
@@ -171,18 +238,7 @@ pub fn query(
         occurrences[*doc_index].push((chunk.id, ordinal, index));
         chunk_to_doc.push(*doc_index as u32);
         chunk_ids.push(chunk.id);
-        breakdowns.push(score::score(
-            clock,
-            &ScoreInput {
-                doc,
-                lexical: crate::index::squash(raw, reference),
-                semantic: 0.0,
-                intent,
-                alpha: 0.0,
-                half_life_days: options.decay_half_life,
-                include_superseded: options.include_superseded,
-            },
-        ));
+        breakdowns.push(breakdown);
     }
 
     let ranked = score::rank_documents(policy, &docs, &chunk_to_doc, &chunk_ids, &breakdowns);
@@ -223,7 +279,7 @@ pub fn query(
     }
     if matched > hits.len() {
         notes.push(format!(
-            "{} more document(s) matched; raise --limit to see them",
+            "{} more document(s) have relevance > 0; raise --limit to see them",
             matched - hits.len()
         ));
     }
@@ -236,6 +292,8 @@ pub fn query(
         selected,
         hits,
         notes,
+        alpha,
+        degraded,
         intent,
         snapshot: prepared.snapshot,
     })
@@ -247,6 +305,7 @@ pub fn query(
 pub(crate) struct Prepared {
     pub(crate) snapshot: Snapshot,
     pub(crate) index: LexicalIndex,
+    pub(crate) vectors: Option<Vectors>,
 }
 
 /// Loads a validated generation and prints the one stale line when a read built
@@ -256,6 +315,7 @@ pub(crate) fn prepare(
     config: &Config,
     clock: &dyn Clock,
     embedder: Option<&dyn Embedder>,
+    want_vectors: bool,
     no_rebuild: bool,
 ) -> Result<Prepared, JanusError> {
     let dir = config::resolve_index_dir(root, &config.index_dir);
@@ -279,13 +339,13 @@ pub(crate) fn prepare(
         built_at: &built_at,
         lock_timeout: store::LOCK_TIMEOUT,
         policy,
-        // A read never wants the rows until P2 wires α, so it never opens the
-        // payload (V-4) and a generation with vectors still loads (row 6). The
-        // embedder is passed anyway because a read that has to **rebuild** must
-        // publish the generation this process would have built: without it, a
-        // first `search` after `janus index` would drop the payload it just
-        // inherited (V-21 row 5, §3.6 row 3).
-        want_vectors: false,
+        // A lexical-only read never opens the payload (V-4) and a generation
+        // with vectors still loads (row 6). The embedder is passed anyway
+        // because a read that has to **rebuild** must publish the generation
+        // this process would have built: without it, a first `search` after
+        // `janus index` would drop the payload it just inherited (V-21 row 5,
+        // §3.6 row 3).
+        want_vectors,
         embedder,
     })?;
     // Only a generation this call had to build is stale; a retry that ended by
@@ -297,7 +357,99 @@ pub(crate) fn prepare(
     Ok(Prepared {
         snapshot: load.snapshot,
         index,
+        vectors: load.vectors,
     })
+}
+
+/// Builds the `degraded` list from the flag, the resolved embedder and its reason.
+fn degraded_reasons(no_embeddings: bool, resolved: bool, reason: Option<&str>) -> Vec<String> {
+    if no_embeddings {
+        return vec!["--no-embeddings: lexical only".to_owned()];
+    }
+    if resolved {
+        return Vec::new();
+    }
+    vec![
+        reason
+            .unwrap_or("embeddings unavailable; lexical only")
+            .to_owned(),
+    ]
+}
+
+/// Embeds the query verbatim, once, or returns `None` for no work.
+///
+/// Empty text has no direction, so it would contribute `semantic = 0` anyway;
+/// skipping the call keeps an exhaustive pass at M3 cost. The embedder owns its
+/// tokenization, so the text is never tokenized here first (§3.3).
+fn query_vector(
+    embedder: Option<&dyn Embedder>,
+    query: &str,
+    enabled: bool,
+) -> Result<Option<Vec<f32>>, JanusError> {
+    if !enabled || query.trim().is_empty() {
+        return Ok(None);
+    }
+    let Some(embedder) = embedder else {
+        return Ok(None);
+    };
+    let mut rows = embedder.embed(&[query]).map_err(|error| {
+        JanusError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("query embedding failed: {error}"),
+        ))
+    })?;
+    if rows.len() != 1 {
+        return Err(JanusError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "embedder `{}` returned {} rows for one query",
+                embedder.id().name,
+                rows.len()
+            ),
+        )));
+    }
+    let row = rows.pop().ok_or_else(|| {
+        JanusError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("embedder `{}` returned no query row", embedder.id().name),
+        ))
+    })?;
+    let dim = embedder.id().dim as usize;
+    if row.len() != dim {
+        return Err(JanusError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "embedder `{}` returned {} values for a {dim}-dimensional query",
+                embedder.id().name,
+                row.len()
+            ),
+        )));
+    }
+    Ok(Some(row))
+}
+
+/// `semantic = clamp(dot(query, row), 0, 1)` for every chunk (§3.3).
+///
+/// Rows are unit-norm or zero, so the dot is cosine and a zero row scores `0.0`
+/// rather than `NaN`. The scan is single-threaded and allocates one `f64` per
+/// chunk; a top-k prefilter is an M8 measurement, not a guess now (V-16).
+fn semantic_scores(vectors: Option<&Vectors>, query: Option<&[f32]>, chunks: usize) -> Vec<f64> {
+    let mut scores = vec![0.0; chunks];
+    let (Some(vectors), Some(query)) = (vectors, query) else {
+        return scores;
+    };
+    for (index, score) in scores.iter_mut().enumerate() {
+        let Some(row) = vectors.row(index) else {
+            continue;
+        };
+        // A width mismatch would trip `dot`'s debug assertion. The read path
+        // guarantees it cannot happen, but a skipped row is safer than a panic.
+        if row.len() != query.len() {
+            continue;
+        }
+        *score = f64::from(dot(query, row).clamp(0.0, 1.0));
+    }
+    scores
 }
 
 /// Tokenizes `query` and returns every chunk's raw BM25 plus the query's `s_ref`.
@@ -499,6 +651,8 @@ pub(crate) struct Render<'a> {
     pub(crate) query: Option<&'a str>,
     pub(crate) intent: Option<Intent>,
     pub(crate) limit: usize,
+    pub(crate) alpha: f64,
+    pub(crate) degraded: Vec<String>,
     pub(crate) notes: Vec<String>,
 }
 
@@ -528,7 +682,8 @@ struct Report<'a> {
     intent: Option<&'static str>,
     limit: usize,
     taken_ms: u64,
-    degraded: [&'static str; 1],
+    alpha: f64,
+    degraded: &'a [String],
     notes: &'a [String],
     results: Vec<HitDto<'a>>,
 }
@@ -543,7 +698,8 @@ impl<'a> Report<'a> {
             intent: render.intent.map(intent_name),
             limit: render.limit,
             taken_ms: u64::try_from(render.started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            degraded: ["lexical only; embeddings arrive in M4"],
+            alpha: render.alpha,
+            degraded: &render.degraded,
             notes: &render.notes,
             results: render
                 .hits
@@ -698,5 +854,39 @@ fn write_human(out: &mut impl io::Write, r: &Render<'_>) {
     let _ = writeln!(out, "{} result(s)", r.hits.len());
     for note in &r.notes {
         let _ = writeln!(out, "note: {note}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_query_vector_scores_every_chunk_zero() {
+        let vectors = Vectors::new(2, vec![1.0, 0.0, 0.0, 1.0]).expect("valid rows");
+        assert_eq!(semantic_scores(Some(&vectors), None, 2), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn semantic_scores_clamp_and_treat_a_zero_row_as_zero() {
+        // Rows: unit x, zero, unit -x. The query is unit x.
+        let vectors = Vectors::new(2, vec![1.0, 0.0, 0.0, 0.0, -1.0, 0.0]).expect("valid rows");
+        assert_eq!(
+            semantic_scores(Some(&vectors), Some(&[1.0, 0.0]), 3),
+            vec![1.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn degraded_reasons_name_the_basis() {
+        assert_eq!(
+            degraded_reasons(true, false, None),
+            vec!["--no-embeddings: lexical only"]
+        );
+        assert!(degraded_reasons(false, true, Some("ignored")).is_empty());
+        assert_eq!(
+            degraded_reasons(false, false, Some("model not found; lexical only")),
+            vec!["model not found; lexical only"]
+        );
     }
 }

@@ -49,6 +49,8 @@ fn options(query: &str, intent: &str) -> Options {
         decay_half_life: None,
         include_superseded: false,
         no_rebuild: false,
+        no_embeddings: false,
+        embedding_reason: None,
         json: false,
     }
 }
