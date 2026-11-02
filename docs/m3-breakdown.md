@@ -1013,7 +1013,9 @@ floor inside `cargo test`. Reuse `src/scan.rs` and `src/chunk/dump.rs` for the r
 shape.”
 
 **Accept:** `janus index && janus search cache --json | jq .` works on the fixture
-vault; `scripts/eval.sh` prints `active-top-1 0.xx (n/m)`; exit codes match §9.1.
+vault; `scripts/eval.sh` prints `active-top-1 0.xx (n/m)`; `--scope-only` without
+`--scope` exits `2` with a message and writes nothing (§9 gap 10); exit codes match
+§9.1.
 
 ## 6. Cross-cutting requirements
 
@@ -1164,6 +1166,21 @@ should close. They are listed so nothing is silently overridden.
    never says what a newly included `superseded` document scores; §3.2 fixes it at
    1.0 with decay unchanged, and explicitly excludes `deprecated` from the override.
    **Proposed SPEC edit:** one sentence in §7.1.
+9. **`--decay-half-life` vs the `timeless` exemption is undefined.** §7.1 lists the
+   flag as one of the parameters a caller can override; §6.6 says the type's own
+   setting always wins, and a half-life is not an exemption. **The plan's rule:**
+   the flag overrides the half-life *parameter* and never the `timeless`
+   exemption — a caller must not silently start ageing a timeless principle by
+   passing a number. Implemented in §12 C-6; if the opposite behaviour is ever
+   wanted it needs its own flag, not a reinterpretation of this one. **Proposed
+   SPEC edit:** one sentence under §7.1's flag list.
+10. **`--scope-only` without `--scope` is undefined.** §6.12 rule 4 says
+    `--scope-only` *additionally* excludes `global` and shared-only matches, which
+    presumes a query scope set; with none there is nothing to narrow to. **The
+    plan's rule:** a usage error (exit `2`), never a silent no-op — a no-op would
+    tell the caller their filter applied when it did not. Implemented in §12 C-8
+    and carried as an explicit case in Phase 6's acceptance list. **Proposed SPEC
+    edit:** one sentence in §6.12 rule 4.
 
 ## 10. Implementation log — Phase 1 (tokenizer)
 
@@ -1330,6 +1347,137 @@ the PR body. The phase's build target is the B-10 measurement, not a test assert
 
 
 ## 12. Implementation log — Phase 3 (scoring)
+
+Branch: `bb/m3-phase-3-scoring-thr_trfj4mbwws` (the bb worktree branch, based on
+`main` at `f1905b6`); the phase name in §5 is descriptive, not a branch name.
+Scope is exactly `src/score.rs` (new), `src/clock.rs` (new),
+`tests/no_wall_clock.rs` (new), and the `pub mod` lines plus layout list in
+`src/lib.rs`. Deliberately absent: persistence, serde, `DocMeta`/`ChunkMeta`,
+`bincode`, a scorer trait, a builder, a second config type, the CLI, `search`,
+`facts`, type/tag filters wired into ranking, MMR, and `--as-of`.
+
+§3.1, §3.2, §3.6 and §7.2 are implemented as written. Scoring is a pure function
+of its arguments: the caller resolves metadata once ([`ScoreDoc`]), supplies the
+lexical value phase 2 produced, and injects a [`Clock`]. `Breakdown` reports every
+factor and `authority` is the product, so `status_factor` cannot be computed and
+forgotten. The intent table is data, the scope predicate is pure, and `is_fact`
+is a predicate rather than the `current` gate.
+
+### Decisions taken
+
+- **C-1 — `ScoreDoc` is the scoring view, not `DocMeta`.** §2 sketched
+  `ScoreInput.doc: &DocMeta`, but `DocMeta` is phase 4's *persisted* shape
+  (`StringId`s, `chunk_range`, `lex_key`, serde) and does not exist yet. Phase 3
+  defines `ScoreDoc<'a>` with only the fields scoring reads — `id`, `rel_path`,
+  `type_name`, `type_spec`, `status`, `date`, `effective_from`, `scope`,
+  `shared_with` — plus `impl From<&Document>`, so the compiler checks the view
+  against the scan and phase 4 converts `DocMeta` into it. Nothing is invented:
+  `type_spec` is already resolved at config load (§6.6.1), and `title`, `tags`
+  and `content_hash` are not scoring inputs. A test resolves a real document
+  through `vault::resolve` and asserts the conversion.
+- **C-2 — Chunk-to-document mapping: parallel slices, index stays
+  document-agnostic.** `rank_documents(policy, docs, chunk_to_doc: &[u32],
+  chunk_ids: &[ChunkId], chunk_scores: &[Breakdown])`, where `chunk_to_doc[i]`
+  is the document index for chunk occurrence `i`. The three slices must be
+  parallel; a length mismatch returns no hits instead of panicking. The grouping
+  ordinal is the chunk's position among that document's occurrences in input
+  order. **Phase 4 persists exactly `ChunkMeta { id, doc }`** (plus the
+  `chunk_range` order that yields the ordinal); no metadata enters
+  `LexicalIndex` and no persistence exists here.
+- **C-3 — `score()` is total; inclusion is `IntentPolicy::includes`.** The
+  equations are computed for any input, and `status_factor` is `Option<f64>`:
+  `None` *is* the inclusion rule (§3.2). `score` writes `0.0` for an excluded
+  status so an unfiltered caller cannot rank it above an included document, but
+  the real decision is `rank_documents`, which drops it entirely — an excluded
+  document is absent, never a zero-scored hit. Both halves are tested.
+- **C-4 — The intent table is five `const` rows looked up by
+  `(intent, include_superseded)`.** `current`, `current` +
+  `--include-superseded`, `history`, `evolution`, `exhaustive`. `policy()` treats
+  the flag as `current`-only (S-19), so the other three intents are unchanged by
+  it — a no-op, not an error. One test iterates all 25 `(intent, status)` cells
+  against a hand-written matrix and counts the cells, so a missing row or status
+  fails; a second asserts the flag changes nothing outside `current`.
+- **C-5 — `include_superseded` is a `ScoreInput` field.** §2's sketch had no
+  field for it, but the status factor depends on it and a separate policy
+  argument would duplicate `intent`. One extra `bool`, recorded because it
+  deviates from the sketch.
+- **C-6 — Decay short-circuits in a fixed order.** Intent decay off → `timeless`
+  → half-life `<= 0` or `NaN` → no anchor date → `exp(-ln2 · age /
+  half_life)` with `age` clamped at 0. `NaN` is checked explicitly
+  (`is_nan()`) so an incomparable half-life cannot produce a `NaN` score.
+  `--decay-half-life` is `Option<f64>`: `Some(0.0)` or negative disables decay,
+  `Some(x)` overrides the type's half-life, and `timeless` still wins over the
+  flag — a timeless type is exempt by type, and §6.6 says the type's own setting
+  wins (§9 gap 9). `effective_from` is the anchor when present, `date` otherwise
+  (§7.2).
+- **C-7 — Scope normalisation is duplicated from `vault::resolve`, with a note.**
+  `vault::resolve::normalise_scope` is private and phase 3 must not modify M1
+  code, so `score::normalise_scope` repeats trim → lowercase → collapse
+  whitespace. Both sides of every comparison are normalised, so `ORG:Acme` in a
+  query meets `org:acme` on a document. A test resolves a document through
+  `vault::resolve` and asserts the query-side filter agrees with the
+  resolution-side value, so the copies cannot drift silently. **Follow-up:**
+  hoist one function into a shared module in a later PR; recorded here rather
+  than hidden.
+- **C-8 — `--scope-only` requires the owning scope, never a shared tag.** Rule 4
+  is implemented as "the document's own scope is in the query set and is not
+  `global`". A shared tag never satisfies `--scope-only`; that is exactly the
+  "shared-only" exclusion. With no `--scope` the filter is a no-op (rule 3:
+  nothing silently hidden); phase 6 rejects `--scope-only` without `--scope` as a
+  usage error (exit `2`) instead of guessing (§9 gap 10).
+- **C-9 — The comparator is §3.1's five keys with `total_cmp`.** `final` desc,
+  `date` desc with missing dates last, argmax `chunk_id` asc, `DocId` asc,
+  `rel_path` asc. Within one document the argmax is `total_cmp` on `final`, then
+  lower `chunk_id`, then lower `ordinal`. No float `==` anywhere. Tests assert
+  antisymmetry for every pair of a five-hit set, that distinct hits never compare
+  `Equal`, and that reversing the candidate slice produces the same document
+  order.
+- **C-10 — `evolution`'s oldest→newest order is not in the comparator.** §7.1
+  wants oldest first inside `evolution`, while §3.1's comparator is newest first.
+  The comparator stays the document comparator; the intent-specific presentation
+  order is phase 6's concern. Recorded so phase 6 does not silently reuse the
+  wrong order.
+- **C-11 — The no-wall-clock rule is a test, not a habit.**
+  `tests/no_wall_clock.rs` walks `src/`, skips `main.rs`, and fails on
+  `SystemTime::now` or `Local::now` (§3.8, S-13). `clock.rs` uses
+  `Utc::now().date_naive()` — UTC, not local — because frontmatter dates are
+  calendar dates with no timezone, and a machine's timezone must not move a
+  ranking.
+- **C-12 — Every expected number is hand-derived.** One half-life (180 days) is
+  `0.5`, two are `0.25`, and an active decision at lexical `0.5` is
+  `0.5 · 1.5 · 0.5 = 0.375`; the `0.7`/`0.8` ratios and the ranking orders follow
+  from those products, not from calling the scorer. `FixedClock(2025-04-01)` in
+  every test, matching §3.8. The proptest keeps `0 <= final <= 1.5` under the
+  stated preconditions (`lexical`, `semantic`, `alpha` in `[0, 1]`, authority in
+  `[0.8, 1.5]`, half-life `>= 0`) and asserts finiteness.
+
+### Tests and gates
+
+27 unit tests in `src/score.rs` plus one integration test in
+`tests/no_wall_clock.rs`: the 25-cell intent table, the numeric `0.7×`/`0.8×`
+penalties, inclusion through `rank_documents` under all four intents and the
+override, decay monotonicity over 720 days and the five `1.0` short-circuits,
+`effective_from` as the anchor, §6.12.1 obligations 5/8/9, the facts matrix
+(5 statuses × 3 fact types + four non-fact types), the comparator's five keys
+with antisymmetry and no ties, shuffle stability, the within-document
+`chunk_id` → `ordinal` tie, the parallel-slice guard, the resolved-document
+conversion, and the proptest above.
+
+`cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
+`cargo test --all-targets`, `cargo doc --no-deps`, the Windows cross-check and
+`scripts/pr-size.sh` are green. `LexicalIndex` and `squash` are consumed as-is:
+no BM25 value is recomputed here, and `rank_documents` takes finished
+`Breakdown`s rather than scoring. No timing is asserted.
+
+**Size: 583 logic / 859 tests against the hard ceilings 600 / 900.** That is
+above §5's rough estimate (≈310 / ≈420) and the reason is recorded rather than
+hidden: the estimate assumed terse docs, while `#![warn(missing_docs)]` requires
+a doc line per public field (11 on `ScoreDoc`, 8 on `Breakdown`, 7 on
+`ScoreInput`), the §3.2 table is 55 lines of literal data, and the test side
+carries one hand-derived assertion per `(intent, status)` cell plus the §3.1
+tie-break cases. Nothing was dropped to hit the estimate, and the hard ceilings
+hold. `Intent` deliberately has no `as_str`/`Display` yet: JSON rendering is
+phase 6's DTO concern and the enum is not user-visible in phase 3.
 
 ## 13. Implementation log — Phase 4 (snapshot + incremental)
 

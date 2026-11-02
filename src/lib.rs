@@ -15,10 +15,12 @@
 //! milestone 2 adds the chunker:
 //!
 //! * [`chunk`] — the heading-aware chunker: sections with byte spans (M2).
+//! * [`clock`] — the injected clock, so scoring never reads the wall clock.
 //! * [`config`] — `janus.toml`, alias resolution, type registry, globs, decay.
 //! * [`document`] — the parsed shape of a document and its resolved metadata.
 //! * [`id`] — `DocId`, `Blake3Hash`, `ChunkId` newtypes.
 //! * [`index`] — the in-memory lexical index and BM25 (M3).
+//! * [`score`] — authority, status gating, decay and scope: pure scoring (M3).
 //! * [`vault`] — corpus root discovery, the directory walk, path confinement,
 //!   frontmatter isolation, metadata resolution, and identity derivation.
 //! * [`scan`] — the `janus scan` command (discovery report so far).
@@ -35,11 +37,13 @@
 
 pub mod chunk;
 pub mod cli;
+pub mod clock;
 pub mod config;
 pub mod document;
 pub mod error;
 pub mod id;
 pub mod index;
 pub mod scan;
+pub mod score;
 pub mod tokenize;
 pub mod vault;
