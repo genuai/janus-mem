@@ -60,17 +60,17 @@ claims inherited from the brief are not what the code does, and the difference c
    "costs zero embedding work" (M4). No `path_history`, no file-hash comparison and no move
    detection is built in M4.
 
-**Status: revised three times after review; awaiting round 4.** No implementation exists. Every
+**Status: revised four times after review; awaiting round 5.** No implementation exists. Every
 phase log in §10–§14 is empty on purpose.
 
-**Revision note.** Three rounds of independent review, 19 findings, none rejected. Round 1 found
+**Revision note.** Four rounds of independent review, 15 findings, none rejected. Round 1 found
 three blockers, two of them defects in **shipped M3 code** this plan was about to copy. Round 2
-found that three of those fixes were locally right and globally inconsistent: the raw-text witness
-was too coarse (`content_hash` is the whole file, so a one-tag edit re-embeds), the carry-forward
-branch wrote a manifest that contradicted itself, and one claim about shipped M3 code was simply
-false. Round 3 found that two of *those* fixes were still incomplete — a title-only change slips
-past the drop trigger, and `body_hash` was landing in a phase that would need a second
-`format_version` bump. Every finding and its resolution is in §9.0.
+found three fixes locally right and globally inconsistent. Round 3 found two of those incomplete —
+a title-only change slipped past the drop trigger, and `body_hash` was landing in a phase that
+would need a second `format_version` bump. Round 4 found that round 3's solution had made the plan
+contradict its own Phase 2: the phase that owns the hybrid golden needs a CLI-produced
+`vectors.f32`, which only exists once the embedder is wired into the build. P1b now owns that
+wiring; P4 owns reuse and carry-forward. Every finding and its resolution is in §9.0.
 
 ## 0. Scope
 
@@ -722,12 +722,18 @@ On the drop branch the manifest writes all three as `None`, the file is removed,
 line says `vectors dropped: N document(s) changed and this build cannot embed`. If nothing changed,
 the vectors survive a degraded `index` untouched — which is also why row 6 is safe.
 
-**Both branches land in P4, not P1b (round-3 fix).** Before P4 no CLI path produces vectors at all
-(the embedder is not wired into `build::plan` until then), so a degraded publish in P1b cannot have
-a good file to carry. P1b therefore **drops** vectors on a degraded publish and says so; P4 adds
-carry-forward together with the predicate that makes it correct, instead of shipping a coarse
-`content_hash` stand-in and widening it later. `DocMeta.body_hash` itself moves into **P1b**, because
-it is a layout field and a second layout change would need a second `format_version` bump (V-1, and
+**Which phase owns what (round-4 correction).** P1b **wires the embedder into `build::plan` and
+embeds every chunk on every build, with no reuse** — about fifteen lines on top of
+`Publication.vectors` and `resolve`. That is what makes P1b's own acceptance case true ("`janus
+index` writes a `vectors.f32` whose blake3 matches the manifest") and what lets Phase 2's hybrid
+golden exist at all; an earlier revision said "no CLI path produces vectors before P4", which
+contradicted Phase 2 outright. P4 then adds the three things this plan gives it: the reuse
+predicate, the `body_hash` switch that consumes P1b's new field, and **row 3's carry-forward**,
+which needs the predicate to be correct (substituting a coarse `content_hash` stand-in in P1b and
+widening it later is the throwaway this ordering avoids). Until P4, a degraded publish **drops**
+the file and says so; nothing can carry a row that the predicate has not yet been written to
+justify. `DocMeta.body_hash` itself is a **P1b** layout field, because a second layout change would
+need a second `format_version` bump (V-1, and
 AGENTS.md's rule that *any* on-disk layout change bumps it).
 
 `--no-embeddings` means two different things and the plan says so in one place (V-14): on `index` it
@@ -856,7 +862,7 @@ and validate it; nothing uses the vectors yet, so a regression is a storage bug 
 and `model_dir`), `src/lib.rs`, `src/main.rs` (`ModelDirs`), `tests/publish.rs`,
 `tests/vectors.rs` (new).
 
-**Build (~430 logic lines, P1a ~200 + P1b ~230):**
+**Build (~520 logic lines, P1a ~200 + P1b ~320):**
 1. **P1a.** `EmbedderId` with `to_bytes()` (V-22), `Embedder`, `EmbedError`, `HashEmbedder`
    (blake3 bucket + sign, tokenizer terms, normalise), `EmbedderId` → `ConfigWarning` for the test
    double (§3.2 table).
@@ -873,14 +879,17 @@ and `model_dir`), `src/lib.rs`, `src/main.rs` (`ModelDirs`), `tests/publish.rs`,
 5. **P1b.** `store::publish`: three new `Stage`s, `vectors.f32` written and renamed first, manifest
    last, `vectors_sha` from the bytes actually written, and a degraded publish **drops** any existing
    file with one stderr line. The **carry-forward** half of row 3 of §3.6 is P4's, because it needs
-   the predicate and because no CLI path produces vectors before then.
+   the reuse predicate to be correct.
 6. **P1b.** `store::load`: `want_vectors` + `embedder` in `LoadOptions`; read, hash, decode and
    validate `vectors.f32` when wanted; the retry/refuse outcomes of V-3 with the file name in the
    message; row 6 of §3.6 (vectors-bearing generation, no embedder) never rebuilds.
-7. **P1b.** `build::plan` carries `Option<Vectors>` through unchanged (produced by an embedder only
-   in tests this phase); `Publication.vectors`; `BuildStats` counters default to zero; `main.rs`
-   builds `ModelDirs` and resolves the embedder **once**; the CLI gains `--no-embeddings` on
-   `index` only (V-14, `search`/`facts` in P2).
+7. **P1b.** `build::plan` **embeds every chunk on every build** through the resolved embedder — no
+   reuse, no predicate, ~15 lines — so a real CLI build produces `vectors.f32` and Phase 2 has
+   something to rank. `Publication.vectors`; `BuildStats` counters default to zero;
+   `tests/fixtures/vault/janus.toml` gains `[embedding] model = "hash-64"` (no golden moves, because
+   scoring still passes `semantic = 0.0, alpha = 0.0` until P2); `main.rs` builds `ModelDirs` and
+   resolves the embedder **once**; the CLI gains `--no-embeddings` on `index` only (V-14,
+   `search`/`facts` in P2).
 
 **Tests (~380 lines):** `Vectors` round-trip and validation (wrong length, non-multiple-of-4,
 `NaN`, `inf`, wrong row count, un-normalised row, `dim = 0`); `dot`/`normalize` hand-computed
@@ -908,10 +917,13 @@ old-index pair looks valid and scores wrong. No `unsafe`, no `bytemuck`, no `mma
 network. A bad vector row fails the publish; a corrupt file rebuilds. Tests build post-crash states
 directly and never sleep. Record deviations in the M4 phase log, not a new journal."
 
-**Accept:** `cargo test --all-targets` green; a `janus index` writes a `vectors.f32` whose
-`blake3` matches the manifest and whose row count equals `chunks`; `--no-embeddings` on an unchanged
-corpus **keeps** the existing file and on a changed one removes it with one line; the Windows
-cross-check green with default features.
+**Accept:** `cargo test --all-targets` green; a `janus index` on the fixture (which now names
+`hash-64`) writes a `vectors.f32` whose `blake3` matches the manifest and whose row count equals
+`chunks`; a second `index` produces the **same bytes**, because P1b re-embeds everything and the
+embedder is deterministic; `--no-embeddings` **removes** any existing file with one stderr line
+(unconditionally in P1b — carry-forward is P4's); the Windows cross-check green with default
+features. Expected churn: `tests/publish.rs` enumerates the index directory, so it now sees a third
+file; nothing else moves, because scoring still passes `semantic = 0.0`.
 
 **Split seam, now permanent:** P1a = `embed.rs` + `vectors.rs` + their unit tests (pure, no I/O);
 P1b = manifest + publication + reader + integration tests. Both are in §8's table with their own
@@ -926,18 +938,19 @@ and **score-identical to M3** when it does not. Table-driven tests, no I/O, no m
 
 **Files:** `src/score.rs` (cosine use + docs), `src/search/mod.rs` (query vector, α, admission,
 report fields), `src/search/facts.rs` (α = 0, V-15), `src/config.rs` (alpha + clamping warning),
-`src/cli.rs` (`--no-embeddings` on `search`/`facts`, `--alpha`? no — config only), `src/main.rs`,
-`tests/cli_search.rs`, `tests/golden_search.rs`, `tests/eval_quality.rs` (Options field),
-`tests/fixtures/vault/janus.toml`.
+`src/cli.rs` (`--no-embeddings` on `search`/`facts`; α is config-only, not a flag), `src/main.rs`,
+`tests/cli_search.rs`, `tests/golden_search.rs`, `tests/eval_quality.rs` (Options field). The
+fixture's `[embedding] model = "hash-64"` arrived in **P1b**, so this phase reads vectors that
+already exist rather than creating them.
 
 **Build (~260 logic lines):** query embedding (one call, `None` for an empty query); the semantic
 scan (`chunks_exact(dim)` fold, V-16); α resolution (`[embedding] alpha`, clamp + warning, `0.0`
 without an embedder); the V-9 admission change; the reworded "more matched" note and the
 per-candidate cost measurement (§3.3); `degraded` as `Vec<String>` and the top-level `alpha` in the
-report (V-19); `Options.no_embeddings`; `want_vectors` wiring; the fixture config gains
-`[embedding] model = "hash-64"` so the corpus is hermetic and hybrid end to end — which is safe
-because `HashEmbedder` compiles without the feature and `resolve` warns that it is a test double
-(§3.2).
+report (V-19); `Options.no_embeddings`; `want_vectors` wiring. The fixture already names
+`[embedding] model = "hash-64"` from P1b, which is safe because `HashEmbedder` compiles without the
+feature and `resolve` warns that it is a test double (§3.2); P2 is the phase that starts **using**
+the vectors P1b already writes, so the corpus becomes hybrid end to end here and not before.
 
 **Tests (~340 lines):** table-driven α endpoint and midpoint values against hand-computed
 `relevance` (including the five rows of §3.3); `relevance` recomputed from the JSON DTO for every
@@ -1199,13 +1212,13 @@ upper bounds; the seam column says where to split **in the same session** if the
 | PR | Branch | Logic est. | Tests est. | Why it splits here | Split seam |
 |---|---|---|---|---|---|
 | P1a | `m4-embed-vectors` | ~200 | ~200 | Pure modules: `EmbedderId`, the trait, `HashEmbedder`, `Vectors` encode/decode/validate. No I/O, so no recovery test and no chance of a storage bug hiding a trait bug. | none needed; if it exceeds ~300, the hashing double ships separately |
-| P1b | `m4-two-file-publish` | ~320 | ~380 | The protocol delta: manifest fields, three new stages, dual-hash validation, V-21's ordering, the two carry-forward branches. **~320, not ~230** — it is a delta over M3's 597-line protocol, but the delta includes everything that protocol's tests exercise, and round 2 called the ~230 a repeat of the same estimation error. | writer (manifest + stages + carry-forward) / reader (validation + recovery table) — **pre-authorised as P1c if the diff measures over 450** |
+| P1b | `m4-two-file-publish` | ~320 | ~380 | The protocol delta **plus the first-time embed wiring**: manifest fields, three new stages, dual-hash validation, V-21's ordering, `build::plan` embedding every chunk with no reuse. **~320, not ~230** (round 2), and **not 230+carry-forward** either (round 4): carry-forward is P4's, and the estimate is re-based on the work that is actually here. | writer (manifest + stages + embed wiring) / reader (validation + recovery table) — **pre-authorised as P1c if the diff measures over 450** |
 | P2 | `m4-hybrid` | ~260 | ~340 | The ranking contract; a mistake here is invisible in a green suite, so it gets its own diff. | α + admission / report + goldens |
 | P3 | `m4-fastembed` | ~300 | ~180 | Build, portability and model-availability risk, isolated from scoring and storage. | `fastembed` module / CI matrix |
-| P4 | `m4-incremental-vectors` | ~280 | ~380 | The cache contract and the row-alignment invariant, including the `body_hash` witness (V-26) that both caches then share. | reuse predicate / receipt + `--dry-run` |
+| P4 | `m4-incremental-vectors` | ~320 | ~380 | The cache contract and the row-alignment invariant: the reuse predicate, the `body_hash` switch that both caches then share (V-26), and row 3's carry-forward, which needs the predicate to exist. | reuse predicate / carry-forward + receipt + `--dry-run` |
 | P5 | `m4-eval-baseline` | ~150 | ~260 | Measurements and prose; changes shared eval files and SPEC, so it lands alone. | sweep / baseline script |
 
-Total ≈ 1 510 logic lines across **six** PRs on five phases, every one under the 600 ceiling with
+Total ≈ 1 550 logic lines across **six** PRs on five phases, every one under the 600 ceiling with
 room for review fixes. P1 is two PRs on the strength of M3's measurement, not on the strength of
 this estimate. The writer/reader split inside P1b is **not** taken now, for the reason M3's phase 5
 gave when the same seam was proposed: the two halves share the `Publication` type and half the
@@ -1275,13 +1288,26 @@ problems surfaced. All four accepted.
 |---|---|---|
 | R3-1 | `body_hash` is the right witness for tokens, but nothing says to hash the **raw** body | **Accepted.** V-26 and §3.4 now say "raw `Document.body`, never a normalised body — a normalised hash would reopen the EOL hole". |
 | R3-2 | Row 3's drop trigger is incomplete: a **title-only** change changes neither `body_hash` nor the chunk-id sequence, so a degraded `index` would carry a row and stamp a fresh `vec_key`, laundering the staleness | **Accepted, new issue.** The degraded build now re-evaluates the §3.4 predicate with the **manifest's** embedder id substituted, which covers title, body, order and embedder in one rule. The title case is added to P4's tests. |
-| R3-3 | P1b's carry-forward needs a per-document "changed" test, but the predicate and `body_hash` arrive in P4 | **Accepted, new issue.** `DocMeta.body_hash` moves into **P1b** (it is a layout field); the carry-forward branch moves into **P4**, together with the predicate, and P1b simply drops vectors on a degraded publish. Nothing can produce vectors before P4, so there is nothing to carry. |
+| R3-3 | P1b's carry-forward needs a per-document "changed" test, but the predicate and `body_hash` arrive in P4 | **Accepted, new issue.** `DocMeta.body_hash` moves into **P1b** (it is a layout field); the carry-forward branch moves into **P4**, together with the predicate, and P1b simply drops vectors on a degraded publish. (The sentence this resolution originally gave as the reason — "nothing can produce vectors before P4" — was wrong, and R4-2 corrects it: P1b wires the embedder, so it *does* produce vectors and its drop branch is reachable and tested.) |
 | R3-4 | `format_version = 2` would cover two different layouts if `body_hash` landed in P4 | **Accepted, same fix as R3-3.** One version bump, one layout. |
 
-That is ten findings across two rounds on a plan whose first draft called itself done. The pattern is
-consistent: each fix was right about the mechanism and wrong about the boundary — which input, which
-branch, which phase. A plan that names its boundaries as carefully as its formulas is the thing
-this review loop is producing.
+#### Review round 4 — verification of round 3's fixes
+
+Verdict once more *still open*. Two of round 3's edits were right and two left the document
+self-contradictory, and one of the contradictions reached back into Phase 2.
+
+| # | Round-4 finding | Resolution |
+|---|---|---|
+| R4-1 | The `Some(kept_id)` substitution closes the laundering path in both directions | **Fixed, no action.** Verified: title in `vec_key`, body and order in `body_hash`/sequence, embedder in the substitution, `dim` from the kept manifest id. |
+| R4-2 | "No CLI path produces vectors before P4" is **false for Phase 2**, which needs a CLI-produced `vectors.f32` for the hybrid golden and DoD 5 | **Accepted, new issue.** P1b now wires the embedder into `build::plan` and embeds every chunk with no reuse (~15 lines). That makes P1b's own acceptance case true and gives P4 exactly the work it claims. |
+| R4-3 | §5's P1b build/accept text was stale: "~430 (P1a 200 + P1b 230)" against §8's ~320, and an Accept clause requiring carry-forward | **Accepted.** Re-based to ~520 together; `--no-embeddings` removes unconditionally in P1b; the fixture's `hash-64` config moves into P1b (no golden moves, because scoring still passes `semantic = 0.0`). |
+| R4-4 | DoD 9's row-3 wording | **Fixed, no action.** |
+| R4-5 | §8's P1b row still listed carry-forward, and the ~320 was justified with that work inside it | **Accepted.** The row names the embed wiring instead, and P4 rises to ~320 for the carry-forward it now owns. |
+
+That is fifteen findings across three rounds on a plan whose first draft called itself done. The
+pattern is consistent: each fix was right about the mechanism and wrong about the boundary — which
+input, which branch, which phase. Naming boundaries as carefully as formulas is the thing this
+review loop is producing.
 
 ### 9.1 SPEC corrections and gaps
 
