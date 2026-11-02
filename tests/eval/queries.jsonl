@@ -1,0 +1,35 @@
+{"query": "UTF-8 BOM frontmatter block", "intent": "current", "expect": ["notes/bom-note.md"]}
+{"query": "CRLF line endings preserved verbatim", "intent": "current", "expect": ["specs/crlf-spec.md"]}
+{"query": "block sequence tags refuse patch", "intent": "current", "expect": ["notes/block-sequence.md"]}
+{"query": "flow mapping owner status byte-identical", "intent": "current", "expect": ["notes/flow-mapping.md"]}
+{"query": "multi-line scalar folded literal summary", "intent": "current", "expect": ["notes/multiline-scalar.md"]}
+{"query": "quoted scalars escapes motto hello", "intent": "current", "expect": ["notes/quoted-scalars.md"]}
+{"query": "YAML comments between keys", "intent": "current", "expect": ["notes/yaml-comments.md"]}
+{"query": "anchor alias reviewer team platform", "intent": "current", "expect": ["notes/anchor-alias.md"]}
+{"query": "frontmatter closing fence body starts with rule", "intent": "current", "expect": ["specs/body-starts-with-rule.md"]}
+{"query": "filename date prefix no frontmatter", "intent": "current", "expect": ["notes/2025-03-07-no-frontmatter.md"]}
+{"query": "undated note declared id identity", "intent": "current", "expect": ["notes/undated.md"]}
+{"query": "supersedes target never created", "intent": "current", "expect": ["decisions/2025-03-01-broken-link.md"]}
+{"query": "open registry speculative frozen status", "intent": "current", "expect": ["notes/2025-03-05-unknown-type.md"]}
+{"query": "unicode filename spaces title falls back", "intent": "current", "expect": ["notes/überlegungen zu cache.md"]}
+{"query": "corpus notes plain well-formed root document", "intent": "current", "expect": ["2025-01-05-corpus-notes.md"]}
+{"query": "large document repeated paragraph", "intent": "current", "expect": ["big/2025-03-06-large.md"]}
+{"query": "reader records spans instead of re-serializing", "intent": "current", "expect": ["notes/flow-mapping.md"]}
+{"query": "reflow three lines unsupported patch", "intent": "current", "expect": ["notes/block-sequence.md"]}
+{"query": "comments in every position YAML grammar", "intent": "current", "expect": ["notes/yaml-comments.md"]}
+{"query": "leading rule setext underline swallow document", "intent": "current", "expect": ["specs/body-starts-with-rule.md"]}
+{"query": "CRLF aliased keys labels line-endings", "intent": "current", "expect": ["specs/crlf-spec.md"]}
+{"query": "it's fine say hello not a comment", "intent": "current", "expect": ["notes/quoted-scalars.md"]}
+{"query": "frontmatter ends at the closing fence", "intent": "current", "expect": ["specs/body-starts-with-rule.md"]}
+{"query": "supersession cycle first link", "intent": "history", "expect": ["decisions/2024-11-02-postgres-cache.md"]}
+{"query": "redis cache second link in the cycle", "intent": "history", "expect": ["decisions/2024-12-01-redis-cache.md"]}
+{"query": "cache revisited kind adr type alias", "intent": "history", "expect": ["decisions/2025-02-01-cache-revisited.md"]}
+{"query": "supersedes decisions cycle", "intent": "history", "expect": ["decisions/2024-11-02-postgres-cache.md", "decisions/2024-12-01-redis-cache.md", "decisions/2025-02-01-cache-revisited.md"]}
+{"query": "ADR decision record alias", "intent": "exhaustive", "expect": ["decisions/2025-02-01-cache-revisited.md"]}
+{"query": "unknown status frozen note fallback weight", "intent": "exhaustive", "expect": ["notes/2025-03-05-unknown-type.md"]}
+{"query": "line endings CRLF preserve read unchanged", "intent": "history", "expect": ["specs/crlf-spec.md"]}
+{"query": "BOM must not be part of the YAML block", "intent": "history", "expect": ["notes/bom-note.md"]}
+{"query": "detect broken link target does not exist", "intent": "history", "expect": ["decisions/2025-03-01-broken-link.md"]}
+{"query": "history of the cache decision", "intent": "evolution", "expect": ["decisions/2025-02-01-cache-revisited.md", "decisions/2024-12-01-redis-cache.md", "decisions/2024-11-02-postgres-cache.md"]}
+{"query": "mtime date source deliberate", "intent": "exhaustive", "expect": ["notes/undated.md"]}
+{"query": "gitignored hidden scratch dot-prefixed", "intent": "exhaustive", "expect": ["2025-01-05-corpus-notes.md"]}

@@ -23,6 +23,7 @@ jobs:
                 - '**/Cargo.lock'
                 - '**/janus.toml'
                 - '**/rust-toolchain.toml'
+                - 'tests/eval/**'
                 - '.github/workflows/*.yml'
 
   test:
@@ -42,6 +43,22 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
+
+  # Retrieval quality is a report, not a gate (§3.8, S-15). The job prints
+  # `active-top-1` and `nDCG@10` with their denominators; `continue-on-error`
+  # keeps a ranking experiment from failing the build. Milestone acceptance is a
+  # human reading this log, recorded in the PR that changes the ranking.
+  eval:
+    needs: changes
+    if: ${{ github.event_name == 'push' && needs.changes.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Report active top-1 and nDCG@10
+        run: cargo test --test eval_quality -- --ignored --nocapture
 
   # soft check - windows is not supported right now
   windows-compile:

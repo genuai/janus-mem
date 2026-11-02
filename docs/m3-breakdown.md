@@ -1711,7 +1711,189 @@ already exercised by other targets, both compile for the MSVC target from macOS.
 
 ## 15. Implementation log — Phase 6 (CLI + eval)
 
+Branches, stacked (each based on the previous one, not on `main`):
+
+| PR | Branch | Base | Logic | Tests |
+|---|---|---|---|---|
+| 6a | `bb/m3-phase-6a-index-thr_gkkixp7f4e` | `main` at `34e1e06` | 318 | 176 |
+| 6b | `bb/m3-phase-6b-search-thr_gkkixp7f4e` | 6a | 599 | 445 |
+| 6c | `bb/m3-phase-6c-filters-thr_gkkixp7f4e` | 6b | 177 | 267 |
+| 6d | `bb/m3-phase-6d-facts-eval-docs-thr_gkkixp7f4e` | 6c | 439 | 310 |
+
+The plan asked for two PRs. The single phase-6 diff measured **1384 logic lines**
+against the 600 ceiling, so the surface was split four ways along reviewable
+seams: the writer, the reader, the document filters, then facts + eval + docs.
+Every PR is under budget. The estimate (~320 logic) was written for three bullet
+points; the DTOs, `missing_docs`-required public documentation, command
+plumbing and the tests of the eval harness are what actually cost the lines.
+This is the same estimation mistake phase 5 recorded (P-9), one phase later.
+
+Scope across the four: `src/index/cmd.rs` (new), `src/search/mod.rs` (new),
+`src/search/facts.rs` (new), `src/cli.rs`, `src/main.rs`, `src/error.rs` (two
+variants), `src/lib.rs`, `src/index/build.rs` (`plan_forced`),
+`src/score.rs` (`Breakdown: Serialize`, `cmp_date_desc` public),
+`tests/cli_index.rs`, `tests/cli_search.rs`, `tests/golden_search.rs`,
+`tests/eval/queries.jsonl`, `tests/eval_quality.rs`, `scripts/eval.sh`,
+`.github/workflows/ci.yml`, `README.md`, this log, and the SPEC edits. Squarely
+absent: any change to scoring rules, the tokenizer, BM25, or the snapshot
+format. The only storage change is a reuse override (`force`), not a layout.
+
+§3.1, §3.6, §3.8, S-8, S-12, S-16 and S-19 are implemented as written.
+
+### Decisions taken
+
+- **W-1 — four stacked PRs, not two.** See the table. A reviewer can read the
+  writer, the reader, the filters and the report independently; a 1384-line diff
+  is one nobody reads carefully. All four are still one milestone phase, and the
+  phase log is the only place the sequence is written down.
+- **W-2 — `janus index PATHS` forces a targeted re-tokenization; it never builds
+  a partial index.** A partial index would make every later search silently
+  incomplete, and “index these files” is not something a cache can honour
+  without either partial results or an implicit full pass. `build::plan_forced`
+  checks a `force` set before the reuse predicate, so the index stays complete
+  and the named documents are the only extra work. `--rebuild` wins over
+  `PATHS` (a full rebuild already covers them), and an unknown path is
+  `DocumentNotInCorpus` (exit 1), never a no-op.
+- **W-3 — the stale line is printed only when this call built the generation.**
+  `Load.stale` also carries the reason a retry *recovered* from (P-4); printing
+  then would tell a caller to rebuild an index that just validated. The command
+  prints `stale: <cause>` verbatim when `load.rebuilt && load.stale.is_some()`,
+  which is exactly the §3.5 handoff. A first build prints
+  `stale: …/manifest.json is missing`; that is the honest cause and it is one
+  line. Config warnings keep their existing `warning:` line and are not counted
+  as the stale line.
+- **W-4 — two new error variants, and the CLI distinguishes “absent” from
+  “unstable”.** `JanusError::IndexMissing` (exit 1, “no index yet in …; run
+  `janus index`”) is returned before `Policy::Refuse` whenever
+  `.janus/manifest.json` is absent. `IndexUnstable` remains the stale-pair
+  refusal (P-8). `JanusError::Usage` (exit 2) carries `--scope-only` without
+  `--scope` and an unknown `--intent`; both are decisions about the request, not
+  failures of the corpus, so they belong in the library rather than in clap —
+  M6's adapters must make the same judgement (§9.5).
+- **W-5 — `--types` canonicalizes through config; `--tags` folds ASCII case.**
+  `adr` must match a document whose canonical type is `decision` (§6.6.1), so
+  the filter resolves every requested name once. Tags are authored free text, so
+  `--tags YAML` matches `yaml`; the fold is ASCII-only, matching the scope
+  normalizer, and it is a decision, not an accident (D-tags in §15 here, no SPEC
+  row needed because SPEC does not constrain tag case).
+- **W-6 — the eval calls `search::query`, not the CLI.** `query` returns an
+  owned `Outcome` (`rows`, `selected`, `hits`, `notes`, `intent`, `snapshot`) and
+  `run` only renders it. That is what lets `tests/eval_quality.rs` use the real
+  ranking path under `FixedClock(2025-04-01)` without capturing stdout or adding
+  a hidden clock flag to the binary. It is also the shape M6's MCP `search` tool
+  needs (§9.5). `Breakdown` derives `Serialize` with `final_score` renamed to
+  `final`, so the JSON cannot drift from the scoring type.
+- **W-7 — the report is `api: 1` with no `ok` field.** `scan` and `chunks` do not
+  carry `ok`, and a third report style would be worse than a missing envelope
+  field; errors stay on stderr with an exit code. The report does carry
+  `degraded: ["lexical only; embeddings arrive in M4"]` (§9.4) and `notes` for
+  what the intent hid, what `--limit` truncated, and that `--scope-only` was
+  applied.
+- **W-8 — facts cites a representative chunk.** With `--query` it is the argmax
+  by lexical value; without one it is the document's first chunk. A document
+  with zero chunks has nothing to cite and is omitted from `facts` (search can
+  never return it either, because it has no postings). This is a documented
+  limitation, not a filter.
+- **W-9 — the eval metrics are defined in code, not inferred.** `active top-1`
+  counts only `intent: current` queries whose expectation names an active
+  document (statuses read from an exhaustive empty-query pass over the same
+  snapshot); `nDCG@10` uses linear grades from the expectation order
+  (`n, n−1, …`) and the standard `gain / log2(rank+1)` discount, with the ideal
+  ordering computed from the same grades. Both print denominators.
+- **W-10 — the eval numbers are a fixture number.** Local run: `active-top-1
+  1.00 (22/22)`, `nDCG@10 0.96 (35 queries)`. The fixture is 18 keyword-rich
+  documents written to exercise a parser, so this is optimistic: a real vault has
+  near-duplicate vocabulary and thousands of documents. Recorded rather than
+  celebrated; M4 compares against these numbers on the same corpus and against
+  `tantivy` (§7.2), and a real-vault eval is a follow-up.
+- **W-11 — the `search --json` golden runs under `--intent history`.** With the
+  default intent every score carries a decay factor computed from the run date,
+  so the snapshot would need to redact the numbers that make it worth having.
+  `history` sets decay to 1.0 and leaves the ranking a function of the corpus
+  alone. Only the corpus root and `taken_ms` are redacted.
+- **W-12 — `--timing` was not added.** §3.8 allows an opt-in timing print; the
+  eval always prints its elapsed time and asserts nothing, which satisfies “a
+  number, never an assertion” without a second flag. `criterion` benches stay M8.
+
+### Tests and gates
+
+Integration coverage, all through the real binary: `index` publishes a receipt
+and `.janus/`; a second run re-tokenizes zero chunks and reuses every document;
+`--rebuild` re-tokenizes all; `--dry-run` creates no `.janus/`; a named path
+re-tokenizes exactly one document; an unknown path is named; an empty corpus
+indexes to an empty generation. `search`: the dominant-multi-chunk fixture with
+nine others returns ten distinct documents for `--limit 10`; spans,
+breadcrumbs, the full `Breakdown` and no chunk text in `--json`; the human table
+columns; type/tag filters and scope sets after a reload; `--scope-only` without
+`--scope` exits 2 for both `search` and `facts`; `facts` excludes draft/unknown
+while `search --intent current` includes them; `--include-superseded` is absent
+by default, present with the flag at factor 1.0 and the same span, and cannot
+reach `facts`; the decay override moves a `note` and leaves a timeless decision
+at 1.0; a stale index rebuilds with exactly one `stale:` line and exits 0;
+`--no-rebuild` says “no index yet” or “index is unstable” and leaves `.janus/`
+byte-identical; two identical runs are identical; search finds the corpus from a
+subdirectory; an unknown intent exits 2. Unit: the §3.6 predicate across all five
+statuses against the `current` gate. Golden: `insta` over `search --json` with
+the corpus root redacted.
+
+Gates on the final branch: `cargo fmt --all --check`, `cargo clippy
+--all-targets -- -D warnings`, `cargo test --all-targets` (337 unit + 17
+integration binaries, 0 failures; `eval_quality` is ignored), `cargo doc
+--no-deps` (0 warnings), the Windows cross-check
+(`cargo check --target aarch64-pc-windows-msvc --all-targets --features
+blake3/pure`), and `scripts/pr-size.sh` per PR (table above). `scripts/eval.sh`
+prints `active-top-1` and `nDCG@10`; the `eval` CI job is `continue-on-error`.
+
+### Where this log disagrees with the plan
+
+Nothing in §3.1, §3.6 or §3.8 needed to be overridden. Three deviations are
+recorded, all about process rather than contracts:
+
+1. **Two PRs became four.** The pilot budget, not the design, forced it (W-1).
+2. **`--timing` is absent** (W-12); the timing number is printed unconditionally.
+3. **The eval objective is per-document path, not per-chunk.** §3.8 predates the
+   §3.1 result contract, so it describes chunks implicitly. The harness grades
+   documents, which is what a caller sees. `active top-1` is therefore the
+   document metric, not the chunk metric the first draft of §3.8 implied.
+
 ## 16. Handoff to M4
 
-<!-- What M4 inherits: snapshot format and load path, the alpha seam, where
-     vectors attach, the fingerprints that force rebuilds, what M3 left out. -->
+M4 adds embeddings and the hybrid score. What it inherits from M3:
+
+- **Snapshot and manifest.** `.janus/index.bin` (bincode 1.3, `format_version =
+  1`) plus `.janus/manifest.json`, written by `store::publish` in six stages under
+  `.janus/lock`. Readers are lock-free: they hash the bytes they read, compare
+  them with `manifest.index_sha`, and retry 10/50/200 ms before taking the writer
+  lock, re-checking freshness, rebuilding once, and refusing
+  (`IndexUnstable`). `format_version` is bumped on any layout change and an index
+  is never read across a version boundary (§8.3).
+- **The alpha seam.** `score::score` already takes `semantic`, `alpha`,
+  `half_life_days` and the `Clock`, and `Breakdown` reports `semantic` separately
+  next to `lexical`. M4 fills `semantic` from a vector and sets `alpha` from
+  config (§7.2: `0.65` with an embedder, `0.0` without). `search::query` is the
+  one ranking path; the MCP adapter should call it, not re-implement it. The
+  `degraded` field in the report is where “no embedder” is announced.
+- **Where vectors attach.** `Snapshot.chunks` already carries one row per chunk
+  *occurrence* with `(doc, span, heading_path, tokens)`, so a vector array indexed
+  by snapshot chunk position attaches next to `postings` without touching
+  `DocMeta`. `Manifest.embedder: Option<String>` exists and is `None`; M4 must
+  add it to `store::Expected::check` so an embedder/model change forces a rebuild,
+  and must bump `format_version` when `index.bin` (or a new `vectors.f32`) grows
+  a section. Vectors must not change `ChunkId`, and two documents sharing a
+  `ChunkId` still need two vector rows (§3.4, CH-10).
+- **Fingerprints that force a rebuild.** `Expected::check` compares
+  `format_version`, the tokenizer fingerprint (`v1/none`), the chunker
+  `(max_chars, overlap)`, `corpus_id` and `built_root`. Reuse additionally keys on
+  `lex_key = blake3(tokenizer_fp ‖ chunker_fp ‖ effective_title)` + `content_hash`
+  + the chunk-id set. M4 adds the embedder id (model, dim, dtype) to both the
+  manifest check and, for vector reuse, the reuse key. A moved vault changes only
+  `built_root`; every `DocId` survives.
+- **What M3 deliberately left out.** `--as-of`, valid-time windows,
+  `effective_status` and scope-relative supersession (M5 — `facts` then switches
+  from declared to effective status, a behaviour change for that milestone);
+  `--diversity`/MMR and multi-chunk display (§3.1 keeps them off); stemming and
+  stopwords (S-2, and the eval decides, not taste); `--corpus` and workspace
+  registry (M5/M6); versioned generations or a commit pointer (recovery is a
+  rebuild, §3.5); timing assertions and `criterion` (M8). The `search --json`
+  DTO is `api: 1`; M4 adds fields additively (`scores.semantic` already exists and
+  is `0.0`).
