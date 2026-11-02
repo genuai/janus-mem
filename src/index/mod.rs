@@ -12,25 +12,118 @@
 //! [`StringPool`] uses a `BTreeMap` for lookup, and nothing iterates it to build
 //! output.
 //!
-//! This module contains no I/O, no serde, and no manifest. [`LexicalIndex`] is
-//! the only consumer today; phase 4 adds serialization to [`StringPool`] and the
-//! layout types below.
+//! This module contains no I/O. The phase-4 snapshot in [`store`] persists
+//! exactly these values.
 //!
 //! [`LexicalIndex`]: crate::index::LexicalIndex
 //! [`LexicalIndex::build`]: crate::index::LexicalIndex::build
 
 use std::collections::BTreeMap;
 
+use chrono::NaiveDate;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::id::{Blake3Hash, ChunkId, DocId};
+
 mod lexical;
+pub mod store;
 
 pub use lexical::{LexicalIndex, squash};
+
+/// The on-disk snapshot layout; a mismatch is a rebuild, never an error (S-6, §8.3).
+pub const FORMAT_VERSION: u16 = 1;
+
+/// The compact persisted status (§3.2); the resolver's `Status` is reused.
+pub use crate::document::Status as StatusCode;
+
+/// The chunker parameters that participate in the reuse key (§3.4, S-9).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ChunkingFingerprint {
+    /// The configured soft chunk ceiling in characters.
+    pub max_chars: usize,
+    /// The configured overlap fraction.
+    pub overlap: f64,
+}
+
+/// A rebuildable snapshot of the lexical index (`.janus/index.bin`, §2).
+///
+/// Term text lives in `strings` at the term's index in `terms`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Snapshot {
+    /// The layout version, checked before any offset is trusted.
+    pub format_version: u16,
+    /// The declared corpus identity (§6.11). Never path-derived.
+    pub corpus_id: String,
+    /// The tokenizer that produced the postings.
+    pub tokenizer: crate::tokenize::TokenizerFingerprint,
+    /// Interned vocabulary and metadata strings.
+    pub strings: StringPool,
+    /// One row per document, in snapshot order.
+    pub docs: Vec<DocMeta>,
+    /// One row per chunk occurrence, in snapshot order.
+    pub chunks: Vec<ChunkMeta>,
+    /// Per-term document frequency and posting range.
+    pub terms: Vec<TermMeta>,
+    /// Flat postings, grouped by term id and ascending by chunk.
+    pub postings: Vec<Posting>,
+    /// Mean chunk length in tokens.
+    pub avgdl: f64,
+}
+
+/// Persisted document metadata. Metadata is always rebuilt, never reused (§3.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocMeta {
+    /// Stable document identity (§6.4).
+    pub id: DocId,
+    /// Vault-relative path, `/`-separated.
+    pub rel_path: StringId,
+    /// Effective title, including the frontmatter or filename fallback.
+    pub title: StringId,
+    /// Canonical type name.
+    pub type_name: StringId,
+    /// Declared status.
+    pub status: StatusCode,
+    /// Normalised owning scope.
+    pub scope: StringId,
+    /// Retrieval tags from `shared_with`.
+    pub shared_with: Vec<StringId>,
+    /// Frontmatter tags, preserved for `--tags` after reload.
+    pub tags: Vec<StringId>,
+    /// Authored date.
+    pub date: Option<NaiveDate>,
+    /// Valid-time start (§6.10).
+    pub effective_from: Option<NaiveDate>,
+    /// Whether the type (or the document) is exempt from decay.
+    pub timeless: bool,
+    /// Hash of the full file bytes.
+    pub content_hash: Blake3Hash,
+    /// Identity of the indexed input (§3.4, S-9).
+    pub lex_key: [u8; 32],
+    /// Half-open range of this document's chunk occurrences.
+    pub chunk_range: (u32, u32),
+}
+
+/// Persisted chunk occurrence metadata (§2, §3.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkMeta {
+    /// Content identity. Never a postings key; two documents may share it.
+    pub id: ChunkId,
+    /// Index into [`Snapshot::docs`].
+    pub doc: u32,
+    /// Byte span into the document body.
+    pub span: (u32, u32),
+    /// Ancestor headings, outermost first.
+    pub heading_path: Vec<StringId>,
+    /// Token count, BM25's `dl`.
+    pub tokens: u32,
+}
 
 /// A stable, compact identity for a string in a [`StringPool`].
 ///
 /// Interned ids are assigned in insertion order, so they are deterministic for
 /// a deterministic build. The `u32` form is the one the snapshot stores; it
 /// caps a pool at [`u32::MAX`] distinct strings, far beyond any real corpus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StringId(u32);
 
 impl StringId {
@@ -57,13 +150,32 @@ impl StringId {
 /// [`StringPool::get`], once as a `BTreeMap` key for [`StringPool::lookup`].
 /// That is deliberate for a cache-sized vocabulary; a single-allocation design
 /// would need unsafe aliasing or a second index and is not worth it here.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StringPool {
     /// Strings in id order; `strings[id]` is the text of `StringId(id)`.
     strings: Vec<String>,
     /// Reverse lookup. A `BTreeMap`, not a `HashMap`, so no code path can make
     /// the build depend on hash iteration order.
     ids: BTreeMap<String, StringId>,
+}
+
+impl Serialize for StringPool {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.strings.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for StringPool {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let strings = Vec::<String>::deserialize(deserializer)?;
+        Ok(Self::from_strings(strings))
+    }
 }
 
 impl StringPool {
@@ -119,14 +231,25 @@ impl StringPool {
     pub fn is_empty(&self) -> bool {
         self.strings.is_empty()
     }
+
+    /// Rebuilds the derived reverse map from the serialized string list.
+    fn from_strings(strings: Vec<String>) -> Self {
+        let mut ids = BTreeMap::new();
+        for (index, text) in strings.iter().enumerate() {
+            if let Ok(raw) = u32::try_from(index) {
+                ids.insert(text.clone(), StringId(raw));
+            }
+        }
+        Self { strings, ids }
+    }
 }
 
 /// One term occurrence count in one chunk.
 ///
 /// `chunk` is a position in the order passed to [`LexicalIndex::build`], not a
-/// [`ChunkId`](crate::id::ChunkId): phase 4 keys postings on the indexed input,
+/// [`ChunkId`]: phase 4 keys postings on the indexed input,
 /// never on content identity (§3.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Posting {
     /// Zero-based position of the chunk in the built index.
     pub chunk: u32,
@@ -138,7 +261,7 @@ pub struct Posting {
 ///
 /// `terms` is indexed by term id, and `postings` is a half-open range into the
 /// index's flat posting list. Ranges are ascending and disjoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TermMeta {
     /// Number of chunks containing the term (document frequency).
     pub df: u32,

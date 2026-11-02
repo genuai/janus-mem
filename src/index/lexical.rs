@@ -151,6 +151,41 @@ impl LexicalIndex {
         self.lengths.len()
     }
 
+    /// The vocabulary and metadata interner, for persistence (phase 4).
+    #[must_use]
+    pub fn pool(&self) -> &StringPool {
+        &self.pool
+    }
+
+    /// Token count per chunk, in index order.
+    #[must_use]
+    pub fn lengths(&self) -> &[u32] {
+        &self.lengths
+    }
+
+    /// Reassembles an index from already-validated parts (phase 4 load).
+    ///
+    /// The caller is responsible for [`Snapshot::validate`](super::Snapshot)
+    /// having checked every id, offset and length first. This constructor is
+    /// deliberately infallible so the load path has one validation point rather
+    /// than two that can disagree.
+    #[must_use]
+    pub fn from_parts(
+        pool: StringPool,
+        terms: Vec<TermMeta>,
+        postings: Vec<Posting>,
+        lengths: Vec<u32>,
+        avgdl: f64,
+    ) -> Self {
+        Self {
+            pool,
+            terms,
+            postings,
+            lengths,
+            avgdl,
+        }
+    }
+
     /// True when the index has no chunks.
     #[must_use]
     pub fn is_empty(&self) -> bool {
