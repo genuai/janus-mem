@@ -1593,7 +1593,37 @@ now a CI step rather than a local run.
 
 ## 13. Implementation log — Phase 4 (incremental embedding)
 
-_Nothing recorded yet._
+Branch: `bb/m4-p4-incremental-embedding-thr_dcbiwnhndv`, from `main`. Scope is
+`src/index/build.rs` (the predicate, row assembly, counters, dry-run planning), `src/index/store.rs`
+(`Previous`, the previous-generation read, the drop count), `src/index/cmd.rs` (previous generation,
+`--dry-run` planner, receipt), `tests/incremental.rs` (new), `tests/cli_index.rs` and
+`tests/hybrid_search.rs` (the P1b stopgap tests flipped), and one `Publication` field in
+`tests/publish.rs`. No change to α, `score.rs`, the result contract, `search`/`facts` behaviour, the
+goldens, `fastembed`, `Cargo.toml` or `SPEC.md`. `DocMeta` keeps its shape, so `format_version` stays
+`2`.
+
+| ID | decision | why |
+|---|---|---|
+| P4-1 | `build::Previous` owns `snapshot` and `Option<(EmbedderId, Vectors)>`; `plan*` takes `Option<&Previous>`. | The rows and the snapshot must travel together: a row without its embedder cannot be compared or copied. Owning both lets `store::previous_generation` return one value and keeps `build` free of I/O. |
+| P4-2 | `reusable` now compares `old_doc.body_hash` instead of `content_hash`; `content_hash` is untouched. | V-26. **Test-first evidence:** with only the new test in place, `cargo test --lib index::build::tests::a_metadata_only_edit_reuses_tokens_and_vectors` failed with `left: 1, right: 0` at the `retokenized_chunks == 0` assertion. After the witness change it passes. The same edit now also asserts `embedded_chunks == 0` and `reused_vector_chunks == chunks`. |
+| P4-3 | `vectors_reusable` checks `body_hash`, `vec_key(old id, old title) == vec_key(target id, new title)`, `rows.len() == previous.chunks.len()`, and the chunk-id **sequence**. Rows are copied to the new positions by ordinal. | V-11/V-22/V-24. A reordered document fails `body_hash`, and the sequence conjunct makes the ordinal mapping safe as defence in depth. A pure rename that reorders two documents copies each old row to its new position rather than keeping the old file order. |
+| P4-4 | `store::previous_generation` pairs the manifest with the snapshot only when `manifest.index_sha` hashes the actual `index.bin`; it decodes rows only when `vectors_sha`, `vectors_len` and `Vectors::decode` all agree. Any mismatch returns the snapshot without rows. | A crash can leave a new index beside an old manifest. Pairing those rows would attach one generation's vector to another generation's chunk; falling back to tokens only re-embeds everything, which is the safe failure. |
+| P4-5 | Row 3 evaluates the same predicate with `target_id = previous manifest id` when no embedder is resolved. If every document passes, the rows are copied into the new positions and the manifest keeps `embedder: Some(old id)` plus the kept file's `sha`/`len`; otherwise the manifest writes all three `None` and the drop line names the failed-document count. | §3.6 R2-3/R3-2. A title-only change fails `vec_key`, so a degraded build drops rather than laundering a stale row into a fresh key. The manifest describes the file, not the writer's capability. |
+| P4-6 | `plan_forced_dry_run` computes the predicate and counters but never calls `embedder.embed`. `BuildPlan.vectors` is `None`; `vector_id` names the rows a real run would publish and `vectors_bytes()` derives the length. | `--dry-run` must not load a model. A `CountingEmbedder` test asserts zero calls, then one call for the same plan with embedding enabled, and `embedded_chunks == 1` in both. |
+| P4-7 | `BuildStats.embedded_chunks` is the number actually embedded (or planned on a dry run); `reused_vector_chunks` is the number copied from the previous generation. The JSON receipt gains `dim`, `embedded`, `reused_vectors`, `vectors_bytes` as additive fields. | The counters already existed with P1b's “always zero” comment; they now describe the build. `api` stays `1` because the fields are additive. `dim`/`vectors_bytes` are `Option` on the drop branch, where no payload exists. |
+| P4-8 | `Publication` gains `vectors_dropped: Option<usize>`, and `drop_vectors` writes `vectors dropped: N document(s) changed and this build cannot embed`. | The count is a fact only the build knows. `None` keeps the old generic degraded message for a drop with no usable previous rows. The line still fires only after the manifest rename. |
+| P4-9 | **Test flip.** `tests/hybrid_search.rs::a_no_embeddings_rebuild_publishes_a_lexical_generation_and_drops_the_payload` is replaced by `a_no_embeddings_rebuild_carries_unchanged_rows_and_drops_changed_ones`; the two `tests/cli_index.rs` tests that pinned P1b's unconditional drop are flipped the same way. | Those tests were written to be flipped (P2-11). A degraded rebuild on an unchanged corpus now keeps the payload byte-for-byte; one body edit drops it. The tests force a stale generation by patching only `manifest.corpus_id`, **not** `janus.toml`: changing `corpus_id` changes every `DocId`, which would make a carry test pass for the wrong reason (nothing would match). |
+| P4-10 | **Plan nuance.** Acceptance case 4's “identical `vectors.f32`” holds when the rename leaves document order unchanged. If a rename reorders documents, the row for each chunk is still identical, but its file position moves, so the file bytes change. | The contract that matters is row *i* belongs to chunk *i*. The unit test therefore has two renames: one with stable order asserting byte identity, and one that deliberately swaps document order asserting row-for-row equality with a clean build. |
+| P4-11 | The two §3.4 predicates carry `#[allow(clippy::too_many_arguments)]`; every argument is one conjunct or one fingerprint, and grouping them would hide which input the decision read. | Clippy's ceiling is seven; the contracts have eight inputs. The allow is local to the two predicates. |
+| P4-12 | **No split, recorded as a deviation from the ~450 seam.** Measured **465 logic / 824 tests / 1289 total**. | 465 is 3% over the pre-authorised soft seam and 22% under the hard 600 logic ceiling; tests are 9% under their 900 ceiling. The seam would cut through the same predicate, `Previous` type and test harness: carry-forward is the same predicate with a substituted id, so two stacked PRs would move those files twice and leave the first PR unable to exercise row 3. The ~320 estimate was low; the overrun is recorded rather than hidden. |
+
+**Tests added or changed.** The unit tests cover cases 1–7 and 9–10 plus a property test over generated
+title, body and metadata edits. The property recomputes every expected row from the new document's
+`embed_text`, asserts the snapshot's chunk-id sequence, and checks every row against it. The
+integration file covers the receipt counters, a second `index` (`embedded 0`, byte-identical payload),
+a metadata-only edit (`embedded 0`, `retokenized 0`), both rename kinds, carry-then-drop, `--dry-run`
+writing nothing while predicting the real run's count, `--rebuild` matching a clean payload, and the
+one drop line. No golden moved.
 
 ## 14. Implementation log — Phase 5 (eval, baseline, docs)
 

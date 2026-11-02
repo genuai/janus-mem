@@ -217,13 +217,15 @@ fn a_second_index_produces_byte_identical_payloads() {
 }
 
 #[test]
-fn no_embeddings_drops_the_payload_with_one_line_and_a_read_rebuilds_it_once() {
+fn no_embeddings_carries_an_unchanged_payload_and_a_read_keeps_it() {
     let vault = fixture_vault();
     index(vault.path());
-    assert!(vault.path().join(".janus/vectors.f32").exists());
+    let payload = vault.path().join(".janus/vectors.f32");
+    let before = fs::read(&payload).expect("read the payload");
+    let before_sha = manifest(vault.path())["vectors_sha"].clone();
 
-    // Default tracing on purpose: the drop is a diagnostic, and silencing it
-    // would make "says so" unverifiable.
+    // Default tracing on purpose: a carry is silent, and the next test asserts
+    // the one line a genuine drop writes.
     let output = janus()
         .arg("--vault")
         .arg(vault.path())
@@ -235,47 +237,32 @@ fn no_embeddings_drops_the_payload_with_one_line_and_a_read_rebuilds_it_once() {
         "index failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!vault.path().join(".janus/vectors.f32").exists());
-
     let stderr = String::from_utf8(output.stderr).unwrap();
-    let about_vectors: Vec<&str> = stderr
-        .lines()
-        .filter(|line| line.contains("vectors"))
-        .collect();
-    assert_eq!(
-        about_vectors.len(),
-        1,
-        "expected exactly one line about the dropped payload: {stderr:?}"
+    assert!(
+        !stderr.lines().any(|line| line.contains("vectors dropped")),
+        "a carry writes no drop line: {stderr:?}"
     );
-    assert!(about_vectors[0].contains("dropped"), "{stderr:?}");
-
+    assert!(
+        payload.exists(),
+        "nothing changed, so row 3 carries the payload instead of dropping it"
+    );
+    assert_eq!(fs::read(&payload).expect("read the payload"), before);
     let manifest = manifest(vault.path());
-    assert!(manifest["embedder"].is_null(), "{manifest}");
-    assert!(manifest["vectors_sha"].is_null(), "{manifest}");
-    assert!(manifest["vectors_len"].is_null(), "{manifest}");
+    assert_eq!(manifest["embedder"]["name"], "hash-64", "{manifest}");
+    assert_eq!(manifest["vectors_sha"], before_sha, "{manifest}");
 
-    // A read that can embed treats a vectors-less generation as stale (V-21
-    // row 5): one stale line, one rebuild, and the payload is back.
+    // A read that can embed treats the vectors-bearing generation as current.
     let output = run(vault.path(), &["search", "cache", "--json"]);
     assert!(
         output.status.success(),
-        "the row-5 rebuild failed: {}",
+        "the read failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let stale: Vec<&str> = stderr
-        .lines()
-        .filter(|line| line.starts_with("stale:"))
-        .collect();
-    assert_eq!(stale.len(), 1, "expected one stale line: {stderr:?}");
-    assert!(stale[0].contains("no vectors"), "{stale:?}");
-    assert!(
-        vault.path().join(".janus/vectors.f32").exists(),
-        "the rebuild that row 5 triggers must bring the payload back"
-    );
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+    assert!(payload.exists());
 
-    // A process that cannot embed is not stale: row 6 loads and writes nothing,
-    // `--no-rebuild` included.
+    // A process that cannot embed is not stale either: row 6 loads and writes
+    // nothing, `--no-rebuild` included.
     let config_path = vault.path().join("janus.toml");
     let config = fs::read_to_string(&config_path).unwrap();
     fs::write(
@@ -322,14 +309,21 @@ fn a_read_triggered_rebuild_keeps_the_vectors() {
 }
 
 #[test]
-fn indexing_again_after_no_embeddings_restores_the_payload() {
+fn indexing_again_after_no_embeddings_reuses_the_carried_payload() {
     let vault = fixture_vault();
     index(vault.path());
+    let payload = vault.path().join(".janus/vectors.f32");
+    let before = fs::read(&payload).expect("read the payload");
     run_ok(vault.path(), &["index", "--no-embeddings"]);
-    assert!(!vault.path().join(".janus/vectors.f32").exists());
+    assert_eq!(
+        fs::read(&payload).expect("read the carried payload"),
+        before,
+        "row 3 carries the rows, and the next featured build reuses them"
+    );
 
-    index(vault.path());
-    assert!(vault.path().join(".janus/vectors.f32").exists());
+    let report = receipt(vault.path(), &["--json"]);
+    assert_eq!(report["embedded"], 0, "{report}");
+    assert_eq!(report["reused_vectors"], report["chunks"], "{report}");
     assert_eq!(manifest(vault.path())["embedder"]["name"], "hash-64");
 }
 

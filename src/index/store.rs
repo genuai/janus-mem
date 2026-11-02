@@ -511,6 +511,9 @@ pub struct Publication<'a> {
     pub chunker: ChunkingFingerprint,
     /// The rows to write to `vectors.f32`, or `None` for a lexical generation.
     pub vectors: Option<&'a VectorSet>,
+    /// Documents whose rows a previous payload could not carry; the drop line
+    /// names this count. `None` keeps the generic degraded message.
+    pub vectors_dropped: Option<usize>,
     /// Injected build time; no library path invents one (I-3).
     pub built_at: &'a str,
 }
@@ -613,29 +616,35 @@ fn publish_locked(
     // Now the new commit record says `embedder: None`, so no reader opens the
     // file. An orphan left by a crash between the two renames is unreachable
     // and is overwritten by the next vectors-bearing publish.
-    if publication.vectors.is_none() && drop_vectors(dir)? {
+    if publication.vectors.is_none() && drop_vectors(dir, publication.vectors_dropped)? {
         hook(Stage::VectorsDropped);
     }
     Ok(manifest)
 }
 
-/// Removes a previous `vectors.f32` when this build cannot write one (§3.6).
+/// Removes a previous `vectors.f32` when this build cannot carry its rows (§3.6).
 ///
-/// P1b has no reuse predicate, so a degraded build cannot carry a row forward
-/// and must drop the file rather than leave rows the next manifest does not
-/// describe. P4 replaces this branch with the carry-forward rule; until then the
-/// removal is unconditional and announced on exactly one line.
+/// The caller has already re-evaluated §3.4's predicate under the previous
+/// manifest's embedder id; `documents` is how many failed it. A build that can
+/// carry every row publishes `Some(vectors)` and never reaches here. On drop the
+/// manifest has just been renamed with all three vector fields `None`, so no
+/// reader can open the file this removes.
 ///
 /// Returns whether a payload was actually removed, which is what the
 /// [`Stage::VectorsDropped`] seam reports.
-fn drop_vectors(dir: &Path) -> Result<bool, JanusError> {
+fn drop_vectors(dir: &Path, documents: Option<usize>) -> Result<bool, JanusError> {
     let path = dir.join(VECTORS_FILE);
     match fs::remove_file(&path) {
         Ok(()) => {
             sync_dir(dir)?;
-            tracing::warn!(
-                "vectors dropped: this build has no embedder, so {VECTORS_FILE} cannot be rebuilt"
-            );
+            match documents {
+                Some(changed) => tracing::warn!(
+                    "vectors dropped: {changed} document(s) changed and this build cannot embed"
+                ),
+                None => tracing::warn!(
+                    "vectors dropped: this build has no embedder, so {VECTORS_FILE} cannot be rebuilt"
+                ),
+            }
             Ok(true)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -1116,6 +1125,7 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
         snapshot: &plan.snapshot,
         chunker: plan.chunker,
         vectors: plan.vectors.as_ref(),
+        vectors_dropped: plan.vectors_dropped,
         built_at: options.built_at,
     };
     let manifest = publish_locked(&publication, &mut |_| {}, &lock)?;
@@ -1136,7 +1146,8 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
     })
 }
 
-/// Computes the next snapshot from the vault, reusing tokens where §3.4 allows.
+/// Computes the next snapshot from the vault, reusing tokens and rows where
+/// §3.4 allows.
 fn rebuild_plan(
     root: &Path,
     config: &Config,
@@ -1146,7 +1157,7 @@ fn rebuild_plan(
     let walk = vault::walk(root, config, WalkOptions::default())?;
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
     identity::derive_identity(&mut documents, config);
-    let previous = previous_snapshot(dir);
+    let previous = previous_generation(dir);
     Ok(build::plan(
         config,
         &documents,
@@ -1155,10 +1166,44 @@ fn rebuild_plan(
     )?)
 }
 
-/// The old snapshot if its bytes still decode: reuse needs tokens, not a manifest.
-fn previous_snapshot(dir: &Path) -> Option<Snapshot> {
-    let bytes = fs::read(dir.join(INDEX_FILE)).ok()?;
-    Snapshot::from_bytes(&bytes).ok()
+/// The previous snapshot and its validated rows, if both are usable (§3.4).
+///
+/// A corrupt snapshot is no reuse source. The rows are paired with the manifest
+/// only when that manifest names the snapshot's exact bytes: a crash can leave a
+/// new `index.bin` beside an old manifest, and pairing those rows with this
+/// snapshot would misalign every row. Any decode failure means `None`, which
+/// makes the build re-embed everything.
+pub(crate) fn previous_generation(dir: &Path) -> Option<build::Previous> {
+    let index_bytes = fs::read(dir.join(INDEX_FILE)).ok()?;
+    let snapshot = Snapshot::from_bytes(&index_bytes).ok()?;
+    let manifest_bytes = fs::read(dir.join(MANIFEST_FILE)).ok()?;
+    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).ok()?;
+    if manifest.index_sha != blake3::hash(&index_bytes).to_hex().to_string() {
+        return Some(build::Previous::tokens(snapshot));
+    }
+    let vectors = match (
+        manifest.embedder.as_ref(),
+        manifest.vectors_sha.as_ref(),
+        manifest.vectors_len,
+    ) {
+        (Some(id), Some(sha), Some(len)) => {
+            let Ok(bytes) = fs::read(dir.join(VECTORS_FILE)) else {
+                return Some(build::Previous::tokens(snapshot));
+            };
+            if bytes.len() as u64 != len || blake3::hash(&bytes).to_hex().to_string() != *sha {
+                None
+            } else {
+                Vectors::decode(&bytes, id.dim, snapshot.chunks.len())
+                    .ok()
+                    .map(|rows| (id.clone(), rows))
+            }
+        }
+        _ => None,
+    };
+    Some(match vectors {
+        Some((id, rows)) => build::Previous::with_vectors(snapshot, id, rows),
+        None => build::Previous::tokens(snapshot),
+    })
 }
 
 /// The persisted fingerprint names only known algorithms and stemmers (I-1).
@@ -1317,6 +1362,7 @@ mod tests {
                 overlap: 0.15,
             },
             vectors: None,
+            vectors_dropped: None,
             built_at: "2025-04-01T00:00:00Z",
         };
         let manifest = publish(&publication).expect("publish");
