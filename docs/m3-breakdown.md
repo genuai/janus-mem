@@ -515,7 +515,12 @@ assumes the pathname still holds the generation the manifest names. That is prec
 why an old manifest is not dangerous: it produces a mismatch, and a mismatch produces a
 retry or a rebuild — never a half-loaded index.
 
-**Reader protocol** (no lock — readers must never block on a builder):
+**Reader protocol.** The *validated-read* path (steps 1–4) takes no lock, so a reader
+never blocks a healthy read on a writer. **Step 5 is different on purpose**: recovery
+takes the writer lock, and therefore may wait for an active publisher — bounded by the
+same 10 s timeout, after which it is `IndexUnstable` rather than a hang. “Lock-free
+reads” describes the common path, not every path: a reader that has already failed to
+validate a generation twice is going to write, and writing is what the lock protects.
 
 1. Read `manifest.json`. Absent → “not built” (auto-build path).
 2. Reject on `format_version`, `tokenizer_fp`, `chunker_fp`, `corpus_id`, or
@@ -524,14 +529,23 @@ retry or a rebuild — never a half-loaded index.
 4. Match → load and validate; mismatch → **generation changed under us** or
    corruption → re-read the manifest and retry, up to 3 times with 10/50/200 ms
    backoff.
-5. Still mismatched → take the lock and rebuild once; if that also fails,
+5. Still mismatched → take the writer lock (this may wait for a publisher, up to the
+   timeout) and **re-check freshness under it**: if another process completed a
+   generation while we waited, adopt it and do not rebuild. Otherwise rebuild once. If
+   the lock times out or the rebuild also fails to validate,
    `JanusError::IndexUnstable { path }`, exit 1, naming the file.
 
-**Generation identity is the pair `(format_version, index_sha)`.** Because
-`index.bin` is renamed *before* `manifest.json`, a reader that sees generation *G*
-in the manifest is guaranteed that `index.bin` already holds *G*: the only reachable
-mismatch is “new index, old manifest”, which the retry resolves. This is why the
-order is fixed and why step 8 exists.
+**Generation identity is `(format_version, index_sha)`.** A successful checksum
+validates the bytes the reader actually read; it makes no promise about the current
+contents of the pathname. A mismatch may be **transient** during publication or
+**persist** after an interrupted publish, and those need different responses: retry,
+then rebuild under the writer lock when allowed; otherwise refuse without writing.
+
+The fixed order (`index.bin` before `manifest.json`) still matters, but for a weaker
+and honest reason: it makes “new manifest, old index” unreachable, so the only
+mismatch a reader meets is “new index, old manifest” — the state a completed-but-not-
+published generation leaves behind. It does not make the pair atomic, and this plan
+does not pretend it does.
 
 **Load-time validation** (a hand-edited `index.bin` must not index out of bounds):
 every `StringId` `< strings.len()`, every `(start, end)` `<= postings.len()` and
@@ -543,17 +557,24 @@ violation is a checksum-equivalent corruption: rebuild, never a panic.
 
 1. **Reader during publication.** A `#[doc(hidden)] pub fn publish_with_hook(dir,
    snapshot, &mut dyn FnMut(Stage))` seam calls back at each of the six writer
-   stages; a test runs a reader at every stage and asserts it either loads the
-   *previous* generation (sha matches the bytes it read) or retries into the new one.
-   No test sleeps to create the race.
+   stages. At each stage the test spawns a reader thread and lets the publisher
+   **continue** — never pauses it, because a paused publisher holds the lock that a
+   reader’s recovery path waits on, which would deadlock the test rather than test
+   anything. Assertions: the reader returns successfully; the hits equal **either**
+   the pre- or the post-publication set and never a mix; the bytes it loaded hash to
+   the manifest it read; and a reader that met a mismatch but adopted the completed
+   generation reports `rebuilt == false`. No test sleeps to create the race.
 2. **Two simultaneous auto-builds.** Two threads call the auto-build path against a
    missing index with the same root; assert exactly one built (`rebuilt` count 1,
    `reused` 1) and both returned identical hits.
 3. **Lock timeout.** A holder keeps the lock; the second writer with a 10 ms timeout
    exits 1 with `lock timeout` and writes no temp file — no publish started, so the
    current generation is untouched and loadable.
-4. **Failed publish, interrupted after the index rename** (injected between steps 6
-   and 8): the pair is inconsistent by construction, and both halves of the contract
+4. **Failed publish, interrupted after the index rename.** The post-interruption
+   state is *constructed directly* — new `index.bin` bytes, old `manifest.json`, no
+   publisher running — because that is the durable state a crash leaves, and it is
+   deterministic to build without racing anything. (The hook from case 1 is what
+   asserts the ordering; this case asserts the recovery.) Both halves of the contract
    are asserted. (a) The next read with rebuild allowed rebuilds from the vault and
    returns hits identical to a clean build, with one stderr line naming the cause.
    (b) The same read with `--no-rebuild` exits 1 with empty stdout, names
@@ -907,16 +928,16 @@ validating and retrying.
 **Build (~200 logic lines):** `LockFile` guard with the 10 s timeout; the six-stage
 publish; the double-checked freshness re-test under the lock; stale temp sweep;
 `publish_with_hook` (doc-hidden) for deterministic interleaving; the reader’s
-read→validate→retry loop with 10/50/200 ms backoff and the one rebuild attempt;
-two new error variants with exit code 1 and messages that name `.janus/lock` /
-`.janus/index.bin`.
+read→validate→retry loop with 10/50/200 ms backoff, then the lock (may wait for a
+publisher) with a freshness re-check before the single rebuild attempt; two new error
+variants with exit code 1 and messages that name `.janus/lock` / `.janus/index.bin`.
 
-**Tests (~300 lines):** the six §3.5 acceptances, all deterministic: reader at every
-publication stage via the hook; two concurrent auto-builds (threads, counter
-assertions, no sleeps); lock timeout; injected failure after the index rename with
-rebuild recovery **and** `--no-rebuild` refusal; injected failure before the rename
-loading unchanged; corrupt/truncated/zeroed bytes; 8-reader storm during publish with
-zero errors. A test asserts the publish order by recording hook stages
+**Tests (~300 lines):** the six §3.5 acceptances, all deterministic: a reader spawned
+at every publication stage while the publisher keeps running (no pause, no deadlock);
+two concurrent auto-builds (threads, counter assertions, no sleeps); lock timeout; the
+post-interruption pair built directly, asserting rebuild recovery **and** `--no-rebuild`
+refusal; a failure before the rename loading unchanged; corrupt/truncated/zeroed bytes;
+8-reader storm during publish with zero errors. A test asserts the publish order by recording hook stages
 and checking `index.bin` is visible before `manifest.json` is replaced.
 
 **Handoff (paste):** “Implement Phase 5 of M3 per `docs/m3-breakdown.md` §3.5 and
@@ -924,9 +945,12 @@ Phase 5. `.janus/lock` is exclusive for writers with a 10 s timeout and held acr
 the entire publish; readers never lock. Unique temp file per writer, `index.bin`
 renamed before `manifest.json`, directory `fsync` after each. Reader validates bytes
 against `manifest.index_sha` and retries (10/50/200 ms), then rebuilds once, then
-`IndexUnstable`. A failure after the index rename is recovered by **rebuilding**, not
-by restoring old bytes: assert that, and assert `--no-rebuild` refuses without writing.
-Tests must interleave through `publish_with_hook`, not `sleep`.”
+`IndexUnstable`. Recovery takes the writer lock and may wait for a publisher; the
+normal validated read does not lock at all. A failure after the index rename is
+recovered by **rebuilding**, not by restoring old bytes: assert that, and assert
+`--no-rebuild` refuses without writing. Tests interleave through `publish_with_hook`
+and never pause a publisher that holds the lock — build the post-crash state directly
+instead. No `sleep`.”
 
 **Accept:** all six pass; `cargo test` never sleeps; two processes cannot produce a
 mixed generation (asserted by the hook test).
@@ -1081,14 +1105,14 @@ Seven findings from review, resolved as follows.
 | 6 | `s/(s+4)` silently replaced SPEC’s sigmoid | Kept the sigmoid and defined it scale-free: `lexical = s/(s+s_ref)`, `s_ref = Σ idf(t)`; numeric tables for `r → lexical` and a worked N=40/tf example; rationale is that `idf` grows with `ln N`, so a fixed midpoint is corpus-dependent. | §3.3, S-5, P2 |
 | 7 | `≥0.80` assertion inside `cargo test`; wall-clock assertion; §11 criterion replaced | Three homes: correctness gates in `cargo test`; quality as an `#[ignore]`d harness + non-blocking CI job publishing both numbers; milestone acceptance as a manual step that keeps §11’s wording verbatim; timing printed, never asserted; `active top-1` denominator defined (current-intent queries expecting an active document); `FixedClock` in all retrieval/eval tests. | §3.8, S-15, §7, P6 |
 
-### Second review pass (four follow-ups)
+### Second review pass (five follow-ups)
 
 | # | Finding (short) | Resolution | Where |
-|---|---|---|---|
 | 8 | Failed-publish recovery claimed the previous generation survives | Corrected outright: after the index rename the old bytes are **gone**, so nothing can restore them. The contract is now “either a validated generation loads, or the next allowed read rebuilds one”, with a per-failure-point table; `--no-rebuild` refuses without writing. No versioned generations, commit pointer, or rename-last index — that would be new storage machinery for a cache that can be recomputed (§3.5). The reader guarantee is restated as *validating the bytes it read*, not trusting the manifest. | §3.5, S-17, P5, DoD 4–5 |
 | 9 | `avgdl` monotonicity had the wrong direction | Inverted to **increasing** in `avgdl` (decreasing in `dl`), with `df` held fixed in both length properties and positive-input preconditions (`tf ≥ 1`, `dl ≥ 1`, `avgdl > 0`); the reviewer’s independent values `1.000000` and `1.257142857` are kept as test literals and as a row in the phase-2 table. | §5 P2 |
 | 10 | `--include-superseded` accepted as an inert flag | Implemented against declared status: it widens `current`'s inclusion set by `superseded` at factor **1.0**, decay unchanged; `deprecated` and `facts` unaffected; a no-op (not an error) under `history`/`evolution`/`exhaustive`. CLI acceptance: absent by default, present with the flag, same span, and still absent from `facts`. | §3.2, S-19, P3/P6 |
 | 11 | `(final, date, chunk_id)` is not a total order | SPEC's keys first, then `DocId`, then `rel_path`, for documents; within one document `chunk_id` then `ordinal`. Shuffle-stability test plus a pinned within-document tie; the extension is called out as a documented addition in §9’s SPEC gaps. | §3.1, S-16, P3/P6 |
+| 12 | An obsolete “reader is guaranteed the index path holds G” paragraph survived beside the corrected protocol | Deleted and replaced: a checksum validates the bytes that were read, never the pathname’s current contents; a mismatch is transient during publication or persistent after an interruption, so the response is retry, then rebuild under the writer lock, then refuse. The reader-protocol heading now says the validated path is lock-free while **recovery takes the writer lock and may wait**; step 5 re-checks freshness before rebuilding, and the hook-based test no longer pauses a publisher (which would deadlock a recovery on that same lock) — the post-crash state is built directly instead. | §3.5, P5 |
 
 Also fixed in the first pass: the tokenizer ownership contract (§3.7), `--tags` support
 after reload via `DocMeta.tags` (§2, P4/P6), and the BM25 test defects — literal
