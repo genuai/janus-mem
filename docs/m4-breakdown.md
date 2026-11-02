@@ -60,21 +60,17 @@ claims inherited from the brief are not what the code does, and the difference c
    "costs zero embedding work" (M4). No `path_history`, no file-hash comparison and no move
    detection is built in M4.
 
-**Status: revised twice after review; awaiting round 3.** No implementation exists. Every phase log
-in §10–§14 is empty on purpose.
+**Status: revised three times after review; awaiting round 4.** No implementation exists. Every
+phase log in §10–§14 is empty on purpose.
 
-**Revision note.** Round 1 of independent review returned 15 findings and the verdict *needs another
-round*; all 15 were verified and accepted, and §9.0 maps each one to its resolution. Three were
-blockers, and two of those were defects in **shipped M3 code** that this plan was about to copy:
-the reuse key ignored the difference between normalised text (what `ChunkId` hashes) and raw text
-(what the embedder sees), and the reuse predicate compared a chunk-id *set* while copying rows by
-*ordinal*, so a section reorder would attach one section's data to another. The third blocker was
-the feature-off/featured binary pair deleting each other's vectors. Round 2 checked the fixes and
-found that three of them were locally right and globally inconsistent: the raw-text witness was too
-coarse (`content_hash` is the whole file, so a one-tag edit re-embeds), the carry-forward branch
-wrote a manifest that contradicted itself, and one claim about shipped M3 code was simply false.
-Both rounds are recorded in §9.0, including the findings I rejected nothing from and the one claim
-I got wrong.
+**Revision note.** Three rounds of independent review, 19 findings, none rejected. Round 1 found
+three blockers, two of them defects in **shipped M3 code** this plan was about to copy. Round 2
+found that three of those fixes were locally right and globally inconsistent: the raw-text witness
+was too coarse (`content_hash` is the whole file, so a one-tag edit re-embeds), the carry-forward
+branch wrote a manifest that contradicted itself, and one claim about shipped M3 code was simply
+false. Round 3 found that two of *those* fixes were still incomplete — a title-only change slips
+past the drop trigger, and `body_hash` was landing in a phase that would need a second
+`format_version` bump. Every finding and its resolution is in §9.0.
 
 ## 0. Scope
 
@@ -238,7 +234,8 @@ pub struct LoadOptions<'a> {
 
 pub struct DocMeta {
     /* … unchanged … */
-    /// blake3 of `Document.body`: the witness both caches key on (V-26).
+    /// blake3 of `Document.body` **raw**, never a normalised body (V-26) — the
+    /// witness both caches key on. Lands in P1b with the layout, not in P4.
     /// `content_hash` stays, as the whole-file fact M5's move detection wants.
     pub body_hash: Blake3Hash,
 }
@@ -514,8 +511,13 @@ SPEC §8.7 and CH-9) keeps every `ChunkId` byte-identical and changes every embe
 **whole file** (`src/vault/mod.rs`), frontmatter included. Using it as the witness is correct but
 far too coarse: adding one tag to a document re-hashes the file and would force a re-embed of text
 that did not change — which makes this plan's own acceptance case 2 impossible, and which is
-already M3's behaviour for tokens (a tag edit re-tokenizes today). So P4 adds `DocMeta.body_hash =
-blake3(doc.body)` and **both** predicates key on it:
+already M3's behaviour for tokens (a tag edit re-tokenizes today). So `DocMeta.body_hash =
+blake3(doc.body)` **lands in P1b with the layout** and **both** predicates key on it:
+
+**Hash the raw `Document.body`, never a normalised body.** `Document.body` is the verbatim
+Markdown the chunker and the embedder read; a normalised hash would fold CRLF and reopen exactly
+the EOL hole V-23 closes. It is one blake3 per document per build over bytes that are already in
+memory.
 
 | What changed | `body_hash` | `vec_key` | chunk-id sequence | result |
 |---|---|---|---|---|
@@ -695,9 +697,17 @@ one `stale:` line, and `--no-rebuild` still refuses and writes nothing.
 
 **Row 3: carry vectors forward, drop only what cannot be carried.**
 The first draft removed `vectors.f32` unconditionally, which turns one degraded `janus index` into
-a full re-embed for the next featured run. Instead the build reuses rows exactly as P4 does, and
-the file is removed **only when at least one document's rows cannot be carried forward** (its
-`body_hash` or chunk sequence changed).
+a full re-embed for the next featured run. Instead the build **re-evaluates the §3.4 predicate with
+the manifest's embedder id substituted for the one it does not have**, and the file is removed only
+when at least one document fails it.
+
+Substituting the id is the load-bearing part (round-3 fix). A degraded build that carried a row
+while stamping a *fresh* `vec_key` would launder staleness: the next featured run would compare
+`old.vec_key == new.vec_key`, get a match, and reuse the old row against a snapshot whose title had
+changed. A title change is exactly the case §3.7 describes — `chunk_id` excludes the title and the
+body is untouched, so `body_hash` and the chunk-id sequence both say "unchanged" while the embedded
+text is different. Evaluating the predicate under `Some(kept_id)` covers title, body, order and
+embedder in one rule instead of four.
 
 **Two branches, two manifest states, and they must not be confused (round-2 fix).** On
 carry-forward the manifest keeps `embedder: Some(<the previous id>)`, `vectors_sha` and
@@ -711,6 +721,14 @@ run would then hit row 5 and re-embed the corpus, which is the cost row 3 exists
 On the drop branch the manifest writes all three as `None`, the file is removed, and one stderr
 line says `vectors dropped: N document(s) changed and this build cannot embed`. If nothing changed,
 the vectors survive a degraded `index` untouched — which is also why row 6 is safe.
+
+**Both branches land in P4, not P1b (round-3 fix).** Before P4 no CLI path produces vectors at all
+(the embedder is not wired into `build::plan` until then), so a degraded publish in P1b cannot have
+a good file to carry. P1b therefore **drops** vectors on a degraded publish and says so; P4 adds
+carry-forward together with the predicate that makes it correct, instead of shipping a coarse
+`content_hash` stand-in and widening it later. `DocMeta.body_hash` itself moves into **P1b**, because
+it is a layout field and a second layout change would need a second `format_version` bump (V-1, and
+AGENTS.md's rule that *any* on-disk layout change bumps it).
 
 `--no-embeddings` means two different things and the plan says so in one place (V-14): on `index` it
 *is* a statement about the generation, and on `search`/`facts` it is a statement about the query.
@@ -802,7 +820,7 @@ the chunker is the thing that must not be re-implemented.
 | V-23 | `ChunkId` is not a proxy for the embedded text | `chunk_id` hashes `normalize(text)`; `embed_text` appends the raw span, and prepends the title. So the predicate carries a raw-text witness and `vec_key` carries the title. An EOL-only rewrite re-embeds. | `src/index/build.rs` |
 | V-24 | The chunk comparison is a **sequence** | `old_chunks.iter().map(|c| c.id).eq(new.iter().map(|c| c.id))`. A set plus a count permits a reorder, and rows are copied by position. This is defence in depth, not a bug fix: `body_hash` already denies reuse after a reorder, and M3's set check is likewise unreachable behind `content_hash`. P4 does not edit M3 for ordering. | `src/index/build.rs` |
 | V-25 | Model directories are an argument | `resolve(&Config, &ModelDirs)`; `ModelDirs` is built in `main` from `[embedding] model_dir` → `JANUS_MODEL_DIR` → the cache dir. No `std::env` below `main`, which is what makes the no-env test possible. | `src/main.rs`, `src/index/embed.rs` |
-| V-26 | The reuse witness is `body_hash`, not `content_hash` | New `DocMeta.body_hash = blake3(doc.body)`; **both** predicates (vectors and M3's tokens) use it. `content_hash` is the whole file, so a one-tag edit would re-embed and re-tokenize text that did not change — making acceptance case 2 impossible. Conservative by design: a body edit that alters no embedded text still re-embeds. | `src/index/mod.rs`, `src/index/build.rs` |
+| V-26 | The reuse witness is `body_hash`, not `content_hash` | New `DocMeta.body_hash = blake3(doc.body)` — **raw body, never normalised** — landed in P1b with the layout (so one `format_version` covers both changes), consumed by **both** predicates in P4 (vectors and M3's tokens). `content_hash` is the whole file, so a one-tag edit would re-embed and re-tokenize text that did not change — making acceptance case 2 impossible. Conservative by design: a body edit that alters no embedded text still re-embeds. | `src/index/mod.rs` (P1b), `src/index/build.rs` (P4) |
 
 ## 5. Phases
 
@@ -849,11 +867,13 @@ and `model_dir`), `src/lib.rs`, `src/main.rs` (`ModelDirs`), `tests/publish.rs`,
    table's three rows (V-5, V-6, V-13, V-25).
 4. **P1b.** `Manifest`: `embedder: Option<EmbedderId>`, `vectors_sha`, `vectors_len`;
    `format_version = 2`; `Expected` implements **V-21's ordering** (acceptable / stale / stale) and
-   checks the manifest's three-way consistency.
+   checks the manifest's three-way consistency. `DocMeta.body_hash` lands here too — a layout field
+   belongs with the version bump, and putting it in P4 would make two layout changes share one
+   `format_version` (V-1, round-3 fix).
 5. **P1b.** `store::publish`: three new `Stage`s, `vectors.f32` written and renamed first, manifest
-   last, `vectors_sha` from the bytes actually written, and the **carry-forward** rule of row 3 of
-   §3.6: a generation without vectors keeps the old file when every row can be carried, and removes
-   it (with one stderr line) only when one cannot.
+   last, `vectors_sha` from the bytes actually written, and a degraded publish **drops** any existing
+   file with one stderr line. The **carry-forward** half of row 3 of §3.6 is P4's, because it needs
+   the predicate and because no CLI path produces vectors before then.
 6. **P1b.** `store::load`: `want_vectors` + `embedder` in `LoadOptions`; read, hash, decode and
    validate `vectors.f32` when wanted; the retry/refuse outcomes of V-3 with the file name in the
    message; row 6 of §3.6 (vectors-bearing generation, no embedder) never rebuilds.
@@ -875,9 +895,10 @@ reader at every stage still sees one validated generation; **every row of the §
 (never by racing a publisher); flipped byte, truncation, zeroed file, missing `vectors.f32`, wrong
 row count; `format_version = 1` refused with a warning; `want_vectors = false` never opens the file
 (asserted by deleting it and reading successfully); **row 6**: a feature-free read of a
-vectors-bearing generation loads, reports `degraded`, and leaves `.janus/` byte-identical; **row 3**:
-a degraded `index` with no document changes leaves `vectors.f32` byte-identical, and one with a
-changed document drops it with exactly one stderr line.
+vectors-bearing generation loads, reports `degraded`, and leaves `.janus/` byte-identical; **row 3,
+P1b half**: a degraded `index` drops `vectors.f32` and says so in exactly one stderr line, and the
+next `format_version = 2` read of that generation succeeds with `embedder: None`. The **carry-forward
+half is P4's**, with the predicate that makes it correct.
 
 **Handoff (paste):** "Implement Phase 1 of M4 for janus-mem per `docs/m4-breakdown.md` §3.1, §3.2
 and Phase 1. Read `src/index/store.rs` (publication + reader) and `docs/m3-breakdown.md` §3.5
@@ -1005,10 +1026,12 @@ checkable numbers rather than claims.
 previous vectors), `src/index/cmd.rs` (receipt, `--dry-run` planning), `src/search/mod.rs`
 (`LoadOptions` plumbing), `tests/cli_index.rs`, `tests/incremental.rs` (new).
 
-**Build (~280 logic lines):** `EmbedderId::to_bytes` feed into `vec_key` (V-22); `DocMeta.body_hash`
-and the switch of both predicates to it (V-26); the reuse predicate of §3.4 — `body_hash`, `vec_key`,
-and the **chunk-id sequence** (V-23, V-24); row
-copying into the new positions; `embedded_chunks`/`reused_vector_chunks`; `plan` becomes fallible
+**Build (~280 logic lines):** `EmbedderId::to_bytes` feed into `vec_key` (V-22); the switch of both
+predicates to the `body_hash` field P1b already lays out (V-26); the reuse predicate of §3.4 —
+`body_hash`, `vec_key`, and the **chunk-id sequence** (V-23, V-24); row
+copying into the new positions; **row 3's carry-forward branch** of §3.6, i.e. the same predicate
+evaluated with the manifest's embedder id substituted when this build cannot embed (a title change
+must drop, not carry); `embedded_chunks`/`reused_vector_chunks`; `plan` becomes fallible
 (the embedder can fail) and every caller updates; `--dry-run` computes the reuse decision and
 reports `would_embed` **without calling the embedder**; the receipt gains `dim`, `embedded`,
 `reused_vectors`, `vectors_bytes`; `--rebuild` drops the previous vectors as well as the previous
@@ -1020,11 +1043,14 @@ the named counter); case 2 (a tags-only edit reuses everything) is the `body_has
 must **fail on `main`** before the witness change, for tokens as well as vectors — a test that
 passes before the change proves nothing; case 5 (derived-title rename re-embeds) is the §3.7
 correction pinned as a test; cases 9–10 (EOL rewrite, section reorder) are the two holes round 1
-found, and case 10 is labelled a regression guard because `body_hash` alone would pass it; the
-in-step assertion over the whole fixture plus a property test that generates random document edits
-and checks `vectors.len() == chunks.len()` and row-to-chunk correspondence after every incremental
-build; a tampered previous generation (wrong row count, un-normalised row) forces a full re-embed
-rather than a silently misaligned array; `--dry-run` writes nothing and reports a non-zero
+found, and case 10 is labelled a regression guard because `body_hash` alone would pass it; **row 3's
+carry-forward**: a degraded `index` after a pure rename of a document with no declared `title:`
+**drops** the file rather than carrying a row whose embedded text changed (the round-3 case), while
+a degraded `index` after no change carries it byte-identically and the next featured run reports
+`embedded 0`; the in-step assertion over the whole fixture plus a property test that generates random
+document edits and checks `vectors.len() == chunks.len()` and row-to-chunk correspondence after every
+incremental build; a tampered previous generation (wrong row count, un-normalised row) forces a full
+re-embed rather than a silently misaligned array; `--dry-run` writes nothing and reports a non-zero
 `would_embed` after a body edit.
 
 **Handoff (paste):** "Implement Phase 4 of M4 per `docs/m4-breakdown.md` §3.4 and Phase 4. Reuse is
@@ -1143,7 +1169,8 @@ Blocking (CI / `cargo test`):
 9. **Degradation is the matrix of §3.6**, one row per state, asserted through the CLI, including
    `--no-embeddings` on all three commands, the vectors-less-generation rebuild (V-21 row 5), the
    vectors-bearing generation read by a non-embedding binary (row 6, which must **not** rebuild),
-   and a degraded `index` that carries vectors forward (row 3).
+   and a degraded `index` that carries vectors forward when nothing changed and **drops** them when a
+   document's embedded text changed — including a title-only change (row 3, P4).
 10. **No network, no wall clock, no sleeps.** `tests/no_wall_clock.rs` stays green; no test opens a
     socket or reads a model.
 11. **Gates:** `cargo fmt --all --check`; `cargo clippy --all-targets -- -D warnings`; the same two
@@ -1238,6 +1265,23 @@ correct, three had introduced a new problem, and one claim of mine was simply fa
 The lesson is worth recording: round 1's fixes were locally correct and globally inconsistent. A
 narrower witness is only narrower if it still covers the input, and a manifest field is only
 consistent if it describes the same thing on both branches.
+
+#### Review round 3 — verification of round 2's fixes
+
+Verdict again *still open*: two of round 2's fixes were incomplete, and two new cross-phase
+problems surfaced. All four accepted.
+
+| # | Round-3 finding | Resolution |
+|---|---|---|
+| R3-1 | `body_hash` is the right witness for tokens, but nothing says to hash the **raw** body | **Accepted.** V-26 and §3.4 now say "raw `Document.body`, never a normalised body — a normalised hash would reopen the EOL hole". |
+| R3-2 | Row 3's drop trigger is incomplete: a **title-only** change changes neither `body_hash` nor the chunk-id sequence, so a degraded `index` would carry a row and stamp a fresh `vec_key`, laundering the staleness | **Accepted, new issue.** The degraded build now re-evaluates the §3.4 predicate with the **manifest's** embedder id substituted, which covers title, body, order and embedder in one rule. The title case is added to P4's tests. |
+| R3-3 | P1b's carry-forward needs a per-document "changed" test, but the predicate and `body_hash` arrive in P4 | **Accepted, new issue.** `DocMeta.body_hash` moves into **P1b** (it is a layout field); the carry-forward branch moves into **P4**, together with the predicate, and P1b simply drops vectors on a degraded publish. Nothing can produce vectors before P4, so there is nothing to carry. |
+| R3-4 | `format_version = 2` would cover two different layouts if `body_hash` landed in P4 | **Accepted, same fix as R3-3.** One version bump, one layout. |
+
+That is ten findings across two rounds on a plan whose first draft called itself done. The pattern is
+consistent: each fix was right about the mechanism and wrong about the boundary — which input, which
+branch, which phase. A plan that names its boundaries as carefully as its formulas is the thing
+this review loop is producing.
 
 ### 9.1 SPEC corrections and gaps
 
