@@ -11,7 +11,7 @@ use janus_mem::cli::{Cli, Command};
 use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
-use janus_mem::{chunk, index, scan, vault};
+use janus_mem::{chunk, index, scan, search, vault};
 use tracing_subscriber::EnvFilter;
 
 fn init_tracing() {
@@ -96,6 +96,33 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                     dry_run,
                     json,
                     paths,
+                },
+            )
+        }
+
+        // Reads load or rebuild a validated generation and print at most one
+        // stale diagnostic; the ranking decisions all live in `search` (§9.5).
+        Command::Search {
+            query,
+            intent,
+            limit,
+            no_rebuild,
+            json,
+        } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let config = Config::load(&root)?;
+            search::run(
+                &root,
+                &config,
+                &SystemClock,
+                search::Options {
+                    query,
+                    intent,
+                    limit,
+                    no_rebuild,
+                    json,
                 },
             )
         }

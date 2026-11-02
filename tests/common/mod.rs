@@ -169,6 +169,32 @@ pub fn json_ok(root: &Path, args: &[&str]) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|err| panic!("stdout is not JSON ({err}):\n{text}"))
 }
 
+/// Runs `janus search … --json` and returns the parsed report.
+pub fn search_json(root: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["search"];
+    all.extend_from_slice(args);
+    all.push("--json");
+    json_ok(root, &all)
+}
+
+/// Runs `janus facts … --json` and returns the parsed report.
+pub fn facts_json(root: &Path, args: &[&str]) -> Value {
+    let mut all = vec!["facts"];
+    all.extend_from_slice(args);
+    all.push("--json");
+    json_ok(root, &all)
+}
+
+/// The `rel_path` of every result, in rank order.
+pub fn result_paths(report: &Value) -> Vec<String> {
+    report["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|hit| hit["rel_path"].as_str().expect("rel_path").to_owned())
+        .collect()
+}
+
 /// Recursively copies `from` to `to`, byte-for-byte.
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::create_dir_all(to)?;
