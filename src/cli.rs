@@ -85,4 +85,27 @@ pub enum Command {
         #[arg(value_name = "PATH")]
         paths: Vec<PathBuf>,
     },
+
+    /// Search the index: one result per document at its best chunk (§3.1)
+    Search {
+        /// The query text
+        #[arg(value_name = "QUERY")]
+        query: String,
+
+        /// Ranking intent: current (default), history, evolution, exhaustive
+        #[arg(long, value_name = "INTENT")]
+        intent: Option<String>,
+
+        /// Maximum documents returned, after grouping
+        #[arg(long, value_name = "N", default_value_t = crate::search::DEFAULT_LIMIT)]
+        limit: usize,
+
+        /// Refuse instead of building or rebuilding; a read stays a read
+        #[arg(long)]
+        no_rebuild: bool,
+
+        /// Emit one JSON object on stdout instead of the table
+        #[arg(long)]
+        json: bool,
+    },
 }

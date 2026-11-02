@@ -31,6 +31,7 @@
 use std::cmp::Ordering;
 
 use chrono::NaiveDate;
+use serde::Serialize;
 
 use crate::clock::Clock;
 use crate::config::TypeSpec;
@@ -221,7 +222,7 @@ impl IntentPolicy {
 }
 
 /// Every factor of one chunk's score, reported separately (§3.2).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Breakdown {
     /// Semantic similarity; always `0.0` in M3.
     pub semantic: f64,
@@ -238,6 +239,7 @@ pub struct Breakdown {
     /// Time decay, `1.0` when it does not apply.
     pub decay: f64,
     /// `relevance * authority * decay`.
+    #[serde(rename = "final")]
     pub final_score: f64,
 }
 

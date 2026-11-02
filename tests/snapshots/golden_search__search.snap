@@ -1,0 +1,113 @@
+---
+source: tests/golden_search.rs
+assertion_line: 37
+expression: json
+---
+{
+  "api": 1,
+  "corpus_id": "fixtures",
+  "degraded": [
+    "lexical only; embeddings arrive in M4"
+  ],
+  "intent": "history",
+  "limit": 3,
+  "notes": [],
+  "query": "cache",
+  "results": [
+    {
+      "breadcrumb": [
+        "Redis cache"
+      ],
+      "chunk_id": "4a607daa43c0441fe93858621648ca907843e34c3f0c56844f14372a71ef4624",
+      "date": "2024-12-01",
+      "id": "d97e653f4a2dd60ea5d426b27d260e63",
+      "ordinal": 0,
+      "path": "<vault>/decisions/2024-12-01-redis-cache.md",
+      "rank": 1,
+      "rel_path": "decisions/2024-12-01-redis-cache.md",
+      "scope": "global",
+      "scores": {
+        "authority": 1.5,
+        "decay": 1.0,
+        "final": 0.9807165151145152,
+        "lexical": 0.6538110100763435,
+        "relevance": 0.6538110100763435,
+        "semantic": 0.0,
+        "status_factor": 1.0,
+        "type_authority": 1.5
+      },
+      "span": [
+        0,
+        40
+      ],
+      "status": "superseded",
+      "title": "Redis cache",
+      "tokens": 9,
+      "type": "decision"
+    },
+    {
+      "breadcrumb": [
+        "Cache revisited"
+      ],
+      "chunk_id": "c6bcc6719b62c49c66e8dc99fc4c3cf22b6f15c1b3fe3f1f27e5e4d788a75396",
+      "date": "2025-02-01",
+      "id": "c64418894b25cfc133c800f916942b66",
+      "ordinal": 0,
+      "path": "<vault>/decisions/2025-02-01-cache-revisited.md",
+      "rank": 2,
+      "rel_path": "decisions/2025-02-01-cache-revisited.md",
+      "scope": "global",
+      "scores": {
+        "authority": 1.5,
+        "decay": 1.0,
+        "final": 0.9778324675164126,
+        "lexical": 0.6518883116776084,
+        "relevance": 0.6518883116776084,
+        "semantic": 0.0,
+        "status_factor": 1.0,
+        "type_authority": 1.5
+      },
+      "span": [
+        0,
+        81
+      ],
+      "status": "superseded",
+      "title": "Cache revisited",
+      "tokens": 15,
+      "type": "decision"
+    },
+    {
+      "breadcrumb": [
+        "Postgres cache"
+      ],
+      "chunk_id": "854fee3dccd0d87d80df9a0f2b11aef4f6d9e2f6edd27ac58de59b7aa2ee01ca",
+      "date": "2024-11-02",
+      "id": "2e85ad7f373d6a46959b68701c2fba40",
+      "ordinal": 0,
+      "path": "<vault>/decisions/2024-11-02-postgres-cache.md",
+      "rank": 3,
+      "rel_path": "decisions/2024-11-02-postgres-cache.md",
+      "scope": "global",
+      "scores": {
+        "authority": 1.5,
+        "decay": 1.0,
+        "final": 0.9754420203514008,
+        "lexical": 0.6502946802342672,
+        "relevance": 0.6502946802342672,
+        "semantic": 0.0,
+        "status_factor": 1.0,
+        "type_authority": 1.5
+      },
+      "span": [
+        0,
+        114
+      ],
+      "status": "superseded",
+      "title": "Postgres cache",
+      "tokens": 20,
+      "type": "decision"
+    }
+  ],
+  "taken_ms": 0,
+  "vault": "<vault>"
+}

@@ -20,6 +20,7 @@
 //! * [`document`] — the parsed shape of a document and its resolved metadata.
 //! * [`id`] — `DocId`, `Blake3Hash`, `ChunkId` newtypes.
 //! * [`index`] — the in-memory lexical index and BM25 (M3).
+//! * [`search`] — `janus search` and `janus facts`: the M3 command surface.
 //! * [`score`] — authority, status gating, decay and scope: pure scoring (M3).
 //! * [`vault`] — corpus root discovery, the directory walk, path confinement,
 //!   frontmatter isolation, metadata resolution, and identity derivation.
@@ -45,5 +46,6 @@ pub mod id;
 pub mod index;
 pub mod scan;
 pub mod score;
+pub mod search;
 pub mod tokenize;
 pub mod vault;

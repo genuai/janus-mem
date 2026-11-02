@@ -155,6 +155,23 @@ pub enum JanusError {
         path: PathBuf,
     },
 
+    /// The vault has never been indexed. Refusing a read is not corruption: an
+    /// agent told "corrupt" would try to repair a file that does not exist
+    /// (S-8, phase 6).
+    #[error("no index yet in {dir}; run `janus index`")]
+    IndexMissing {
+        /// The resolved index directory to name in the message.
+        dir: PathBuf,
+    },
+
+    /// A command-line combination that cannot mean anything: understood, but
+    /// rejected before any work (§9.1 code 2).
+    #[error("{message}")]
+    Usage {
+        /// The explanation, naming the flags involved.
+        message: String,
+    },
+
     /// Any IO failure without a more specific variant.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -187,7 +204,12 @@ impl JanusError {
             | Self::Write { .. }
             | Self::LockTimeout { .. }
             | Self::IndexUnstable { .. }
+            | Self::IndexMissing { .. }
             | Self::Io(_) => 1,
+
+            // Understood and rejected before doing anything: the caller can fix
+            // the invocation, and a retry without the change is pointless.
+            Self::Usage { .. } => 2,
         }
     }
 }
