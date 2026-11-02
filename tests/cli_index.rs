@@ -280,6 +280,32 @@ fn indexing_again_after_no_embeddings_restores_the_payload() {
 }
 
 #[test]
+fn a_vectors_bearing_generation_is_read_by_search_without_a_rebuild() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let before = dir_snapshot(&vault.path().join(".janus"));
+
+    // `search` resolves no embedder in P1b, so this is row 6: the generation has
+    // vectors and the reader cannot embed, and that is not a reason to rebuild.
+    let output = run(vault.path(), &["search", "cache", "--json"]);
+    assert!(
+        output.status.success(),
+        "search failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "",
+        "no stale line and no drop line: nothing was rebuilt"
+    );
+    assert_eq!(
+        dir_snapshot(&vault.path().join(".janus")),
+        before,
+        "a read leaves .janus/ byte-identical"
+    );
+}
+
+#[test]
 fn a_format_version_1_manifest_is_refused_with_a_warning_and_rebuilt() {
     let vault = fixture_vault();
     index(vault.path());

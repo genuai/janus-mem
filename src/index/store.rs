@@ -4,9 +4,10 @@
 //! publication: `.janus/lock` for the whole write (S-7), a unique temp file per
 //! writer, `index.bin` renamed before `manifest.json` (S-17).
 
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,7 @@ use crate::tokenize::{Stemmer, Tokenizer, TokenizerFingerprint};
 use crate::vault::{self, WalkOptions, identity, resolve};
 
 use super::build::{self, BuildPlan, BuildStats};
-use super::embed::EmbedderId;
+use super::embed::{Embedder, EmbedderId};
 use super::vectors::{VECTORS_FILE, Vectors};
 use super::{ChunkMeta, ChunkingFingerprint, DocMeta, FORMAT_VERSION, LexicalIndex, Snapshot};
 
@@ -718,10 +719,12 @@ struct Expected {
     chunker: ChunkingFingerprint,
     corpus_id: String,
     built_root: String,
+    /// The id this process would embed with, or `None` when it cannot embed.
+    embedder: Option<EmbedderId>,
 }
 
 impl Expected {
-    fn new(root: &Path, config: &Config) -> Self {
+    fn new(root: &Path, config: &Config, embedder: Option<&dyn Embedder>) -> Self {
         Self {
             format_version: FORMAT_VERSION,
             tokenizer: Tokenizer::new().fingerprint(),
@@ -731,11 +734,33 @@ impl Expected {
             },
             corpus_id: config.corpus_id.clone(),
             built_root: built_root(root),
+            embedder: embedder.map(|embedder| embedder.id().clone()),
         }
     }
 
     /// The reason this manifest is stale, or `Ok` when it describes us.
+    ///
+    /// The embedder comparison is V-21's **ordering**, not an equality: a
+    /// generation that has vectors is acceptable to a process that cannot embed
+    /// (it holds strictly more information than that process reads), while a
+    /// generation without vectors is stale for a process that can embed, so
+    /// vectors appear without a manual `--rebuild`. Plain equality would let a
+    /// feature-off binary and a featured one delete each other's vectors forever.
     fn check(&self, manifest: &Manifest) -> Result<(), String> {
+        let vectors = (
+            manifest.embedder.is_some(),
+            manifest.vectors_sha.is_some(),
+            manifest.vectors_len.is_some(),
+        );
+        if vectors != (true, true, true) && vectors != (false, false, false) {
+            return Err(format!(
+                "manifest vector fields disagree: embedder {}, vectors_sha {}, vectors_len {}",
+                present(vectors.0),
+                present(vectors.1),
+                present(vectors.2)
+            ));
+        }
+
         let found = [
             ("format_version", manifest.format_version.to_string()),
             ("tokenizer", tokenizer_name(&manifest.tokenizer)),
@@ -750,14 +775,35 @@ impl Expected {
             self.corpus_id.clone(),
             self.built_root.clone(),
         ];
-        match found.iter().zip(&wanted).position(|((_, a), b)| a != b) {
-            None => Ok(()),
-            Some(index) => {
-                let (field, actual) = &found[index];
-                Err(format!("{field} {actual} != {}", wanted[index]))
-            }
+        if let Some(index) = found.iter().zip(&wanted).position(|((_, a), b)| a != b) {
+            let (field, actual) = &found[index];
+            return Err(format!("{field} {actual} != {}", wanted[index]));
+        }
+
+        match (&manifest.embedder, &self.embedder) {
+            // Row 6: strictly more information than this process reads.
+            (Some(_), None) => Ok(()),
+            // Row 5: rebuild once, then stable.
+            (None, Some(want)) => Err(format!(
+                "index has no vectors and this build embeds with `{}`; rebuilding to add them",
+                want.name
+            )),
+            (Some(have), Some(want)) if have != want => Err(format!(
+                "embedder `{}` != `{}`",
+                embedder_name(have),
+                embedder_name(want)
+            )),
+            _ => Ok(()),
         }
     }
+}
+
+fn present(yes: bool) -> &'static str {
+    if yes { "present" } else { "absent" }
+}
+
+fn embedder_name(id: &EmbedderId) -> String {
+    format!("{}/{}/{}", id.name, id.dim, id.dtype)
 }
 
 fn tokenizer_name(fingerprint: &TokenizerFingerprint) -> String {
@@ -775,14 +821,17 @@ fn chunker_name(chunker: ChunkingFingerprint) -> String {
 struct Generation {
     manifest: Manifest,
     snapshot: Snapshot,
+    /// The rows, present only when the read asked for them (V-4).
+    vectors: Option<Vectors>,
 }
 
 /// The result of one validated-read attempt (§3.5 steps 1–4).
 enum Attempt {
     /// The manifest and the bytes it names agree. This is a generation.
     Ready(Box<Generation>),
-    /// The pair did not agree; a publisher may be between the two renames.
-    Retry(String),
+    /// The pair did not agree; a publisher may be between two renames. `path`
+    /// names the file that failed, so a refusal can name it too.
+    Retry { path: PathBuf, reason: String },
     /// Nothing retrying can fix: absent, unreadable, or built for another world.
     Stale(String),
 }
@@ -797,7 +846,11 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, JanusError> {
 }
 
 /// One lock-free read, validation included.
-fn read_generation(dir: &Path, expected: &Expected) -> Result<Attempt, JanusError> {
+fn read_generation(
+    dir: &Path,
+    expected: &Expected,
+    want_vectors: bool,
+) -> Result<Attempt, JanusError> {
     let manifest_path = dir.join(MANIFEST_FILE);
     let Some(manifest_bytes) = read_optional(&manifest_path)? else {
         return Ok(Attempt::Stale(format!(
@@ -824,15 +877,80 @@ fn read_generation(dir: &Path, expected: &Expected) -> Result<Attempt, JanusErro
         )));
     };
     if blake3::hash(&bytes).to_hex().to_string() != manifest.index_sha {
-        let reason = format!("{} does not match manifest.index_sha", index_path.display());
-        return Ok(Attempt::Retry(reason));
+        return Ok(retry(&index_path, "does not match manifest.index_sha"));
     }
-    match Snapshot::from_bytes(&bytes) {
-        Ok(snapshot) => Ok(Attempt::Ready(Box::new(Generation { manifest, snapshot }))),
-        Err(corrupt) => {
-            let reason = format!("{} {}", index_path.display(), corrupt.reason);
-            Ok(Attempt::Retry(reason))
+    let snapshot = match Snapshot::from_bytes(&bytes) {
+        Ok(snapshot) => snapshot,
+        Err(corrupt) => return Ok(retry(&index_path, &corrupt.reason)),
+    };
+
+    // §3.1: the payload is read, hashed and decoded against the manifest's
+    // shape, or not opened at all. A lexical-only read cannot observe a corrupt
+    // vectors file and must not pay for learning something it will not use (V-4).
+    let vectors = if want_vectors {
+        match read_vectors(dir, &manifest, snapshot.chunks.len())? {
+            Ok(vectors) => vectors,
+            Err((path, reason)) => return Ok(retry(&path, &reason)),
         }
+    } else {
+        None
+    };
+
+    Ok(Attempt::Ready(Box::new(Generation {
+        manifest,
+        snapshot,
+        vectors,
+    })))
+}
+
+/// A retry cause that names the file whose bytes did not validate.
+fn retry(path: &Path, reason: &str) -> Attempt {
+    Attempt::Retry {
+        path: path.to_path_buf(),
+        reason: format!("{} {reason}", path.display()),
+    }
+}
+
+/// Reads `vectors.f32` and validates it against the manifest (§3.1).
+///
+/// `Ok(None)` means the generation has no vectors. `Err((path, reason))` is a
+/// mismatch, which the caller treats like any other: retry, then rebuild.
+fn read_vectors(
+    dir: &Path,
+    manifest: &Manifest,
+    chunks: usize,
+) -> Result<Result<Option<Vectors>, (PathBuf, String)>, JanusError> {
+    // `Expected::check` guarantees all three fields agree, so a manifest with
+    // `vectors_sha` always has the id that supplies `dim`.
+    let Some(id) = manifest.embedder.as_ref() else {
+        return Ok(Ok(None));
+    };
+    let path = dir.join(VECTORS_FILE);
+    let Some(bytes) = read_optional(&path)? else {
+        return Ok(Err((path, "is missing".to_owned())));
+    };
+    let sha = blake3::hash(&bytes).to_hex().to_string();
+    if manifest.vectors_sha.as_ref() != Some(&sha) {
+        return Ok(Err((
+            path,
+            "does not match manifest.vectors_sha".to_owned(),
+        )));
+    }
+    if manifest.vectors_len != Some(bytes.len() as u64) {
+        return Ok(Err((
+            path,
+            format!(
+                "is {} bytes but manifest.vectors_len is {}",
+                bytes.len(),
+                manifest
+                    .vectors_len
+                    .map_or_else(|| "absent".to_owned(), |len| len.to_string())
+            ),
+        )));
+    }
+    match Vectors::decode(&bytes, id.dim, chunks) {
+        Ok(vectors) => Ok(Ok(Some(vectors))),
+        Err(corrupt) => Ok(Err((path, corrupt.to_string()))),
     }
 }
 
@@ -846,7 +964,7 @@ pub enum Policy {
 }
 
 /// The inputs a load needs that are not on disk.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct LoadOptions<'a> {
     /// The corpus root: the manifest's `built_root` and the rebuild's input.
     pub root: &'a Path,
@@ -858,10 +976,20 @@ pub struct LoadOptions<'a> {
     pub lock_timeout: Duration,
     /// Whether a read may rebuild (S-8).
     pub policy: Policy,
+    /// Whether to read and validate `vectors.f32` (V-4).
+    ///
+    /// False for a lexical-only read: the file is not opened, hashed or
+    /// validated, because a read that will not use a row must not pay for it.
+    pub want_vectors: bool,
+    /// The embedder resolved once at the edge, or `None` when this build cannot
+    /// embed (V-25). It decides V-21's ordering and, on a rebuild, what the
+    /// published generation contains.
+    pub embedder: Option<&'a dyn Embedder>,
 }
 
 impl<'a> LoadOptions<'a> {
-    /// The defaults: [`LOCK_TIMEOUT`] and [`Policy::Rebuild`].
+    /// The defaults: [`LOCK_TIMEOUT`], [`Policy::Rebuild`], and a lexical-only
+    /// read with no embedder.
     #[must_use]
     pub fn new(root: &'a Path, config: &'a Config, built_at: &'a str) -> Self {
         Self {
@@ -870,7 +998,23 @@ impl<'a> LoadOptions<'a> {
             built_at,
             lock_timeout: LOCK_TIMEOUT,
             policy: Policy::Rebuild,
+            want_vectors: false,
+            embedder: None,
         }
+    }
+}
+
+impl fmt::Debug for LoadOptions<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoadOptions")
+            .field("root", &self.root)
+            .field("config", &self.config)
+            .field("built_at", &self.built_at)
+            .field("lock_timeout", &self.lock_timeout)
+            .field("policy", &self.policy)
+            .field("want_vectors", &self.want_vectors)
+            .field("embedder", &self.embedder.map(|embedder| embedder.id()))
+            .finish()
     }
 }
 
@@ -881,6 +1025,9 @@ pub struct Load {
     pub snapshot: Snapshot,
     /// The manifest those bytes were validated against.
     pub manifest: Manifest,
+    /// The validated rows, when the caller wanted them and the generation has
+    /// them (§3.1). `None` for every lexical-only read.
+    pub vectors: Option<Vectors>,
     /// True when this call built and published the generation.
     pub rebuilt: bool,
     /// What a build reused; all zero when the generation was adopted.
@@ -895,6 +1042,7 @@ impl Load {
         Self {
             snapshot: generation.snapshot,
             manifest: generation.manifest,
+            vectors: generation.vectors,
             rebuilt: false,
             stats: BuildStats::default(),
             stale,
@@ -905,17 +1053,22 @@ impl Load {
 /// Reads a validated generation, rebuilding once under the writer lock if none
 /// validates and [`Policy`] allows it (§3.5). A healthy read takes no lock;
 /// recovery does, and may wait for an active publisher. Errors:
-/// [`JanusError::IndexUnstable`] under [`Policy::Refuse`],
+/// [`JanusError::IndexUnstable`] under [`Policy::Refuse`], naming the file that
+/// failed (`.janus/index.bin`, `.janus/vectors.f32` or the manifest),
 /// [`JanusError::LockTimeout`] if recovery cannot get the lock, and IO failures.
 pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
     let dir = config::resolve_index_dir(options.root, &options.config.index_dir);
-    let expected = Expected::new(options.root, options.config);
+    let expected = Expected::new(options.root, options.config, options.embedder);
 
     let mut ready = None;
     let mut last = String::new();
+    // A refusal names the file that failed. A retry says which payload it was;
+    // a stale manifest keeps M3's answer, `index.bin`, because the generation it
+    // describes is what could not be used.
+    let mut failed = dir.join(INDEX_FILE);
     let mut retries = 0;
     loop {
-        match read_generation(&dir, &expected)? {
+        match read_generation(&dir, &expected, options.want_vectors)? {
             Attempt::Ready(generation) => {
                 ready = Some(generation);
                 break;
@@ -924,7 +1077,10 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
                 last = reason;
                 break;
             }
-            Attempt::Retry(reason) => last = reason,
+            Attempt::Retry { path, reason } => {
+                failed = path;
+                last = reason;
+            }
         }
         let Some(backoff) = RETRY_BACKOFF.get(retries) else {
             break;
@@ -940,22 +1096,20 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
         ));
     }
     if options.policy == Policy::Refuse {
-        return Err(JanusError::IndexUnstable {
-            path: dir.join(INDEX_FILE),
-        });
+        return Err(JanusError::IndexUnstable { path: failed });
     }
 
     let lock = Lock::acquire(&dir, options.lock_timeout)?;
     // Double-checked freshness (S-7): another process may have published while
     // we waited. Adopting it is what makes two auto-builds cost one build.
-    if let Attempt::Ready(generation) = read_generation(&dir, &expected)? {
+    if let Attempt::Ready(generation) = read_generation(&dir, &expected, options.want_vectors)? {
         return Ok(Load::adopted(
             *generation,
             (!last.is_empty()).then_some(last),
         ));
     }
 
-    let plan = rebuild_plan(options.root, options.config, &dir)?;
+    let plan = rebuild_plan(options.root, options.config, &dir, options.embedder)?;
     let publication = Publication {
         dir: &dir,
         root: options.root,
@@ -965,9 +1119,17 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
         built_at: options.built_at,
     };
     let manifest = publish_locked(&publication, &mut |_| {}, &lock)?;
+    // A read that did not want vectors does not receive them, even though the
+    // rebuild it triggered may have written them.
+    let vectors = if options.want_vectors {
+        plan.vectors.as_ref().map(|set| set.rows().clone())
+    } else {
+        None
+    };
     Ok(Load {
         snapshot: plan.snapshot,
         manifest,
+        vectors,
         rebuilt: true,
         stats: plan.stats,
         stale: (!last.is_empty()).then_some(last),
@@ -975,12 +1137,22 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
 }
 
 /// Computes the next snapshot from the vault, reusing tokens where §3.4 allows.
-fn rebuild_plan(root: &Path, config: &Config, dir: &Path) -> Result<BuildPlan, JanusError> {
+fn rebuild_plan(
+    root: &Path,
+    config: &Config,
+    dir: &Path,
+    embedder: Option<&dyn Embedder>,
+) -> Result<BuildPlan, JanusError> {
     let walk = vault::walk(root, config, WalkOptions::default())?;
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
     identity::derive_identity(&mut documents, config);
     let previous = previous_snapshot(dir);
-    Ok(build::plan(config, &documents, previous.as_ref(), None)?)
+    Ok(build::plan(
+        config,
+        &documents,
+        previous.as_ref(),
+        embedder,
+    )?)
 }
 
 /// The old snapshot if its bytes still decode: reuse needs tokens, not a manifest.

@@ -275,6 +275,11 @@ pub(crate) fn prepare(
         built_at: &built_at,
         lock_timeout: store::LOCK_TIMEOUT,
         policy,
+        // P2 passes its resolved embedder and asks for the rows. Until then the
+        // service is lexical-only: α is 0, so the payload is neither read nor
+        // required (V-4), and a generation with vectors still loads (row 6).
+        want_vectors: false,
+        embedder: None,
     })?;
     // Only a generation this call had to build is stale; a retry that ended by
     // adopting a valid one is not.
