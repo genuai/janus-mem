@@ -419,7 +419,7 @@ Resolution, with two separate identities:
 
 | Identity | Formula | Purpose |
 |---|---|---|
-| `ChunkId` | `blake3(heading_path ‖ 0x00 ‖ normalized_text)` (unchanged, D48) | embedding cache, cross-references, span lookup. **Never a postings key.** |
+| `ChunkId` | `blake3(heading_path ‖ 0x00 ‖ normalized_text)` (unchanged, D48) | content identity, the content component of the embedding-cache key, cross-references, span lookup. **Never a postings key.** |
 | `DocMeta.lex_key` | `blake3(tokenizer_fp ‖ 0x00 ‖ chunker_fp ‖ 0x00 ‖ effective_title)` | “the text this document contributes to the index is unchanged” |
 
 Regeneration is per **document**, and reuse is a contract with five conjuncts:

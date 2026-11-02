@@ -6,15 +6,18 @@ MCP; and is the only sanctioned writer of frontmatter in the vault.
 
 Single Rust binary. No Postgres, no graph database, no background LLM calls.
 
-> **Status: M3 — lexical search, daily usable.** `janus` reads a corpus' `janus.toml`,
+> **Status: M4 — embeddings and hybrid index.** `janus` reads a corpus' `janus.toml`,
 > walks the Markdown tree with ignore rules, isolates and parses frontmatter (BOM,
 > CRLF, fail-open YAML), resolves the metadata hierarchy, derives document identity,
 > and chunks bodies into heading-aware sections with byte spans. It builds a
-> snapshot index (`janus index`), and serves authority-weighted, time-aware lexical
+> snapshot index (`janus index`), and serves authority-weighted, time-aware
 > retrieval (`janus search`) and authoritative-fact listing (`janus facts`) with
-> intents, scopes, type/tag filters and a scored breakdown. The vault is the source
-> of truth; `.janus/` is a rebuildable cache. There is **no embedding, temporal graph
-> or MCP server yet** — those are M4–M6.
+> intents, scopes, type/tag filters and a scored breakdown. M4 adds a semantic
+> signal beside BM25: an `Embedder` trait, a `vectors.f32` payload published as one
+> generation with `index.bin`, incremental vector reuse, and hybrid scoring whose
+> weight is `[embedding] alpha`. The vault is the source of truth; `.janus/` is a
+> rebuildable cache. There is **no temporal graph or MCP server yet** — those are
+> M5–M6.
 
 ## Usage
 
@@ -88,6 +91,24 @@ A build without the feature is a full lexical engine, and a build with it still
 runs lexical-only for any vault whose model is absent — embedding is never
 required for correctness.
 
+## Hybrid scoring
+
+`relevance = α · semantic + (1 − α) · lexical`, where `semantic` is the cosine
+between the query vector and the chunk's vector, `lexical` is the normalised BM25
+score M3 already had, and α comes from `[embedding] alpha` (default **0.5**,
+clamped to `[0, 1]`). Authority, status gating and time decay are applied on top,
+unchanged. A chunk is a candidate when `relevance > 0`, so a document that shares
+no word with the query can still be found; at α = 0 the ranking is byte-identical
+to M3's.
+
+To turn the semantic half off, pass `--no-embeddings` to `search` or `facts` (that
+query only, α = 0, and the response's `degraded` says so), or set
+`[embedding] enabled = false` / `alpha = 0.0` in `janus.toml`. `janus index
+--no-embeddings` builds lexically and carries existing vectors forward when no
+document's embedded text changed. The α default was chosen by measurement, not
+taste: `scripts/eval.sh --sweep` prints `active top-1`, `nDCG@10`, and the queries
+that the semantic term rescues or breaks, per α (`docs/m4-breakdown.md` §14).
+
 ## Documentation
 
 - [SPEC.md](SPEC.md) — the full project specification: domain model, scoring, read/write
@@ -107,6 +128,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo doc --no-deps
 scripts/eval.sh   # retrieval quality report; never a gate (§3.8)
+scripts/eval.sh --sweep      # the α sweep (§3.5)
+scripts/eval.sh --baseline   # the tantivy comparison (§3.8, standalone crate)
 ```
 
 ## License

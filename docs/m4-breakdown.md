@@ -85,7 +85,7 @@ Every finding and its resolution is in §9.0.
   `.janus/lock` protocol, with `vectors_sha`/`vectors_len` in the manifest and a stated recovery
   contract (§3.1).
 - Hybrid scoring: `semantic = clamp(cos, 0, 1)`, `relevance = α·semantic + (1−α)·lexical`, α from
-  `[embedding] alpha` with default `0.65` and `0.0` when there is no embedder; the admission rule
+  `[embedding] alpha` with default `0.5` (V-27; the plan shipped 0.65) and `0.0` when there is no embedder; the admission rule
   changes from `lexical > 0` to `relevance > 0` (§3.3).
 - A real embedder (`fastembed`) behind a **non-default** `embeddings` feature, batched, with no
   network access anywhere in the crate or its tests; model files are read from disk only (§3.2).
@@ -412,7 +412,7 @@ failed index; reads fail open, writes fail closed.
 ```
 semantic   = clamp(dot(q_vec, c_vec), 0.0, 1.0)         rows are L2-normalised, so dot is cosine
 lexical    = s / (s + s_ref)                            unchanged (M3 §3.3)
-relevance  = α · semantic + (1 − α) · lexical           α ∈ [0, 1], default 0.65, 0.0 without an embedder
+relevance  = α · semantic + (1 − α) · lexical           α ∈ [0, 1], default 0.5 (V-27), 0.0 without an embedder
 authority  = type_authority · status_factor             unchanged
 decay      = exp(−ln2 · age_days / half_life)            unchanged
 final      = relevance · authority · decay              unchanged
@@ -678,10 +678,10 @@ off, and `enabled = false` degrades even when it is on.
 | # | State | `janus index` | `janus search` | α | `degraded` entry |
 |---|---|---|---|---|---|
 | 1 | No embedder resolved (feature off, `enabled = false`, or model absent) | lexical generation | lexical | 0.0 | the resolving reason: `embeddings not compiled; lexical only` / `embeddings disabled in janus.toml; lexical only` / `model not found in <dir>; lexical only` |
-| 2 | Embedder resolved | generation with vectors | hybrid | 0.65 | *(empty)* |
+| 2 | Embedder resolved | generation with vectors | hybrid | 0.5 | *(empty)* |
 | 3 | No embedder on **this build** (feature off, disabled, or `--no-embeddings`) while the previous generation had vectors | **carry the rows forward; drop `vectors.f32` only if a document changed** (below) | — | — | — |
 | 4 | `--no-embeddings` on `search`/`facts` | — | lexical; `.janus/` written **only** by an S-8 build, which is published without vectors and, until P4's carry-forward, **drops an existing `vectors.f32`** because this build cannot embed | 0.0 | `--no-embeddings: lexical only` |
-| 5 | Index has no vectors, embedder resolved | — | stale → rebuild (one `stale:` line) | 0.65 | *(empty after the rebuild)* |
+| 5 | Index has no vectors, embedder resolved | — | stale → rebuild (one `stale:` line) | 0.5 | *(empty after the rebuild)* |
 | 6 | **Index has vectors, no embedder resolved** | row 3's rule | **loads, never rebuilds** | 0.0 | reason from row 1 |
 
 **V-21 is one-directional, and that is the fix rather than a caveat.** The first draft said
@@ -819,7 +819,7 @@ the chunker is the thing that must not be re-implemented.
 | V-7 | Who normalises and validates vectors | The builder: every row normalised, `dim` checked, finite checked, norm ∈ {0} ∪ [0.999, 1.001]. A bad row **fails the publish**; never a zero-row substitution. | `src/index/build.rs` |
 | V-8 | Cosine | `dot` over unit rows, clamped to `[0,1]`; a zero row scores 0.0, never `NaN`. | `src/index/vectors.rs`, `score.rs` |
 | V-9 | Admission rule | `relevance > 0`, not `lexical > 0`. This is what lets a semantic-only match enter, and what makes α = 0 exactly M3. | `src/search/mod.rs` |
-| V-10 | α | `[embedding] alpha`, default `0.65`, clamped to `[0,1]` with a config warning; `0.0` whenever there is no embedder. `α = 0` is the exact M3 path. | `src/config.rs`, `src/search/mod.rs` |
+| V-10 | α | `[embedding] alpha`, default `0.5`, clamped to `[0,1]` with a config warning; `0.0` whenever there is no embedder. `α = 0` is the exact M3 path. **The default was `0.65` when this row was written; the P5 sweep changed it — V-27 is the current value.** | `src/config.rs`, `src/search/mod.rs` |
 | V-11 | Vector reuse key | Per document: `body_hash` + `vec_key = blake3(EmbedderId::to_bytes() ‖ 0x00 ‖ title)` **+ the chunk-id sequence + a validated previous generation**. **Never `ChunkId` alone** — it excludes the title and it hashes normalised text while `embed_text` is raw. | `src/index/build.rs` |
 | V-12 | Cross-document vector dedupe | None in M4. One row per chunk occurrence, mirroring postings; a copied document is embedded twice. "Same `ChunkId` and title ⇒ identical row" is **not** claimed: different line endings break it (V-23). | `src/index/build.rs` |
 | V-13 | The `embeddings` feature | **Not default.** `fastembed` is optional; the Windows cross-check and default `cargo test` never build it. **No runtime download and no socket**; the model is read from disk or the build degrades. The feature job's build may fetch `ort` (§6). | `Cargo.toml`, `src/index/embed.rs` |
@@ -836,6 +836,7 @@ the chunker is the thing that must not be re-implemented.
 | V-24 | The chunk comparison is a **sequence** | `old_chunks.iter().map(|c| c.id).eq(new.iter().map(|c| c.id))`. A set plus a count permits a reorder, and rows are copied by position. This is defence in depth, not a bug fix: `body_hash` already denies reuse after a reorder, and M3's set check is likewise unreachable behind `content_hash`. P4 does not edit M3 for ordering. | `src/index/build.rs` |
 | V-25 | Model directories are an argument | `resolve(&Config, &ModelDirs)`; `ModelDirs` is built in `main` from `[embedding] model_dir` → `JANUS_MODEL_DIR` → the cache dir. No `std::env` below `main`, which is what makes the no-env test possible. | `src/main.rs`, `src/index/embed.rs` |
 | V-26 | The reuse witness is `body_hash`, not `content_hash` | New `DocMeta.body_hash = blake3(doc.body)` — **raw body, never normalised** — landed in P1b with the layout (so one `format_version` covers both changes), consumed by **both** predicates in P4 (vectors and M3's tokens). `content_hash` is the whole file, so a one-tag edit would re-embed and re-tokenize text that did not change — making acceptance case 2 impossible. Conservative by design: a body edit that alters no embedded text still re-embeds. | `src/index/mod.rs` (P1b), `src/index/build.rs` (P4) |
+| V-27 | The shipped default α is **0.5**, not 0.65 | The P5 sweep (with a real model) measured one top-1 result broken by the semantic term at 0.65 and none at 0.35/0.50, with the same `nDCG@10`; `broken > rescued` is §3.5's pre-declared trigger, so the default moves. One line in `Config`, no change to `score()`. Recorded in §14, with the corpus caveat. | `src/config.rs` |
 
 ## 5. Phases
 
@@ -979,7 +980,7 @@ hit of **the hybrid golden** and compared within `1e-12` (on the α = 0 golden t
 to `relevance == lexical` and would pass with a broken formula); **α = 0 is score-identical to
 M3** — `search --json --no-embeddings` has a `results` array byte-identical to the M3 snapshot
 under the same redactions, with `alpha` and `degraded` as the only permitted differences;
-a semantic-only document is admitted at α = 0.65 and is absent at α = 0; the zero-row document
+a semantic-only document is admitted at α = 0.5 (the default; V-27) and is absent at α = 0; the zero-row document
 scores `semantic = 0` with no `NaN`; an empty query calls no embedder and leaves `semantic = 0`;
 `facts` reports `alpha = 0` and its `--query` narrowing is unchanged; every row of §3.6's matrix is
 asserted through the CLI, with the rows that need a real model marked `#[ignore]`d and named in P3's
@@ -988,13 +989,13 @@ verbatim.
 
 **Two snapshots, not one.** `tests/golden_search.rs` keeps the M3 file as the α = 0 reference
 (`search_no_embeddings`, regenerated once for `alpha`/`degraded` only) and adds
-`search_hybrid` for the default intent at α = 0.65 with `semantic > 0`. A single snapshot cannot be
+`search_hybrid` for the default intent at α = 0.5 with `semantic > 0`. A single snapshot cannot be
 both "unchanged from M3" and "regenerated for hybrid", and the first draft asked it to be both.
 
 **Handoff (paste):** "Implement Phase 2 of M4 per `docs/m4-breakdown.md` §3.3, §3.6 and Phase 2.
 `semantic = clamp(dot,0,1)` over unit rows; `relevance = α·semantic + (1−α)·lexical`; **admission
 is `relevance > 0`**, which is what makes α = 0 exactly M3 — assert that with the existing golden,
-not with a new one. α comes from `[embedding] alpha` (default 0.65, clamped with a warning) and is
+not with a new one. α comes from `[embedding] alpha` (default 0.5, V-27; clamped with a warning) and is
 `0.0` without an embedder. `facts --query` stays lexical. Report a top-level `alpha` and make
 `degraded` a list of reasons. No wall clock, no sleeps, no quality floor in `cargo test`."
 
@@ -1199,10 +1200,10 @@ Blocking (CI / `cargo test`):
    `results` array of `search --json --no-embeddings` is byte-identical to the M3 snapshot under the
    same redactions, with `alpha` and `degraded` as the only permitted differences; and
    `relevance == α·semantic + (1−α)·lexical` holds within `1e-12` for every hit of the **hybrid**
-   golden, where α = 0.65 and `semantic > 0`. Checking the identity only on the α = 0 golden would
+   golden, where α = 0.5 (the default, V-27) and `semantic > 0`. Checking the identity only on the α = 0 golden would
    reduce it to `relevance == lexical` and pass with a broken formula.
 5. **A semantic-only match is admitted and ranks.** A fixture chunk that shares no query term but
-   has a non-zero cosine appears at α = 0.65 and is absent at α = 0.
+   has a non-zero cosine appears at α = 0.5 (the default, V-27) and is absent at α = 0.
 6. **The two files are one generation**, in **both** read modes. A new-vectors/old-index pair, a
    new-index/old-manifest pair, a flipped byte, a truncated file, a missing file, a wrong row count,
    a `NaN` row and an un-normalised row each either rebuild with one cause line and exit 0, or
@@ -1442,7 +1443,8 @@ Remaining open questions this plan does **not** resolve, listed so they are not 
 19. **A real-vault eval corpus.** `tests/eval/queries.jsonl` is 35 fixture queries over 18
     keyword-rich documents (M3 W-10). The α decision (§3.5) is taken on the author's vault, which
     means it is not reproducible in CI. If the number ever needs to gate anything, the eval corpus
-    becomes a milestone.
+    becomes a milestone. **What would revisit the α decision:** an author's-vault sweep that
+    disagrees means reverting `DEFAULT_ALPHA` to 0.65 and re-accepting `search_hybrid`, per V-27.
 20. **Model-file integrity.** V-20 records the cost argument for not hashing the weights. If M8
     finds a cheap partial hash acceptable, it becomes a manifest field and a rebuild trigger.
 
@@ -1627,4 +1629,137 @@ one drop line. No golden moved.
 
 ## 14. Implementation log — Phase 5 (eval, baseline, docs)
 
-_Nothing recorded yet. The α sweep table, the chosen default, and the D20 verdict belong here._
+Branch: `bb/m4-p5-eval-baseline-thr_9ff7vyen4b-1`, from `main`. Scope is
+`tests/eval_quality.rs` (the α sweep), `scripts/eval.sh` (`--sweep`, `--baseline`),
+`scripts/baseline/` (new standalone crate), `src/config.rs` (**one line**: the default α),
+the five test assertions and one golden that pin that default, `SPEC.md` (§9.1's
+corrections), `docs/m3-breakdown.md` and `docs/m2-breakdown.md` (items 16–17),
+`README.md`, `.gitignore`, and this file. No change to `score.rs`, `search/*`,
+`index/*`, the manifest, the publication protocol, or the root `Cargo.toml`.
+
+### The α sweep, with a real model
+
+Model: `AllMiniLML6V2` (the `Qdrant/all-MiniLM-L6-v2-onnx` export, 90,387,630 bytes,
+dim 384, `dtype = f32`, `normalisation = l2`), read from a local directory through
+`JANUS_MODEL_DIR` — nothing downloaded, and the cache candidate is a path that cannot
+exist, so a forgotten variable cannot pass as a success. Corpus: **the fixture vault**,
+19 documents and 1,533 chunks including the two generated inputs. Clock
+`FixedClock(2025-04-01)`; every number below is from one run:
+
+```text
+JANUS_EVAL_SWEEP=1 JANUS_EVAL_MODEL=AllMiniLML6V2 JANUS_MODEL_DIR=/tmp/janus-model \
+  cargo test --features embeddings --test eval_quality -- --ignored --nocapture
+```
+
+| α | `active top-1` | `nDCG@10` | rescued | broken | semantic min/median/max | elapsed |
+|---|---|---|---|---|---|---|
+| 0.00 | 1.00 (22/22) | 0.9590 | — | — | 0.000/0.000/0.000 | 290 ms |
+| 0.35 | 1.00 (22/22) | 0.9694 | 0 | 0 | 0.000/0.196/0.947 | 2 064 ms |
+| 0.50 | 1.00 (22/22) | 0.9694 | 0 | 0 | 0.005/0.197/0.947 | 2 073 ms |
+| 0.65 | 0.95 (21/22) | 0.9605 | 0 | 1 | 0.005/0.199/0.947 | 2 362 ms |
+| 0.80 | 0.86 (19/22) | 0.9328 | 0 | 3 | 0.005/0.199/0.947 | 2 183 ms |
+| 1.00 | 0.82 (18/22) | 0.9133 | 0 | 4 | 0.005/0.199/0.947 | 2 074 ms |
+
+`rescued`/`broken` are against α = 0, over the 22 queries the `active top-1` metric
+grades. The queries that changed:
+
+| α | query | rank-1 becomes |
+|---|---|---|
+| 0.65 | `it's fine say hello not a comment` | `specs/body-starts-with-rule.md` (was `notes/quoted-scalars.md`) |
+| 0.80 | `UTF-8 BOM frontmatter block` | `specs/body-starts-with-rule.md` (was `notes/bom-note.md`) |
+| 0.80 | `reader records spans instead of re-serializing` | `notes/multiline-scalar.md` (was `notes/flow-mapping.md`) |
+| 1.00 | `reflow three lines unsupported patch` | `specs/crlf-spec.md` (was `notes/block-sequence.md`) |
+
+**Reading the semantic distribution.** Median 0.20, min 0.005, max 0.947: the spread is
+wide, so semantic is not a near-constant shrinking the lexical term — the safe failure
+did not happen. The median sits well below 0.6, so cosine is not saturating either; the
+one α = 0.65 casualty above is a genuine ordering change, not noise amplification. No
+deadzone (`semantic = max(0, (cos − floor)/(1 − floor))`) is warranted, and none was
+added.
+
+**The decision rule fired, so the default changed.** `nDCG@10(0.65) = 0.9605` is *not*
+below `nDCG@10(0.0) − 0.02`, but `broken (1) > rescued (0)` is exactly §3.5's second
+trigger. The new default is **α = 0.5**: the largest swept value with `broken = rescued
+= 0`, and the best measured `nDCG@10` (0.9694, tied with 0.35 — the tie is broken toward
+more semantic weight, which is what the milestone is for). The change is one line,
+`DEFAULT_ALPHA` in `src/config.rs`; `score()` is untouched.
+
+Its unavoidable cost is the golden: `search_hybrid` records the default, so its `alpha`
+becomes 0.5 and its `relevance`/`final` values are recomputed, and rank 3 of the `cache`
+query changes from `notes/überlegungen zu cache.md` to
+`decisions/2025-02-01-cache-revisited.md`. That is a real ranking change, not snapshot
+noise — the blend identity assertion (`relevance == α·semantic + (1−α)·lexical`) reads
+α from the report and still holds.
+
+**The same sweep with `HashEmbedder`** (the feature-off smoke test, so the instrument is
+proven without a model): 0.00 → 1.00 / 0.9590; 0.35 → 1.00 / 0.9566; 0.50 → 1.00 /
+0.9566; 0.65 → 0.95 / 0.9461 with 1 broken; 0.80 → 0.95 / 0.9476 with 1 broken; 1.00 →
+0.86 / 0.9077 with 3 broken. Same shape, a smaller and noisier effect, and per §3.2 it
+decides nothing.
+
+### D20's `tantivy` gate: **keep**
+
+`scripts/baseline/` is a standalone crate (empty `[workspace]`) that depends on
+`janus-mem` by path, calls `chunk_body` + `Chunk::embed_text` for the exact chunk texts
+the index holds, and indexes them in `tantivy 0.27.0` with its own default tokenizer and
+default BM25. Both sides grade documents the same way (a document's score is its best
+chunk) with the same `nDCG@10` code, which is unit-tested against hand-computed values
+for two tiny lists so the comparison's arithmetic is not the thing being trusted.
+
+```text
+scripts/eval.sh --baseline
+corpus ... (19 documents, 1533 chunks)
+queries ... (35 queries); tantivy tantivy v0.27.0, index_format v7
+janus    nDCG@10 0.9590 (35 queries)
+tantivy  nDCG@10 0.9412 (35 queries)
+ratio    janus/tantivy 1.0189
+D20: swap only if janus is >10% worse, i.e. ratio < 0.90 -> keep
+```
+
+**Verdict: keep the hand-rolled BM25.** 1.0189 is 11.9% above the 0.90 threshold, and
+janus is 1.9% *better* than out-of-the-box tantivy on this eval set. No follow-up
+milestone, and `tantivy` stays outside the dependency graph. The janus number here is
+`0.9590`, identical to `eval_quality`'s α = 0 figure — two independent nDCG
+implementations agreeing on the same ranking is the cross-check that the comparison is
+fair.
+
+### The real-model acceptance run (P3-13)
+
+```text
+JANUS_MODEL_DIR=/tmp/janus-model cargo test --features embeddings \
+  --test real_model -- --ignored --nocapture
+test result: ok. 1 passed (0.12 s)
+```
+
+384 finite values per row, unit norm within `1e-3`, two texts not equal — so the sweep
+above ran on weights that were proven loadable *before* any α was measured, which is
+what P3-13 exists for.
+
+### Two open notes from earlier phases, now written down
+
+| Note | Where it lands |
+|---|---|
+| **`janus index PATHS` forces re-tokenization but reuses rows.** Naming paths puts the document in `force` for the *token* predicate, so its postings are recomputed; the vector predicate is not force-aware, and its witness is `body_hash`, so an unchanged body reuses its rows. Defensible — the rows' input did not change, and nothing is left to recompute — but it was unstated, and "force" reads as "redo everything". | here; `docs/m4-breakdown.md` §14 |
+| **The α decision needs a real model and is not reproducible in CI.** CI's `eval` job runs the feature-off fixture report at α = 0 (`continue-on-error: true`); the sweep needs 90 MB of weights, which no job fetches and no test commits. The numbers above came from the **fixture corpus** with `AllMiniLML6V2`, and the corpus is named in the table's heading for that reason. | here; §9.1 item 19 already says the eval corpus is not a milestone |
+
+### Deviations from the brief, and things the plan got wrong
+
+| # | Deviation | Why |
+|---|---|---|
+| P5-1 | The sweep ran on the **fixture corpus**, not "the author's vault" (§3.5), because no such vault exists in this environment. The real model is real; the corpus is 19 keyword-rich documents. | The rule fired on the strongest evidence available, and a fired pre-declared rule that is then rationalised away is worse than a default that is one line from being reverted. If an author's-vault sweep says otherwise, revert `DEFAULT_ALPHA` to 0.65 and re-accept the golden. |
+| P5-2 | The default-α change **regenerated `search_hybrid`**, which the brief placed out of scope. | A golden that records the default cannot stay at the old default; leaving it would ship a red suite. The diff is `alpha`, the two score fields and one rank-3 hit — no assertion was weakened. |
+| P5-3 | `scripts/baseline` reproduces the two **generated** fixture inputs (~35 lines from `tests/common`). | `tests/common` is a test module and cannot be imported. Without them the corpus would be 18 documents / 18 chunks instead of 19 / 1,533, one query would be unanswerable for both systems, and the corpus statistics would differ from the ones the eval harness measures — so the comparison would not be "same corpus". |
+| P5-4 | `scripts/baseline/Cargo.lock` is **not committed**; `tantivy 0.27.0` is printed at runtime and pinned here instead. | A 1,937-line lockfile in a docs-and-measurement PR buys nothing a named version does not; the crate is a one-off gate, not a shipped dependency. |
+| P5-5 | tantivy's query grammar reads `'` as a quote, so `it's fine say hello not a comment` is a syntax error. The baseline replaces `'` with a space before parsing. | The default tokenizer splits on non-alphanumerics anyway, so this is the tokenizer's own behaviour rather than a second grammar; it is one line and documented at the call site. |
+| P5-6 | `eval_quality` now resolves an embedder even for the default α = 0 report, so that report builds a vectors-bearing generation (the fixture's `hash-64`). | The sweep needs one generation for all six α values, and building it twice would make the α = 0 row describe a different corpus state. The α = 0 numbers are unchanged (`1.00 (22/22)`, `0.9590 (35)`) because α = 0 never opens the payload (V-4). |
+| P5-7 | `active top-1` and `nDCG@10` are printed with 2 and 4 decimals respectively (M3 printed both with 2). | The pre-declared rule has a 0.02 threshold; two decimals cannot show a 0.0015 difference, and the decision should be auditable from the output. The metrics themselves are unchanged. |
+| P5-8 | The plan's file list said `.github/workflows/ci.yml` "if the eval job needs the feature job's ordering". It did not: the `eval` job still runs the feature-off report and stays `continue-on-error: true`. | No edit to CI, which is the point — a quality floor in the build is what §3.5 forbids. |
+
+| ID | decision | why |
+|---|---|---|
+| P5-9 | α is injected by mutating `Config::embedding.alpha` inside the test; the knobs are `JANUS_EVAL_SWEEP`, `JANUS_EVAL_ALPHA`, `JANUS_EVAL_MODEL` and `JANUS_MODEL_DIR`, all read in the test. | §3.5 requires no CLI flag and no ambient read below the edge. A config field is what the scorer already consumes, so the sweep measures the shipped path rather than a parallel one. |
+| P5-10 | `scripts/eval.sh` gains `--sweep` and `--baseline` and keeps its no-argument behaviour; feature selection is `JANUS_EVAL_FEATURES`, not a new flag. | The default must stay what CI runs. `cargo test --features` cannot be driven by an env var, so the script builds its own `set --` argument list (bash 3.2 treats an empty array expansion as unbound under `set -u`). |
+| P5-11 | The sweep always measures α = 0 first and uses it as the reference for `rescued`/`broken`, even when only one other α was asked for. | The comparison needs a reference; measuring it on demand is cheaper than documenting that `JANUS_EVAL_ALPHA=0.5` alone cannot report a delta. |
+| P5-12 | The per-query semantic distribution is printed as `min/median/max` of each query's returned top-10, plus one aggregate row per α. | §3.5 asks for the per-query shape; the aggregate is what makes the saturation question answerable at a glance. Both are printed, neither is asserted. |
+| P5-13 | **No split, and the estimate was low.** Measured **482 logic / 434 tests / 916 total** against `origin/main`: 385 of the logic lines are the baseline crate's `main.rs` and `Cargo.toml`. | The plan estimated ~150 logic plus the crate, and the 450 seam is crossed — but the seam has nowhere to cut. The sweep, the baseline and the docs are one measurement: the baseline crate cannot ship half a comparison, and the docs are its numbers. Under both ceilings (80% logic, 48% tests). |
+| P5-14 | **Review fix.** The plan's contract sections now state the shipped default of **0.5** with a pointer to V-27: §0's in-scope list, §3.3's formula line, §3.6's matrix rows 2 and 5, V-10, Phase 2's three sentences, and DoD 4–5. §3.3's worked table at α = 0.65, §3.5's pre-declared rule and every row in §10–§14 are untouched. | A plan whose contract says 0.65 while the code ships 0.5 is the "plan disagrees with the code" failure §5 and AGENTS.md punish. The worked table demonstrates the formula at a *chosen* α rather than claiming the default, and a decision rule edited after the data arrives is worthless — both stay as written. |
