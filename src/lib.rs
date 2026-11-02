@@ -21,6 +21,7 @@
 //! * [`vault`] — corpus root discovery, the directory walk, path confinement,
 //!   frontmatter isolation, metadata resolution, and identity derivation.
 //! * [`scan`] — the `janus scan` command (discovery report so far).
+//! * [`tokenize`] — the one tokenizer shared by indexing and queries (M3).
 //! * [`error`] — the single error type and its exit-code mapping.
 //! * [`cli`] — the argument surface (no behaviour).
 //!
@@ -38,4 +39,5 @@ pub mod document;
 pub mod error;
 pub mod id;
 pub mod scan;
+pub mod tokenize;
 pub mod vault;
