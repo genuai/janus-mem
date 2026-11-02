@@ -18,6 +18,7 @@
 //! * [`config`] — `janus.toml`, alias resolution, type registry, globs, decay.
 //! * [`document`] — the parsed shape of a document and its resolved metadata.
 //! * [`id`] — `DocId`, `Blake3Hash`, `ChunkId` newtypes.
+//! * [`index`] — the in-memory lexical index and BM25 (M3).
 //! * [`vault`] — corpus root discovery, the directory walk, path confinement,
 //!   frontmatter isolation, metadata resolution, and identity derivation.
 //! * [`scan`] — the `janus scan` command (discovery report so far).
@@ -38,6 +39,7 @@ pub mod config;
 pub mod document;
 pub mod error;
 pub mod id;
+pub mod index;
 pub mod scan;
 pub mod tokenize;
 pub mod vault;
