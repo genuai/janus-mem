@@ -362,13 +362,17 @@ Authority is a multiplier applied after relevance, derived from `type` and `stat
 
 Status gate (before scoring):
 
-| Status | `intent=current` | `intent=history` | `intent=evolution` |
-|---|---|---|---|
-| `active` | ✅ | ✅ | ✅ |
-| `draft` | ✅ (0.7×) | ✅ | ❌ |
-| `deprecated` | ❌ | ✅ | ✅ |
-| `superseded` | ❌ | ✅ | ✅ |
-| `unknown` | ✅ (0.8×) | ✅ | ✅ |
+| Status | `intent=current` | `intent=history` | `intent=evolution` | `intent=exhaustive` |
+|---|---|---|---|---|
+| `active` | ✅ | ✅ | ✅ | ✅ |
+| `draft` | ✅ (0.7×) | ✅ | ❌ | ✅ |
+| `deprecated` | ❌ | ✅ | ✅ | ✅ |
+| `superseded` | ❌ | ✅ | ✅ | ✅ |
+| `unknown` | ✅ (0.8×) | ✅ | ✅ | ✅ |
+
+`exhaustive` is the debug/audit intent: every status is included, every status
+factor is 1.0, and there is no decay. A status absent from a row is *excluded*,
+not scored zero — the gate is an inclusion rule (§7.1).
 
 **`finding` and `idea` are first-class types, not journal variants.** They carry the distinction that matters for reasoning: *what we observed* (finding) versus *what we might do* (idea) versus *what we chose* (decision). That distinction only pays off because of supersession: the canonical chain is `idea → decision`, and `finding → finding` when new evidence arrives. Modeling them as generic notes would throw away exactly the transitions the engine exists to track.
 
@@ -592,7 +596,7 @@ Rules:
 1. **`scope` is single-valued and owns identity.** Absent = `global`. Normalized (trim, lowercase, collapse whitespace); must match `[a-z0-9][a-z0-9._:-]*`.
 2. **`shared_with` is a set of retrieval tags and never enters the identity key.** Adding or removing a shared tag must not re-key a document.
 3. **Matching.** Let `S(d) = {d.scope} ∪ d.shared_with`, and treat `global` as the universal set. A document matches query scope set `Q` when `S(d) ∩ Q ≠ ∅` or `d.scope == global`. With no `--scope` (the default), everything matches — nothing is silently hidden.
-4. **`--scope` may be repeated.** `--scope org:acme --scope shared:finance` unions them. `--scope-only` additionally excludes `global` and shared-only matches, answering "what does acme itself assert?".
+4. **`--scope` may be repeated.** `--scope org:acme --scope shared:finance` unions them. `--scope-only` additionally excludes `global` and shared-only matches, answering "what does acme itself assert?". `--scope-only` requires at least one `--scope`: with none there is nothing to narrow to, so it is a usage error (exit `2`), never a silent no-op.
 5. **Identity** (§6.4): title-derived keys are prefixed with `corpus_id ‖ scope`. Two orgs may each own a `Q4 plan` without collision. Changing `scope` re-keys the document and is reported as churn.
 6. **Cross-scope supersession is allowed only when scopes intersect.** `A → B` is effective when `S(A) ∩ S(B) ≠ ∅` **or** either side is `global`. A disjoint link (`org:acme` supersedes `org:beta`) is **ignored** for status and window derivation, and `doctor` reports `cross_scope_supersession` as an error. This is the key safety property: acme cannot silently retire beta's facts. An explicit `allow_disjoint_supersession = true` exists for deliberate exceptions and should be rare.
 7. **Validity windows are scope-relative.** For query scope set `Q`, `valid_to(A, Q) = min(A.effective_to, earliest effective successor B where B is global or S(B) ∩ Q ≠ ∅)`. Consequence: a global document superseded by an acme-only document is **superseded for acme queries and still current for beta**. With the default all-scopes query, `Q` is universal, so the successor wins everywhere in that view.
@@ -640,6 +644,10 @@ These subtleties are easy to get wrong and cheap to pin down:
 
 CLI flags can override parameters individually: `--decay-half-life 30`, `--include-superseded`, `--types decision,spec`, `--corpus all`.
 
+`--include-superseded` is an override of the `current` gate, not a second status penalty: it adds declared-`superseded` documents to `current` at status factor **1.0** with decay unchanged, does not admit `deprecated`, and is a no-op (not an error) under the other intents, which already include it. It never reaches `authoritative_facts`.
+
+`--decay-half-life` overrides the half-life *parameter* only. It never removes a type's `timeless` exemption, so a caller cannot silently start ageing a timeless principle by passing a number.
+
 ### 7.2 Scoring
 
 Computed per chunk, in this exact order:
@@ -647,6 +655,8 @@ Computed per chunk, in this exact order:
 ```
 semantic   = cosine(q_vec, c_vec)                        ∈ [-1, 1] → clamped to [0, 1]
 lexical    = bm25_norm(q, c)                             ∈ [0, 1] via sigmoid squash
+             = s / (s + s_ref), where s = Σ bm25(t, c) and
+               s_ref = Σ idf(t) over query terms present in the index
 relevance  = α · semantic + (1 − α) · lexical            α = 0.65 (0.0 if no embedder)
 authority  = AUTHORITY[type] · STATUS_FACTOR[status]
 decay      = exp(−ln(2) · age_days / half_life_days)     = 1.0 if timeless or half_life ≤ 0
@@ -661,7 +671,7 @@ final      = relevance · authority · decay
 - Vectors are L2-normalized at index time, so cosine is a dot product.
 - A doc's score is the max over its chunks; the returned chunk is the argmax. (No document-level score aggregation in v1.)
 - Optional MMR-style diversity pass (`--diversity 0.3`, default off) to avoid five chunks of the same doc.
-- Ties break by `final`, then `date` desc, then `chunk_id` — fully deterministic.
+- Ties break by `final`, then `date` desc, then `chunk_id`; for documents the order is completed by `DocId` asc and then `rel_path` asc (a `ChunkId` excludes the document, so two documents can otherwise tie on every listed key), and within one document by `chunk_id` then the occurrence's `ordinal`. The extra keys only order hits the first three leave tied.
 
 **Hard requirement:** `score()` is a pure function with a `Clock` and config as inputs. Its tests are table-driven and cover: decay monotonicity (`age↑ ⇒ decay↓`), authority ordering, status gating, α endpoints, future dates, missing dates, and `timeless` override. Property tests with `proptest` assert `final ≥ 0` and `final ≤ 1.5 · 1.0 · 1.0`.
 
@@ -857,7 +867,8 @@ Two rules make this cheap:
 
 This also means the on-disk format does not change between M4 (simple `read` of the whole file) and M8 (mmap + optional quantization): only the load path changes.
 
-- Rebuild triggers: `format_version`/`schema_version`/`embedder`/dim/dtype mismatch, chunking config change, a `built_root` mismatch (copied or relocated index), or `--rebuild`.
+- Rebuild triggers: `format_version`/`schema_version`/`embedder`/dim/dtype mismatch, chunking config change, a `built_root` mismatch (copied or relocated index), `--rebuild`, or a generation mismatch observed by a reader.
+- **`.janus/lock` is a writer lock.** Writers take it exclusively for the whole publication (temp write, rename, fsync, manifest last) and hold it until the manifest is durable. Readers never lock: they validate the bytes they read against `manifest.index_sha` and retry with bounded backoff; if no generation validates they take the writer lock, re-check freshness, rebuild once, and then refuse (`--no-rebuild` never writes).
 - Incremental: skip a file when `content_hash` is unchanged; reuse chunks whose `chunk_id` still exists (across moves, too — §6.9); only embed the delta.
 - Embedding is never required for correctness. With `--no-embeddings` (or if the model is absent and download is disallowed), janus-mem runs lexical-only, omits `vectors.f32`, and says so in every response (`degraded`).
 - Corruption: blake3 checksums for both files live in `manifest.json`; mismatch ⇒ rebuild from source with a warning. A truncated or partial index is never loaded.
@@ -1016,15 +1027,15 @@ What we deliberately do **not** do now: no empty graph tables, no entity enum, n
 janus init [--vault PATH]                    # create janus.toml + .janus/, add to .gitignore
 janus scan [--json] [--verbose]              # corpus inventory: metadata, identity, skips
 janus chunks [PATH...] [--json] [--text] [--limit N]   # chunk report; no index, no writes
-janus index [PATHS...] [--rebuild] [--no-embeddings] [--dry-run]
+janus index [PATHS...] [--rebuild] [--no-embeddings] [--dry-run] [--json]
 janus search <QUERY> [--intent current|history|evolution|exhaustive]
                      [--as-of DATE] [--corpus primary|all|<id>]
                      [--scope <SCOPE>]... [--scope-only]
                      [--limit N] [--types T,..] [--tags T,..]
                      [--decay-half-life DAYS] [--include-superseded]
-                     [--json] [--no-color]
+                     [--no-rebuild] [--json] [--no-color]
 janus lineage <PATH|--topic QUERY> [--json]
-janus facts [--tags T,..] [--query Q] [--scope S]... [--json]   # authoritative_facts
+janus facts [--tags T,..] [--query Q] [--scope S]... [--no-rebuild] [--json]   # authoritative_facts
 janus read <PATH> [--json]
 janus set <PATH> --expect-hash H --key status=superseded [--key k=v ...] [--dry-run]
 janus write <PATH> --frontmatter f.yaml (--body -|f.md)
@@ -1052,6 +1063,8 @@ Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash,
 | `get_lineage` | `path?` **or** `topic?` (exactly one) | Ordered chain with relation edges and terminal state |
 | `get_authoritative_facts` | `query?`, `tags?`, `types?`, `scope?`, `limit?` | Active decisions/specs/principles only |
 | `read_document` | `path`, `max_chars?`, `chunk_id?` | Frontmatter as JSON + body (or a specific chunk's span) |
+
+`authoritative_facts` uses its own **active-only inclusion rule** — canonical type in {`decision`, `spec`, `principle`} and declared status `active`, no decay, status factor 1.0 — and not the `current` intent's gate, which admits `draft` (0.7×) and `unknown` (0.8×). A weight is not an inclusion rule.
 
 Plus `janus_status` (read-only, no params): index freshness, doc/chunk counts, embedder, vault root, whether writes are enabled. Cheap, and it stops agents from guessing.
 
