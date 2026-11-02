@@ -475,12 +475,13 @@ impl Drop for Lock {
     }
 }
 
-/// The nine stages of a publication (S-17, V-3), the seam behind
+/// The stages of a publication (S-17, V-3), the seam behind
 /// [`publish_with_hook`].
 ///
-/// The three vectors stages fire only when the build wrote a payload; a
-/// degraded publish has three index and three manifest stages and drops any
-/// existing `vectors.f32` instead.
+/// The three vectors stages fire only when the build wrote a payload. A
+/// degraded publish has three index and three manifest stages, then
+/// [`Stage::VectorsDropped`] **last**, once the commit record no longer names
+/// the file it removes.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -493,6 +494,7 @@ pub enum Stage {
     ManifestWritten,
     ManifestRenamed,
     ManifestDirSynced,
+    VectorsDropped,
 }
 
 /// One generation to write; the manifest is derived from these fields (S-17).
@@ -539,6 +541,13 @@ pub fn publish_with_hook(
 /// it is the commit record; the largest payload goes first so the window in
 /// which the commit record lags its payload is as short as possible. That order
 /// is not atomic and does not pretend to be: recovery is a rebuild.
+///
+/// A **degraded** publish is the exception in one place: the removal of an
+/// existing `vectors.f32` happens *after* the manifest rename, not with the
+/// other payload work. Anywhere earlier would leave the old manifest naming a
+/// file that is already gone, so a reader that wants vectors would meet
+/// `is missing` and rebuild a state it should never have seen — and a failure
+/// after the drop would have destroyed a good payload for nothing.
 fn publish_locked(
     publication: &Publication<'_>,
     hook: &mut dyn FnMut(Stage),
@@ -564,10 +573,9 @@ fn publish_locked(
             hook(Stage::VectorsDirSynced);
             Some(artifact)
         }
-        None => {
-            drop_vectors(dir)?;
-            None
-        }
+        // The degraded case removes any existing payload *after* the manifest
+        // rename, below; deleting it here would strand the old manifest.
+        None => None,
     };
 
     let index_path = dir.join(INDEX_FILE);
@@ -600,6 +608,13 @@ fn publish_locked(
     hook(Stage::ManifestRenamed);
     sync_dir(dir)?;
     hook(Stage::ManifestDirSynced);
+
+    // Now the new commit record says `embedder: None`, so no reader opens the
+    // file. An orphan left by a crash between the two renames is unreachable
+    // and is overwritten by the next vectors-bearing publish.
+    if publication.vectors.is_none() && drop_vectors(dir)? {
+        hook(Stage::VectorsDropped);
+    }
     Ok(manifest)
 }
 
@@ -609,7 +624,10 @@ fn publish_locked(
 /// and must drop the file rather than leave rows the next manifest does not
 /// describe. P4 replaces this branch with the carry-forward rule; until then the
 /// removal is unconditional and announced on exactly one line.
-fn drop_vectors(dir: &Path) -> Result<(), JanusError> {
+///
+/// Returns whether a payload was actually removed, which is what the
+/// [`Stage::VectorsDropped`] seam reports.
+fn drop_vectors(dir: &Path) -> Result<bool, JanusError> {
     let path = dir.join(VECTORS_FILE);
     match fs::remove_file(&path) {
         Ok(()) => {
@@ -617,9 +635,9 @@ fn drop_vectors(dir: &Path) -> Result<(), JanusError> {
             tracing::warn!(
                 "vectors dropped: this build has no embedder, so {VECTORS_FILE} cannot be rebuilt"
             );
-            Ok(())
+            Ok(true)
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(source) => Err(io_error(&path, source)),
     }
 }

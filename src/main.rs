@@ -12,7 +12,7 @@ use janus_mem::cli::{Cli, Command};
 use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
-use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
+use janus_mem::index::embed::{self, ModelDirs, Resolved};
 use janus_mem::{chunk, index, scan, search, vault};
 use tracing_subscriber::EnvFilter;
 
@@ -44,15 +44,12 @@ fn model_cache() -> PathBuf {
 
 /// Resolves config × feature × model availability once, at the edge (§3.2).
 ///
-/// A degraded resolution returns `None` and the caller publishes a lexical
-/// generation. The reason is not printed here: P2 puts it in every response's
-/// `degraded` field, and P1b's only embedding line on stderr is the one a
-/// dropped payload earns.
-fn resolve_embedder(config: &Config) -> Option<Box<dyn Embedder>> {
-    match embed::resolve(config, &model_dirs(config)) {
-        Resolved::Ready(embedder) => Some(embedder),
-        Resolved::Degraded(..) => None,
-    }
+/// Resolution itself is silent; each caller decides what to say. `janus index`
+/// announces a degraded resolution (§3.6 row 1), a read leaves it to P2's
+/// `degraded` field, and `--no-embeddings` is an explicit choice that earns no
+/// line at all.
+fn resolve_embedder(config: &Config) -> Resolved {
+    embed::resolve(config, &model_dirs(config))
 }
 
 fn init_tracing() {
@@ -130,11 +127,18 @@ fn run(cli: Cli) -> Result<(), JanusError> {
 
             let config = Config::load(&root)?;
             // `--no-embeddings` is a statement about the generation, so it skips
-            // resolution entirely: no model is loaded for a lexical build.
+            // resolution entirely: no model is loaded for a lexical build, and
+            // the flag is an explicit choice, so it prints nothing.
             let embedder = if no_embeddings {
                 None
             } else {
-                resolve_embedder(&config)
+                match resolve_embedder(&config) {
+                    Resolved::Ready(embedder) => Some(embedder),
+                    Resolved::Degraded(reason, detail) => {
+                        tracing::warn!("embeddings unavailable ({reason}): {detail}; lexical only");
+                        None
+                    }
+                }
             };
             index::cmd::run(
                 &root,

@@ -594,3 +594,66 @@ fn the_vectors_rename_precedes_the_index_and_manifest_renames() {
         "vectors first, index next, manifest (the commit record) last"
     );
 }
+
+/// The embedder name the on-disk manifest currently records, if any.
+fn on_disk_embedder(root: &Path) -> Option<String> {
+    let path = index_dir(root).join(MANIFEST_FILE);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&path).expect("read the manifest"))
+            .expect("the manifest is JSON");
+    manifest["embedder"]["name"].as_str().map(str::to_owned)
+}
+
+#[test]
+fn a_degraded_publish_drops_the_payload_after_the_commit_record() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    let embedder = embedder();
+    publish(&root, &plan_with(&root, Some(&embedder)));
+    let payload = vectors_path(&root);
+    assert!(payload.exists());
+
+    let plan = clean_plan(&root);
+    let mut stages = Vec::new();
+    {
+        let mut hook = |stage: Stage| {
+            stages.push(stage);
+            if stage == Stage::VectorsDropped {
+                assert!(!payload.exists(), "the drop is the last stage");
+                return;
+            }
+            // A reader that wants vectors must never meet a manifest naming a
+            // file that is already gone. The old manifest is authoritative
+            // until its rename, and the payload outlives it by one step.
+            assert!(
+                payload.exists(),
+                "{stage:?}: the payload vanished before the commit record changed"
+            );
+            if matches!(stage, Stage::ManifestRenamed | Stage::ManifestDirSynced) {
+                assert_eq!(on_disk_embedder(&root), None, "{stage:?}");
+            } else {
+                assert_eq!(
+                    on_disk_embedder(&root).as_deref(),
+                    Some("hash-64"),
+                    "{stage:?}: the old manifest still names the payload"
+                );
+            }
+        };
+        publish_hooked(&root, &plan, &mut hook);
+    }
+
+    assert_eq!(
+        stages,
+        [
+            Stage::IndexWritten,
+            Stage::IndexRenamed,
+            Stage::IndexDirSynced,
+            Stage::ManifestWritten,
+            Stage::ManifestRenamed,
+            Stage::ManifestDirSynced,
+            Stage::VectorsDropped,
+        ],
+        "a degraded publish removes the payload only after the commit record"
+    );
+    assert!(!payload.exists());
+}

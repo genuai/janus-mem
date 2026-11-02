@@ -897,7 +897,8 @@ and `model_dir`), `src/lib.rs`, `src/main.rs` (`ModelDirs`), `tests/publish.rs`,
    P1c** when the measured diff forced the writer/reader split (§10 P1b).
 5. **P1b.** `store::publish`: three new `Stage`s, `vectors.f32` written and renamed first, manifest
    last, `vectors_sha` from the bytes actually written, and a degraded publish **drops** any existing
-   file with one stderr line. The **carry-forward** half of row 3 of §3.6 is P4's, because it needs
+   file with one stderr line — **after** the manifest rename, so the old commit record never names a
+   file that is gone (review fix, P1b-10). The **carry-forward** half of row 3 of §3.6 is P4's, because it needs
    the reuse predicate to be correct.
 6. **P1c (split from P1b).** `store::load`: `want_vectors` + `embedder` in `LoadOptions`; read,
    hash, decode and validate `vectors.f32` when wanted; the retry/refuse outcomes of V-3 with the
@@ -1478,6 +1479,8 @@ against P1b (`BASE=origin/<p1b branch>`).
 | P1b-7 | A degraded (no-embedder) build that changes nothing still drops `vectors.f32`, unconditionally. | P1b has no reuse predicate, so it cannot know which rows survive; §3.6 row 3's carry-forward is P4's, with the predicate that makes it correct. Unconditional and announced beats silent staleness. |
 | P1b-8 | `BuildStats` gains `embedded_chunks` and `reused_vector_chunks`; the latter is always zero here. The `index` receipt is unchanged. | The counters are P4's receipt fields and cost nothing now; the JSON receipt stays P4's, so no `--json` consumer sees an empty field. |
 | P1b-9 | The P1b reader (unchanged M3 `Expected`/`load`) does not validate the payload and never asks for one, so a read's auto-build is lexical. | It is the writer half by design; P1c adds `want_vectors`/`embedder` and the validation. `search`/`facts` therefore pass no embedder until P2, which is what keeps the α = 0 path byte-identical. |
+| P1b-10 | **Review fix.** The degraded drop runs after the manifest rename and its directory sync, and reports itself through a ninth stage, `Stage::VectorsDropped`, which fires last and only when a file was actually removed. | Dropping with the other payload work left the old manifest naming a file that was already gone: a concurrent reader with `want_vectors = true` saw `is missing`, retried, then rebuilt a state it should never have observed — and a publish that failed after the drop had destroyed a good payload for nothing. After the commit record changes, the new manifest says `embedder: None`, so no reader opens the file, and an orphan from a crash between the two steps is unreachable and overwritten by the next vectors-bearing publish. `a_degraded_publish_drops_the_payload_after_the_commit_record` asserts the payload outlives every pre-commit stage and fails on the old order. |
+| P1b-11 | **Review fix.** `janus index` prints one `embeddings unavailable (<reason>): <detail>; lexical only` line when resolution degrades, and nothing when `--no-embeddings` was passed. `resolve_embedder` returns `Resolved` so each caller decides; only the `index` arm announces. | §3.6 row 1 promises one line for a lexical build, and the `index` receipt has no `degraded` field, so without this line a wrong `model_dir` or a missing feature produced a silent lexical generation. The flag is an explicit choice, so it stays quiet. A read still says nothing here: P2's `degraded` field is its channel. |
 
 ## 11. Implementation log — Phase 2 (hybrid scoring)
 

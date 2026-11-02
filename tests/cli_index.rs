@@ -313,3 +313,50 @@ fn a_format_version_1_manifest_is_refused_with_a_warning_and_rebuilt() {
     );
     assert_eq!(dir_snapshot(&vault.path().join(".janus")), before);
 }
+
+#[test]
+fn index_says_why_it_could_not_embed() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"no-model\"\n\n[embedding]\nmodel = \"AllMiniLML6V2\"\n",
+    )
+    .unwrap();
+
+    // Default tracing: a degraded resolution is a diagnostic, not silence.
+    let output = janus()
+        .arg("--vault")
+        .arg(dir.path())
+        .arg("index")
+        .output()
+        .expect("run janus index");
+    assert!(
+        output.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("embeddings unavailable"))
+        .collect();
+    assert_eq!(lines.len(), 1, "expected one reason line: {stderr:?}");
+    assert!(lines[0].contains("not compiled"), "{stderr:?}");
+    assert!(lines[0].contains("AllMiniLML6V2"), "{stderr:?}");
+    assert!(!dir.path().join(".janus/vectors.f32").exists());
+
+    // `--no-embeddings` is an explicit choice, so it explains nothing.
+    let output = janus()
+        .arg("--vault")
+        .arg(dir.path())
+        .args(["index", "--no-embeddings"])
+        .output()
+        .expect("run janus index --no-embeddings");
+    assert!(output.status.success());
+    assert!(
+        !String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("embeddings unavailable"),
+        "the flag is not a degradation"
+    );
+}
