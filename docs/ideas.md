@@ -321,3 +321,21 @@ delete this entry.
 ### Where it would land
 
 M8's docs, possibly a two-line example. No `SPEC.md` change, no code.
+
+---
+
+## I-6 — Decision-provenance store for agent actions
+
+**Status:** parked (2026-11-02). Review when a per-decision audit need appears.
+
+### Idea
+
+A per-decision record for agent actions: an append-only chain of decision revisions, where each revision is pinned to the evidence snapshot and the tool versions that produced it, plus a `latest` pointer for navigation. When an agent changes a decision, it appends a new revision that supersedes the prior one instead of overwriting it, so a retracted decision stays auditable and replayable.
+
+### Why parked
+
+The engine tracks document-level provenance (status, validity windows, supersession). A decision-level store is the per-action analog and needs a home (a new document type or a `decisions/` corpus) before it can be specified. Parked until that home is decided.
+
+### Where it would land
+
+A `decision` document type (or a `decisions/` corpus) with a revision chain in the frontmatter, plus a `get_decision_history` retrieval path. Design cost only for now.
