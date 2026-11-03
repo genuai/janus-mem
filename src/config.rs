@@ -117,6 +117,12 @@ const DEFAULT_HALF_LIFE_DAYS: f64 = 180.0;
 /// (`docs/m4-breakdown.md` §14). One line, no code change.
 const DEFAULT_ALPHA: f64 = 0.5;
 
+/// Default weight of the title boost in `relevance` (§7.2, M4C §3.1).
+///
+/// `1.0` is the full formula, so the largest boost is `2.0` on a title that
+/// carries every rare query term. `0.0` reproduces the pre-boost ranking.
+const DEFAULT_TITLE_BOOST: f64 = 1.0;
+
 /// Upper bound on alias-chain length. A vault with a 16-deep alias chain is not
 /// expressing vocabulary, it is expressing a bug; the cap turns a potential
 /// infinite loop into a deterministic fallback.
@@ -138,6 +144,8 @@ pub struct Config {
     pub decay: DecayConfig,
     /// Chunking parameters, consumed in M2 (§6.5).
     pub chunking: ChunkingConfig,
+    /// Scoring parameters, consumed at query time (§7.2).
+    pub scoring: ScoringConfig,
     /// Embedding parameters, consumed in M4.
     pub embedding: EmbeddingConfig,
     /// MCP-server parameters, consumed in M6.
@@ -409,6 +417,21 @@ impl Config {
             });
         }
 
+        // The title weight follows the same rule as alpha: warn, then clamp.
+        // The warning is tested on the configured value, so a value a user
+        // typed is reported even though the engine used a safe one.
+        let configured_title_boost = raw.scoring.title_boost.unwrap_or(DEFAULT_TITLE_BOOST);
+        let title_boost = if configured_title_boost.is_nan() {
+            DEFAULT_TITLE_BOOST
+        } else {
+            configured_title_boost.clamp(0.0, 1.0)
+        };
+        if configured_title_boost.is_nan() || !(0.0..=1.0).contains(&configured_title_boost) {
+            warnings.push(ConfigWarning::TitleBoostOutOfRange {
+                value: configured_title_boost,
+            });
+        }
+
         Self {
             corpus_id,
             index_dir,
@@ -418,6 +441,7 @@ impl Config {
                 max_chars: raw.chunking.max_chars.unwrap_or(1800),
                 overlap: raw.chunking.overlap.unwrap_or(0.15),
             },
+            scoring: ScoringConfig { title_boost },
             embedding: EmbeddingConfig {
                 enabled: raw.embedding.enabled.unwrap_or(true),
                 model: raw
@@ -535,6 +559,14 @@ pub struct ChunkingConfig {
     pub max_chars: usize,
     /// Fraction of a chunk repeated into the next one when splitting.
     pub overlap: f64,
+}
+
+/// Scoring parameters (§7.2). Consumed at query time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoringConfig {
+    /// Weight of the title boost in `relevance` (M4C §3.1). `0.0` disables it
+    /// and reproduces the pre-boost ranking. Clamped to `[0, 1]` with a warning.
+    pub title_boost: f64,
 }
 
 /// Embedding parameters (§8.2). Consumed in M4.
@@ -763,6 +795,12 @@ pub enum ConfigWarning {
         /// The configured value.
         value: f64,
     },
+    /// `[scoring] title_boost` was outside `[0, 1]` or not a number; the
+    /// resolved config uses a clamped value (or the default for `NaN`).
+    TitleBoostOutOfRange {
+        /// The configured value.
+        value: f64,
+    },
 }
 
 impl fmt::Display for ConfigWarning {
@@ -795,6 +833,10 @@ impl fmt::Display for ConfigWarning {
                 f,
                 "`embedding.alpha` is {value}; expected a number in [0, 1]"
             ),
+            Self::TitleBoostOutOfRange { value } => write!(
+                f,
+                "`scoring.title_boost` is {value}; expected a number in [0, 1]"
+            ),
         }
     }
 }
@@ -819,6 +861,7 @@ struct RawConfig {
     paths: BTreeMap<String, String>,
     index: RawIndex,
     chunking: RawChunking,
+    scoring: RawScoring,
     embedding: RawEmbedding,
     mcp: RawMcp,
 }
@@ -894,6 +937,12 @@ struct RawIndex {
 struct RawChunking {
     max_chars: Option<usize>,
     overlap: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RawScoring {
+    title_boost: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1737,6 +1786,50 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| matches!(w, ConfigWarning::AlphaOutOfRange { .. })),
+            "{:?}",
+            config.warnings
+        );
+    }
+
+    // ────────────────────────────── title boost ──────────────────────────
+
+    #[test]
+    fn the_title_boost_defaults_to_the_full_formula() {
+        let config = parse("");
+        assert_eq!(config.scoring.title_boost, 1.0);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn the_title_boost_is_read_from_the_scoring_table() {
+        let config = parse("[scoring]\ntitle_boost = 0.0\n");
+        assert_eq!(config.scoring.title_boost, 0.0);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn a_configured_title_boost_outside_the_range_warns_before_it_is_clamped() {
+        for (text, expected) in [("-0.5", 0.0), ("1.5", 1.0), ("7", 1.0)] {
+            let config = parse(&format!("[scoring]\ntitle_boost = {text}\n"));
+            assert_eq!(config.scoring.title_boost, expected, "title_boost {text}");
+            let wanted = format!("`scoring.title_boost` is {text}; expected a number in [0, 1]");
+            assert!(
+                config.warnings.iter().any(|w| w.to_string() == wanted),
+                "title_boost {text} should warn with the configured value: {:?}",
+                config.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn a_nan_title_boost_warns_and_uses_the_default() {
+        let config = parse("[scoring]\ntitle_boost = nan\n");
+        assert_eq!(config.scoring.title_boost, 1.0);
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ConfigWarning::TitleBoostOutOfRange { .. })),
             "{:?}",
             config.warnings
         );

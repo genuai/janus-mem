@@ -106,9 +106,12 @@ plausible idfs (`what` 0.3, `is` 0.2, `our` 0.4, `q4` 2.6, `okrs` 2.9) gives:
 | title contains | hits / total | title_cov | boost at w = 1.0 |
 |---|---|---|---|
 | `q4` | 2.6 / 6.4 | 0.406 | **1.41** |
-| `q4`, `okrs` | 6.4 / 6.4 | 1.000 | **2.00** |
+| `q4`, `okrs` | 5.5 / 6.4 | 0.859 | 1.86 |
 | `what` only | 0.3 / 6.4 | 0.047 | 1.05 |
 | nothing from Q ∩ V | 0 | 0.000 | **1.00** |
+
+Only a title that carries **every** query term reaches 2.00. This row read `6.4 / 6.4` in the first
+draft, which is wrong: `total` is the sum over all of `Q ∩ V`, not over the title's terms (P1-3).
 
 The fourth row is why no stoplist is needed: a common word in a title buys almost nothing.
 
@@ -202,7 +205,8 @@ Three phases. One PR each, from `main` after the previous merge. Phase 3 may pro
 `src/vault/resolve.rs` (one pure helper, `strip_leading_date`), `janus.toml` (`[scoring]`), `tests/title_boost.rs` (new),
 `tests/golden_search.rs` (both identity assertions and the module comment), `tests/hybrid_search.rs`
 (the identity at `:239`), `tests/eval_quality.rs` (`JANUS_EVAL_TITLE_BOOST`),
-`tests/snapshots/` (a **new** pre-change snapshot; phase 1 regenerates the existing one).
+`tests/snapshots/` (a **new** pre-change snapshot; phase 1 regenerates the existing one),
+`SPEC.md` (§7.2 formula and bound, §9.4 example, §16.1 table; P1-6).
 
 **Build (~220 logic lines):**
 
@@ -237,7 +241,10 @@ Three phases. One PR each, from `main` after the previous merge. Phase 3 may pro
 - A title with no rare query term scores exactly 1.0. An empty query scores exactly 1.0.
 - A file-stem title `2024-12-01-redis-cache` gives boost 1.0 for the query `2024`.
 - The blend identity `relevance == (α·semantic + (1−α)·lexical) · title_boost` within `1e-12`.
-- The eval prints the number of title tokenizations it performed. Fixture: 24.
+- The eval prints the number of title tokenizations it performed. Fixture: **19**, one per scored
+  document. The first draft said 24, which is the number of Markdown files in the committed tree:
+  config and the walk exclude 6 of them, one file is generated, and one generated file is not
+  valid UTF-8 (P1-4).
 
 **Handoff (paste):** "Implement phase 1 of M4C per `docs/m4c-breakdown.md` §3.1–§3.3 and §5. Query time
 only: no rebuild, no format bump. The boost is idf-weighted, computed once per document per query in
@@ -333,7 +340,34 @@ the author's, as in M3 and M4B.
 
 ## 10. Implementation log — Phase 1
 
-_Nothing recorded yet._
+**Status: implemented.** Logic 176 lines, tests 758 lines, 934 total (`scripts/pr-size.sh`). The
+test count includes the new 127-line pre-boost snapshot; the budget excludes Markdown.
+
+| # | Decision | Why | Where |
+|---|---|---|---|
+| P1-1 | The pre-boost ranking is a **new** snapshot file, `search_pre_title_boost` | The default-path goldens must move (`relevance`, `final`, `title_boost`), so one file cannot hold both. The file was generated from the build before the change | `tests/golden_search.rs` |
+| P1-2 | `w = 0.0` is proven byte-for-byte | The weight-zero report equals the stored pre-change snapshot after the new key is removed. Multiplying by `1.0` is exact, so the argmax and the comparator see the same inputs | `tests/golden_search.rs` |
+| P1-3 | The plan's §3.1 table row `q4, okrs` was arithmetically wrong | `6.4 / 6.4` was printed; the value is `5.5 / 6.4 = 0.859`, boost 1.86. The table is corrected above; the unit test uses the correct literals | §3.1, `src/search/mod.rs` |
+| P1-4 | The eval's title-tokenization count is **19** on the fixture, not 24 | 24 is the Markdown file count. Config and the walk exclude 6, one generated file is added, one generated file is unreadable. The count is asserted, not just printed | `tests/eval_quality.rs`, `tests/title_boost.rs` |
+| P1-5 | The reproduction corpus needs 20 filler notes | Without them `q4` is in every chunk, its idf collapses to 0.03, and a boost bounded at 2.0 cannot move a rank. The filler gives the realistic idf balance: `df(q4) = 18` of 38 chunks | `tests/title_boost.rs` |
+| P1-6 | The SPEC corrections that the formula forces land here: §7.2, §9.4, §16.1 | The phase-1 file list omitted `SPEC.md`, but the formula, the bound, the reported key and the config table are all wrong without them. §11's milestone entry is not phase-1 work | `SPEC.md` |
+| P1-7 | The eval knob is `JANUS_EVAL_TITLE_BOOST`, default 1.0 | Phase 3 needs to measure `w ∈ {0.0, 1.0}`. Like alpha, it is read at the test edge and set on the config the scorer already reads | `tests/eval_quality.rs` |
+| P1-8 | `Outcome.title_tokenizations` reports the count | The eval must print a measured number, not infer it from `selected.len()`. The counter increments where the tokenizer runs | `src/search/mod.rs` |
+
+**Evidence.**
+
+| Claim | Evidence |
+|---|---|
+| The reproduction failed before the change | `assert_eq!(left: Some("notes/mention-08.md"), right: Some("plans/q4-plan-draft.md"))`; the plan was 11th |
+| The reproduction passes after | `the_document_about_q4_outranks_the_documents_that_mention_it` |
+| The boost literal is unsaturated | `1.43130972481946550`, below 1.5 |
+| `w = 0` reproduces the old ranking | The weight-zero report equals the pre-change snapshot byte for byte |
+| The blend identity holds | `relevance == (α·semantic + (1−α)·lexical) · title_boost` in both goldens, within `1e-12` |
+| A year query ignores a title date | `a_year_query_does_not_match_a_leading_date_in_the_title`, boost exactly 1.0 |
+| An empty query boosts nothing | `an_empty_query_or_a_term_outside_the_index_boosts_nothing` |
+| Cost is per document | 19 tokenizations over 1 533 chunks on the fixture |
+| The eval does not regress at α = 0 | `nDCG@10 0.9590`, `active top-1 1.00 (22/22)`, as in M4 |
+| No format change | `format_version` untouched; no rebuild is required |
 
 ## 11. Implementation log — Phase 2
 

@@ -34,6 +34,7 @@
 //! |---|---|
 //! | `JANUS_EVAL_SWEEP=1` | measure all six α values instead of one |
 //! | `JANUS_EVAL_ALPHA=0.5` | measure exactly this α (plus the α = 0 reference) |
+//! | `JANUS_EVAL_TITLE_BOOST=0.0` | set the title weight; the default is 1.0 |
 //! | `JANUS_EVAL_MODEL=AllMiniLML6V2` | override `[embedding] model`; the fixture ships `hash-64` |
 //! | `JANUS_MODEL_DIR=<dir>` | where the real model files live |
 //!
@@ -288,6 +289,26 @@ fn embedder(config: &Config) -> (Option<Box<dyn Embedder>>, String) {
 
 /// Parses a `JANUS_EVAL_ALPHA` value, failing loudly rather than measuring the
 /// wrong weight.
+/// Parses `JANUS_EVAL_TITLE_BOOST` as a title weight in `[0, 1]`.
+///
+/// The weight is a config value, so the harness sets the field the scorer
+/// already reads, exactly as it does for alpha. The default is the corpus
+/// value, which the fixture leaves at `1.0`.
+fn requested_title_boost() -> f64 {
+    let Ok(text) = env::var("JANUS_EVAL_TITLE_BOOST") else {
+        return 1.0;
+    };
+    let value: f64 = text
+        .trim()
+        .parse()
+        .unwrap_or_else(|err| panic!("JANUS_EVAL_TITLE_BOOST={text:?} is not a number: {err}"));
+    assert!(
+        (0.0..=1.0).contains(&value),
+        "JANUS_EVAL_TITLE_BOOST={value} is outside [0, 1]"
+    );
+    value
+}
+
 fn requested_alpha() -> Option<f64> {
     let text = env::var("JANUS_EVAL_ALPHA").ok()?;
     let value: f64 = text
@@ -311,6 +332,7 @@ fn report_active_top1_and_ndcg() {
     if let Some(model) = env::var("JANUS_EVAL_MODEL").ok().filter(|m| !m.is_empty()) {
         config.embedding.model = model;
     }
+    config.scoring.title_boost = requested_title_boost();
     let clock = FixedClock(NaiveDate::from_ymd_opt(2025, 4, 1).expect("valid eval date"));
     let (embedder, embedder_note) = embedder(&config);
 
@@ -351,6 +373,14 @@ fn report_active_top1_and_ndcg() {
 
     println!("eval: {} queries over {}", queries.len(), root.display());
     println!("eval: embedder {embedder_note}");
+    println!(
+        "eval: title weight {}; {} title tokenization(s) per query over {} document(s) \
+         and {} chunk(s)",
+        config.scoring.title_boost,
+        all.title_tokenizations,
+        all.snapshot.docs.len(),
+        all.snapshot.chunks.len(),
+    );
 
     // α = 0 is the reference every other α is compared against, so it is always
     // measured even when only one other α was asked for.
