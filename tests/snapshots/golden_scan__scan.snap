@@ -6,6 +6,7 @@ expression: json
   "api": 1,
   "config": "<vault>/janus.toml",
   "corpus_id": "fixtures",
+  "date_near_misses": [],
   "docs": [
     {
       "author": null,

@@ -43,8 +43,10 @@ the corpus by walking up from the current directory; `init` deliberately does no
 
 `scan --json` is metadata only — never document bodies. It reports every document's
 resolved `type`, `status`, `date` and `date_source` (`frontmatter`, `filename`,
-`mtime`, or `none`), identity and `id_source`, plus per-rule skip counts so a missing
-file has an answer.
+`filename_month`, `filename_year`, `folder`, `folder_month`, `folder_year`, or `absent`),
+identity and `id_source`, plus per-rule skip counts so a missing file has an answer. It also
+lists `date_near_misses`: names that look like a date but are refused, because the month or
+the day after the year does not parse.
 
 `chunks` is a read too: it runs the same pipeline, then splits each body at headings
 and reports `ordinal`, content-addressed `id`, byte `start`/`end` into the body,
@@ -68,7 +70,19 @@ text. A read auto-builds a missing index and rebuilds a stale one, printing one
 `stale: <cause>` line to stderr.
 
 `facts` lists only active decisions, specs and principles — not drafts, unknown,
-deprecated or superseded documents, which `search --intent current` may still show.
+deprecated or superseded documents, which `search --intent current` may still show. A
+vault that declares none of those types gets one note that says so, and the newest
+documents of any type instead.
+
+**What janus derives from your vault, and what it refuses to guess.** A document's date
+comes from the first of three places that answers: a frontmatter date key, a date prefix in
+the file name, or a date in the deepest folder name. The prefix is `YYYY-MM-DD`, `YYYY-MM`
+or `YYYY`, years 1970–2099, and it must be a whole token: `2026-08-22_notes.md` is a date
+and `2026-08-22x.md` is not. Every result reports `date_source` with the rung that
+answered, and a search counts the results that have no date. A file's modification time is
+**not** a date: it differs between two copies of one vault, so it never changes a score or
+an order. Janus does not guess a type from a document's content, does not rescue a
+day-first or malformed name, and does not rename a file to fit.
 
 ## Embeddings (opt-in)
 

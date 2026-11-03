@@ -23,7 +23,7 @@
 //! evidence. Adding two fields later is additive under the versioning policy,
 //! so the report simply omits them today.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -139,6 +139,12 @@ struct ScanReport<'a> {
     errors: Vec<&'a str>,
     /// Files that were admitted but could not be read, hashed or decoded.
     read_skips: Vec<ReadSkipDto<'a>>,
+    /// Names that look like a date but are refused (M4B §3.5), sorted and unique.
+    ///
+    /// The list carries the names, not a formatted sentence: a consumer can count
+    /// and locate them without parsing prose. The human output prints one line
+    /// with the count.
+    date_near_misses: Vec<&'a str>,
     /// Per-entry walk skips; present only with `--verbose`.
     #[serde(skip_serializing_if = "Option::is_none")]
     skipped_entries: Option<Vec<SkipDto<'a>>>,
@@ -172,6 +178,7 @@ impl<'a> ScanReport<'a> {
             ignored_by_git: walk.ignored_by_git,
             errors: walk.errors.iter().map(|e| e.message.as_str()).collect(),
             read_skips: read_skips.iter().map(ReadSkipDto::new).collect(),
+            date_near_misses: date_near_misses(documents),
             skipped_entries: verbose.then(|| {
                 walk.skipped
                     .iter()
@@ -276,6 +283,31 @@ impl<'a> ReadSkipDto<'a> {
     }
 }
 
+/// The names in a vault that look like a date but are refused.
+///
+/// Both the file name and every folder name are tested, because both are rungs of
+/// the date ladder. A name counts once however many documents sit under it.
+fn date_near_misses(documents: &[Document]) -> Vec<&str> {
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    for document in documents {
+        names.extend(
+            document
+                .rel_path
+                .split('/')
+                .filter(|part| resolve::is_date_near_miss(part)),
+        );
+    }
+    names.into_iter().collect()
+}
+
+/// The one line that tells a user their names are not in ISO order.
+fn near_miss_line(count: usize) -> String {
+    format!(
+        "{count} name(s) look like a date but are not ISO order; \
+         if you write dates day-first, rename them"
+    )
+}
+
 /// `YYYY-MM-DD`, the only date form in output (§9.4).
 fn iso_date(date: chrono::NaiveDate) -> String {
     date.format("%Y-%m-%d").to_string()
@@ -326,6 +358,12 @@ fn write_human(
     }
     if !read_skips.is_empty() {
         let _ = writeln!(out, "unreadable: {}", read_skip_summary(read_skips));
+    }
+    // Both outputs derive this from the same pure function, so the table line
+    // and the JSON list always agree.
+    let near_misses = date_near_misses(documents);
+    if !near_misses.is_empty() {
+        let _ = writeln!(out, "note: {}", near_miss_line(near_misses.len()));
     }
     if let Some(ignored) = walk.ignored_by_git {
         let _ = writeln!(out, "ignored by .gitignore: {ignored}");

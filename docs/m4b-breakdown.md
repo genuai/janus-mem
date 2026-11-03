@@ -263,16 +263,29 @@ output in this phase. Write the two-copy test first and show it failing on `main
 
 **Goal:** the user can see where a date came from, and `facts` explains an empty result.
 
-**Files:** `src/search/mod.rs`, `src/search/facts.rs`, `tests/cli_search.rs`,
-`tests/golden_search.rs`, `docs/m4b-breakdown.md` §10, `SPEC.md`, `README.md`.
+**Files:** `src/search/mod.rs`, `src/search/facts.rs`, `src/vault/resolve.rs` (one predicate),
+`src/scan.rs`, `tests/cli_search.rs`, `tests/cli_scan.rs`, `tests/golden_search.rs`,
+`tests/golden_scan.rs` and its snapshot, `docs/m4b-breakdown.md` §11, `SPEC.md`, `README.md`.
 
-**Build (~120 logic lines):** `date_source` in `HitDto` and `FactDto`; the `notes` line from
-§3.5; the `facts` note and fallback from §3.6; one `degraded` entry when the corpus has no
-document with a fact type.
+**Build (~120 logic lines):**
+
+1. `date_source` in `HitDto` and `FactDto` (both render through `search::render`, so the field
+   is added once).
+2. The `notes` line from §3.5.
+3. The `facts` note and fallback from §3.6.
+4. **Added to this phase after the plan was written.** A near-miss count in `scan`. A name
+   that starts with a four-digit year and a separator, then a month or a day that does not
+   parse, is refused by the date ladder. Those names are counted, and `scan` reports them in
+   one line and in its JSON. Why: a vault whose names are written day-first gets no date at
+   all, and silence leaves the user with no way to find out why. There is no date-order
+   setting. ISO order is the decision, and this line is how a user discovers that their vault
+   differs. The count needs one predicate beside the parser; the ladder and `parse_prefix`
+   do not change (P2-5, P2-6).
 
 **Tests (~200 lines):** the JSON field for each source value; the `notes` line appears only
 when an returned document is undated; `facts` on a vault with no fact types prints the note and
-the newest documents; the goldens move only by the new field and the note.
+the newest documents; `scan` counts the near-miss names and omits the line on an ISO corpus;
+the goldens move only by the new field and the note.
 
 **Docs:** SPEC §6.3 (the ladder), §6.10 (mtime is not a valid-time source), §9.4 (`date_source`
 in the example), §11 (add M4B), §15 (one row: mtime is never a date). README: one paragraph on
@@ -353,4 +366,17 @@ scores on both copies.
 
 ## 11. Implementation log — Phase 2
 
-_Nothing recorded yet._
+| ID | Decision | Why |
+|---|---|---|
+| P2-1 | `date_source` is one string field, from `DateSource::as_str`, on every search and facts result. `api` stays 1. | The field is additive and the vocabulary was fixed in B-3. A consumer that ignores the field sees the Phase 1 report (B-6). |
+| P2-2 | The undated-count line is built once, in `search::render`, from the hits that were returned. | `search` and `facts` share one renderer, so the line cannot appear in one command and not the other. The count is over the results, so `--limit` and the status gates change it (§3.5). |
+| P2-3 | The fallback list in `facts` is announced in `notes`, not in `degraded`, although Phase 2 said `degraded`. | `degraded` means "this query is not fully hybrid" and it names a lost capability. The fallback does find documents; it says what it could not find. That is a note about the result (§3.6, §9.4). |
+| P2-4 | The fallback trigger is corpus-wide and tests types only: no document has type `decision`, `spec` or `principle`. Scope and tag filters are not part of the test. | A filter that hides every fact must not claim the vault has none. A vault whose only `decision` is still a draft does declare a fact type, so it keeps the fact list and the empty result (§3.6). |
+| P2-5 | **Added to Phase 2 after the plan was written.** `scan --json` carries the near-miss names in `date_near_misses`, not the formatted sentence. The human output prints the sentence once, with the count. The list is sorted and deduplicated, so a folder name counts once however many documents sit under it. | A consumer can count and locate the names without parsing prose, and the sentence has one owner. The count exists because a day-first vault gets no dates at all, and silence gives the user nothing to act on. |
+| P2-6 | **Added to Phase 2 after the plan was written.** The near-miss test is a new `pub(crate) fn is_date_near_miss` in `src/vault/resolve.rs`. `parse_prefix`, the ladder and `DocMeta` are unchanged. A name whose year is out of range is not a near miss, and nor is `2026-08-22x.md`, whose day parses. | The test needs the same separators and digit rules as the parser, and a second copy of them in `scan` would drift. The count reports a date *order* problem, so an implausible year and a bad token boundary are different problems. |
+| P2-7 | SPEC §9.4 needed no edit: its example already carried `"date_source": "frontmatter"`. SPEC §6.3 had one stale sentence more than §9 listed: the `effective_from` bullet said a document can take its only date from mtime. It now says "no date at all". | §9.4 was corrected when the field was first specified. The leftover sentence described a rung that no longer exists (B-1). |
+| P2-8 | The comment in the fixture `notes/undated.md` still calls its source `mtime`. It is not changed here. | A comment in a fixture is not output, and editing the file changes its `content_hash` in the scan golden. A golden must move only by this phase's field and note, so this wording waits for a change that already touches the fixture. |
+
+**Golden evidence.** The two search goldens gained three lines each: `"date_source": "filename"`
+on the three `cache` results, which have no frontmatter `date`. The scan golden gained one field,
+`date_near_misses: []`. No score, span, chunk id, breadcrumb, date or note line moved.

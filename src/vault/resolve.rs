@@ -420,6 +420,38 @@ fn folder_date(rel_path: &str) -> Option<(NaiveDate, DateSource)> {
     None
 }
 
+/// Whether `name` starts with a date shape that the parser refuses.
+///
+/// The shape is a four-digit year, a separator, then a month or a day that does
+/// not parse. `2026-13-01`, `2026-22-08` and `2024-11-0-post` are near misses;
+/// so is a name whose day field is not two digits, such as `2026-08-1_notes`.
+/// `2026-08` and `2026-08-22x` are not near misses: the first parses, and in the
+/// second only the boundary fails. A name that does not start with four digits,
+/// such as `22-08-2026`, is not counted: it is not the year-first shape.
+///
+/// A year outside the accepted range is not a near miss. The line that this
+/// count feeds tells a user that their names are not in ISO order; an implausible
+/// year is a different problem.
+pub(crate) fn is_date_near_miss(name: &str) -> bool {
+    let Some(year) = first_four_digits(name) else {
+        return false;
+    };
+    let bytes = name.as_bytes();
+    if !in_range(year) || !bytes.get(4).is_some_and(is_separator) {
+        return false;
+    }
+    // Without two digits after the separator there is no month to judge.
+    if !has_digits(name, 5..7) {
+        return false;
+    }
+    if month_at(name, year).is_none() {
+        return true;
+    }
+    let starts_day = bytes.get(7).is_some_and(is_separator)
+        && bytes.get(8).is_some_and(|byte| byte.is_ascii_digit());
+    starts_day && day_at(name, year).is_none()
+}
+
 /// Normalises and validates a declared scope (§6.12 rule 1).
 ///
 /// Absent or blank means global and needs no note — that is the documented
@@ -907,6 +939,29 @@ mod tests {
         assert_eq!(first.date, NaiveDate::from_ymd_opt(MIN_DATE_YEAR, 1, 1));
         let last = doc("2099-12-31.md", "x");
         assert_eq!(last.date, NaiveDate::from_ymd_opt(MAX_DATE_YEAR, 12, 31));
+    }
+
+    #[test]
+    fn a_near_miss_is_a_date_shape_the_parser_refuses() {
+        // Every accepted name is here too, so a rule that counted everything
+        // would fail on the same table.
+        let decided: [(bool, &str); 12] = [
+            (true, "2026-13-01-bad-month.md"),
+            (true, "2026-22-08-swapped.md"),
+            (true, "2024-11-0-post.md"),
+            (true, "2026-08-1_notes.md"),
+            (true, "2026-13"),
+            (false, "2026-08-22-ok.md"),
+            (false, "2026-08"),
+            (false, "2026"),
+            (false, "2026-08-22x.md"),
+            (false, "22-08-2026-day-first.md"),
+            (false, "1.0"),
+            (false, "notes"),
+        ];
+        for (expected, name) in decided {
+            assert_eq!(is_date_near_miss(name), expected, "{name}");
+        }
     }
 
     #[test]

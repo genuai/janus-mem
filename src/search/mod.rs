@@ -24,7 +24,7 @@ use serde::Serialize;
 
 use crate::clock::Clock;
 use crate::config::{self, Config, TypeSpec};
-use crate::document::Status;
+use crate::document::{DateSource, Status};
 use crate::error::JanusError;
 use crate::id::{ChunkId, DocId};
 use crate::index::embed::Embedder;
@@ -507,6 +507,8 @@ pub struct DocRow {
     pub status: Status,
     /// Authored date.
     pub date: Option<NaiveDate>,
+    /// Where [`DocRow::date`] came from; the precision is in the variant (B-3).
+    pub date_source: DateSource,
     /// Valid-time start, when declared.
     pub effective_from: Option<NaiveDate>,
     /// Normalised owning scope, `global` when absent.
@@ -549,6 +551,7 @@ pub(crate) fn doc_rows(snapshot: &Snapshot, config: &Config) -> Vec<DocRow> {
                 type_name,
                 status: meta.status,
                 date: meta.date,
+                date_source: meta.date_source,
                 effective_from: meta.effective_from,
                 scope: text(pool, meta.scope),
                 shared_with: strings(pool, &meta.shared_with),
@@ -627,6 +630,7 @@ pub(crate) fn select(
 // ───────────────────────────────── results ─────────────────────────────────
 
 /// One result: a document, the chunk that represents it, and its breakdown.
+#[derive(Debug, Clone, Copy)]
 pub struct Hit {
     /// Index into [`Outcome::selected`].
     pub doc_index: usize,
@@ -658,17 +662,43 @@ pub(crate) struct Render<'a> {
 
 /// Renders the hits in the command's selected mode.
 pub(crate) fn render(render: &Render<'_>) -> Result<(), JanusError> {
+    // §3.5's provenance line is built here, not by a caller, so `search` and
+    // `facts` cannot disagree about when it appears.
+    let notes = notes_with_provenance(render);
     let mut out = io::stdout().lock();
     if render.json {
-        let report = Report::new(render);
+        let report = Report::new(render, &notes);
         let json = serde_json::to_string_pretty(&report)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         // A closed pipe is not a command failure (`… --json | head`).
         let _ = writeln!(out, "{json}");
     } else {
-        write_human(&mut out, render);
+        write_human(&mut out, render, &notes);
     }
     Ok(())
+}
+
+/// Adds the §3.5 line when a returned document has no date.
+///
+/// The count is over the documents that were actually returned, after `--limit`
+/// and the status gates: the line states a fact about these results, not about
+/// the corpus. It never asks the user to edit a file.
+fn notes_with_provenance(render: &Render<'_>) -> Vec<String> {
+    let mut notes = render.notes.clone();
+    let undated = render
+        .hits
+        .iter()
+        .filter(|hit| render.rows[render.selected[hit.doc_index]].date_source == DateSource::None)
+        .count();
+    if undated > 0 {
+        notes.push(undated_note(undated));
+    }
+    notes
+}
+
+/// The `notes` line for `undated` returned results.
+fn undated_note(undated: usize) -> String {
+    format!("{undated} result(s) have no date and do not decay")
 }
 
 #[derive(Serialize)]
@@ -689,7 +719,7 @@ struct Report<'a> {
 }
 
 impl<'a> Report<'a> {
-    fn new(render: &'a Render<'_>) -> Self {
+    fn new(render: &'a Render<'_>, notes: &'a [String]) -> Self {
         Self {
             api: API_VERSION,
             vault: render.root.display().to_string(),
@@ -700,7 +730,7 @@ impl<'a> Report<'a> {
             taken_ms: u64::try_from(render.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             alpha: render.alpha,
             degraded: &render.degraded,
-            notes: &render.notes,
+            notes,
             results: render
                 .hits
                 .iter()
@@ -722,6 +752,8 @@ struct HitDto<'a> {
     type_name: &'a str,
     status: &'a str,
     date: Option<String>,
+    /// Where `date` came from (§6.3, B-6); `absent` means no date at all.
+    date_source: &'static str,
     effective_from: Option<String>,
     scope: &'a str,
     shared_with: &'a [String],
@@ -748,6 +780,7 @@ impl<'a> HitDto<'a> {
             type_name: &row.type_name,
             status: row.status.as_str(),
             date: row.date.map(|date| date.to_string()),
+            date_source: row.date_source.as_str(),
             effective_from: row.effective_from.map(|date| date.to_string()),
             scope: &row.scope,
             shared_with: &row.shared_with,
@@ -781,7 +814,7 @@ fn intent_name(intent: Intent) -> &'static str {
 
 // ── human ───────────────────────────────────────────────────────────────────
 
-fn write_human(out: &mut impl io::Write, r: &Render<'_>) {
+fn write_human(out: &mut impl io::Write, r: &Render<'_>, notes: &[String]) {
     let _ = writeln!(out, "corpus:  {}", r.root.display());
     match (r.query, r.intent) {
         (Some(query), Some(intent)) => {
@@ -852,7 +885,7 @@ fn write_human(out: &mut impl io::Write, r: &Render<'_>) {
 
     let _ = writeln!(out);
     let _ = writeln!(out, "{} result(s)", r.hits.len());
-    for note in &r.notes {
+    for note in notes {
         let _ = writeln!(out, "note: {note}");
     }
 }
@@ -875,6 +908,12 @@ mod tests {
             semantic_scores(Some(&vectors), Some(&[1.0, 0.0]), 3),
             vec![1.0, 0.0, 0.0]
         );
+    }
+
+    #[test]
+    fn the_undated_note_names_the_count() {
+        assert_eq!(undated_note(1), "1 result(s) have no date and do not decay");
+        assert_eq!(undated_note(3), "3 result(s) have no date and do not decay");
     }
 
     #[test]
