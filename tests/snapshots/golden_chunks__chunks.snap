@@ -295,12 +295,12 @@ expression: json
     {
       "chunks": [
         {
-          "chars": 216,
-          "end": 216,
+          "chars": 218,
+          "end": 218,
           "heading_path": [
             "Undated note"
           ],
-          "id": "5e81884a48b13362fe97bb847f27b96eec2dc119dd8061cdcb49b13f8d1af921",
+          "id": "7173804d2c29bc0caff31b85e47df636841900a328003b593a6c57e733224963",
           "ordinal": 0,
           "start": 0
         }

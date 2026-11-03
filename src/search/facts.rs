@@ -12,6 +12,14 @@
 //! not a result; without it the result is the authority-ordered listing that
 //! "give me the current facts" means.
 //!
+//! # A corpus with no facts
+//!
+//! A vault that was never written for this tool declares no `decision`, `spec`
+//! or `principle`. An empty list then hides the cause. When no document in the
+//! corpus has a fact type, this command says so in one note and lists the newest
+//! documents of any type instead, under `current`'s inclusion rule and sort
+//! (M4B §3.6). The fallback is a report; it is not a new result contract.
+//!
 //! Rendering is `search::render` — the same table, the same DTO, one report
 //! style. `--include-superseded` does not exist here: a search override must not
 //! widen a decision's authority (§3.2).
@@ -24,10 +32,19 @@ use crate::clock::Clock;
 use crate::config::Config;
 use crate::error::JanusError;
 use crate::index::embed::Embedder;
-use crate::score::{self, Intent, ScoreDoc, ScoreInput};
+use crate::score::{self, Intent, ScoreDoc, ScoreInput, ScoredDoc};
 
 // One loader, one filter, one renderer: only the predicate and the order differ.
 use super::{Filter, Hit, Render, prepare, query_scores, render, require_scope, select};
+
+/// How the included documents are ranked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Order {
+    /// Type authority first: the §3.6 order for a real fact list.
+    Authority,
+    /// `current`'s order: by the §3.1 total order, so newest first at zero score.
+    Newest,
+}
 
 /// How `janus facts` should behave.
 #[derive(Debug, Clone, Default)]
@@ -98,8 +115,22 @@ pub fn run(
         &options.scopes,
         options.scope_only,
     );
+    // The trigger is corpus-wide and is about types only: a vault whose one
+    // `decision` is still a draft does declare a fact type, so it keeps the
+    // fact list (and an empty result) rather than a fallback list.
+    let fallback = !has_fact_types(&rows);
+    let (order, policy) = if fallback {
+        (Order::Newest, score::policy(Intent::Current, false))
+    } else {
+        (Order::Authority, score::policy(Intent::History, false))
+    };
     let (selected, map) = select(&rows, |row| {
-        score::is_fact(&row.score_doc()) && filter.matches(row)
+        let included = if fallback {
+            policy.includes(row.status)
+        } else {
+            score::is_fact(&row.score_doc())
+        };
+        included && filter.matches(row)
     });
     let docs: Vec<ScoreDoc<'_>> = selected
         .iter()
@@ -117,13 +148,20 @@ pub fn run(
         &map,
         scores.as_ref(),
         options.limit,
+        order,
     );
 
-    let notes = if options.query.is_none() {
-        vec!["no --query: ordered by type authority, not by relevance".to_owned()]
-    } else {
-        Vec::new()
-    };
+    let mut notes = Vec::new();
+    if fallback {
+        notes.push(
+            "no document declares type decision, spec or principle; \
+             showing the newest documents instead"
+                .to_owned(),
+        );
+    }
+    if options.query.is_none() && !fallback {
+        notes.push("no --query: ordered by type authority, not by relevance".to_owned());
+    }
 
     render(&Render {
         root,
@@ -143,7 +181,7 @@ pub fn run(
     })
 }
 
-/// Picks each document's representative chunk and orders documents by authority.
+/// Picks each document's representative chunk and orders documents.
 fn rank(
     clock: &dyn Clock,
     snapshot: &crate::index::Snapshot,
@@ -151,11 +189,17 @@ fn rank(
     map: &[Option<usize>],
     scores: Option<&(Vec<f64>, f64)>,
     limit: usize,
+    order: Order,
 ) -> Vec<Hit> {
-    // `history` is reused as the scoring row because it is exactly the §3.6
+    // `history` is the fact list's scoring row because it is exactly the §3.6
     // shape: no decay, every status at factor 1.0. Only `active` documents reach
-    // this point, so the row's inclusivity is never visible.
-    let policy = score::policy(Intent::History, false);
+    // this path, so the row's inclusivity is never visible. The fallback list
+    // uses `current`, because it uses `current`'s inclusion rule.
+    let intent = match order {
+        Order::Authority => Intent::History,
+        Order::Newest => Intent::Current,
+    };
+    let policy = score::policy(intent, false);
     debug_assert!(docs.iter().all(|doc| policy.includes(doc.status)));
 
     let (raw, reference) = match scores {
@@ -196,7 +240,7 @@ fn rank(
                     doc: &docs[doc_index],
                     lexical,
                     semantic: 0.0,
-                    intent: Intent::History,
+                    intent,
                     alpha: 0.0,
                     half_life_days: None,
                     include_superseded: false,
@@ -210,6 +254,10 @@ fn rank(
             })
         })
         .collect();
+
+    if order == Order::Newest {
+        return newest_first(&hits, snapshot, docs, limit);
+    }
 
     let chunk_ids: BTreeMap<usize, crate::id::ChunkId> = hits
         .iter()
@@ -227,6 +275,46 @@ fn rank(
     });
     hits.truncate(limit);
     hits
+}
+
+/// Applies `current`'s §3.1 order to the fallback list.
+///
+/// Without a query every `final` score is zero, so the date key decides and the
+/// list is the newest documents first. With a query the relevance term decides
+/// first, exactly as `search --intent current` does.
+fn newest_first(
+    hits: &[Hit],
+    snapshot: &crate::index::Snapshot,
+    docs: &[ScoreDoc<'_>],
+    limit: usize,
+) -> Vec<Hit> {
+    let mut ordered: Vec<(ScoredDoc<'_>, Hit)> = hits
+        .iter()
+        .map(|hit| {
+            let scored = ScoredDoc {
+                doc: docs[hit.doc_index],
+                breakdown: hit.breakdown,
+                chunk_id: snapshot.chunks[hit.chunk_index].id,
+                ordinal: hit.ordinal,
+            };
+            (scored, *hit)
+        })
+        .collect();
+    ordered.sort_by(|a, b| score::cmp_documents(&a.0, &b.0));
+
+    let mut sorted: Vec<Hit> = ordered.into_iter().map(|(_, hit)| hit).collect();
+    sorted.truncate(limit);
+    sorted
+}
+
+/// Whether any document in the corpus has a type that `facts` calls a fact.
+///
+/// This reads the whole corpus, before the scope and tag filters: the note
+/// explains the vault, so a filter that hides every fact must not claim the
+/// vault has none.
+fn has_fact_types(rows: &[super::DocRow]) -> bool {
+    rows.iter()
+        .any(|row| score::FACT_TYPES.contains(&row.type_name.as_str()))
 }
 
 #[cfg(test)]

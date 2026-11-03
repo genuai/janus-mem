@@ -582,3 +582,270 @@ fn facts_ignores_the_superseded_search_override() {
     assert!(!output.status.success(), "{output:?}");
     assert_eq!(output.status.code(), Some(2));
 }
+
+/// A vault with one document per date source, plus one that has no date at all.
+///
+/// Every dated document carries `tags: [dated]`, so one search can include the
+/// undated document and another can exclude it from the same index.
+fn provenance_vault() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"provenance\"\n",
+    )
+    .unwrap();
+
+    // Ordinary documents: the date is in the frontmatter or nowhere.
+    fs::write(
+        root.join("frontmatter.md"),
+        "---\ntitle: Authored\ndate: 2025-05-06\ntags: [dated]\n---\n\nprobe\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("undated.md"),
+        "---\ntitle: Undated\n---\n\nprobe\n",
+    )
+    .unwrap();
+
+    // File-name dates at all three precisions.
+    for name in ["2025-04-03-day.md", "2025-04-month.md", "2025-year.md"] {
+        fs::write(
+            root.join(name),
+            format!("---\ntitle: {name}\ntags: [dated]\n---\n\nprobe\n"),
+        )
+        .unwrap();
+    }
+
+    // Folder dates at all three precisions.
+    for (folder, file) in [
+        ("2025.07.08_folder", "day.md"),
+        ("2025-09_folder", "month.md"),
+        ("2025_folder", "year.md"),
+    ] {
+        fs::create_dir_all(root.join(folder)).unwrap();
+        fs::write(
+            root.join(folder).join(file),
+            format!("---\ntitle: {folder}/{file}\ntags: [dated]\n---\n\nprobe\n"),
+        )
+        .unwrap();
+    }
+    dir
+}
+
+/// Reads `date_source` for every result, keyed by `rel_path`.
+fn date_sources(report: &Value) -> std::collections::BTreeMap<String, String> {
+    report["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .map(|hit| {
+            (
+                hit["rel_path"].as_str().expect("rel_path").to_owned(),
+                hit["date_source"].as_str().expect("date_source").to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn every_result_names_the_rung_that_produced_its_date() {
+    let vault = provenance_vault();
+    index(vault.path());
+    let report = search_json(
+        vault.path(),
+        &["probe", "--intent", "history", "--limit", "20"],
+    );
+
+    // One entry per rung of the ladder, written by hand from the file tree.
+    let expected = std::collections::BTreeMap::from([
+        ("2025-04-03-day.md".to_owned(), "filename".to_owned()),
+        ("2025-04-month.md".to_owned(), "filename_month".to_owned()),
+        ("2025-year.md".to_owned(), "filename_year".to_owned()),
+        ("2025.07.08_folder/day.md".to_owned(), "folder".to_owned()),
+        (
+            "2025-09_folder/month.md".to_owned(),
+            "folder_month".to_owned(),
+        ),
+        ("2025_folder/year.md".to_owned(), "folder_year".to_owned()),
+        ("frontmatter.md".to_owned(), "frontmatter".to_owned()),
+        ("undated.md".to_owned(), "absent".to_owned()),
+    ]);
+    assert_eq!(date_sources(&report), expected, "{report}");
+
+    // The field is additive: the envelope keeps its version.
+    assert_eq!(report["api"], 1, "{report}");
+
+    // Only the absent one is null: the source never outruns the date.
+    for hit in report["results"].as_array().unwrap() {
+        let absent = hit["date_source"] == "absent";
+        assert_eq!(hit["date"].is_null(), absent, "{hit}");
+    }
+}
+
+#[test]
+fn the_undated_note_counts_only_returned_results() {
+    let vault = provenance_vault();
+    index(vault.path());
+
+    let all = search_json(
+        vault.path(),
+        &["probe", "--intent", "history", "--limit", "20"],
+    );
+    let notes: Vec<&str> = all["notes"]
+        .as_array()
+        .expect("notes")
+        .iter()
+        .map(|note| note.as_str().expect("note"))
+        .collect();
+    assert!(
+        notes.contains(&"1 result(s) have no date and do not decay"),
+        "{all}"
+    );
+
+    // The undated document is the only one without the tag, so this search
+    // returns none of it and must not carry the line.
+    let dated = search_json(
+        vault.path(),
+        &[
+            "probe", "--intent", "history", "--tags", "dated", "--limit", "20",
+        ],
+    );
+    assert_eq!(date_sources(&dated).len(), 7, "{dated}");
+    assert!(
+        !dated["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().unwrap().contains("no date")),
+        "{dated}"
+    );
+}
+
+#[test]
+fn facts_carries_the_date_source_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"facts\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("decisions")).unwrap();
+    fs::create_dir_all(root.join("specs")).unwrap();
+    fs::write(
+        root.join("decisions/adr.md"),
+        "---\ntitle: Authored\ntype: decision\ndate: 2025-01-02\n---\n\nprobe\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("specs/2025-02-03-named.md"),
+        "---\ntitle: Named\ntype: spec\n---\n\nprobe\n",
+    )
+    .unwrap();
+    index(root);
+
+    let report = common::facts_json(root, &[]);
+    assert_eq!(
+        date_sources(&report),
+        std::collections::BTreeMap::from([
+            ("decisions/adr.md".to_owned(), "frontmatter".to_owned()),
+            (
+                "specs/2025-02-03-named.md".to_owned(),
+                "filename".to_owned()
+            ),
+        ]),
+        "{report}"
+    );
+}
+
+/// A vault whose documents are all `note`: it declares no fact type at all.
+fn no_fact_types_vault() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"cold-start\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("notes")).unwrap();
+
+    // Newest first is 2025-07-02, 2025-03-04, then the undated document.
+    for (name, date) in [
+        ("2025-03-04-older.md", "2025-03-04"),
+        ("2025-07-02-newer.md", "2025-07-02"),
+    ] {
+        fs::write(
+            root.join("notes").join(name),
+            format!("---\ntitle: {name}\ndate: {date}\n---\n\nquorum probe\n"),
+        )
+        .unwrap();
+    }
+    fs::write(
+        root.join("notes/undated.md"),
+        "---\ntitle: Undated\n---\n\nquorum probe\n",
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn facts_explains_a_corpus_without_fact_types() {
+    let vault = no_fact_types_vault();
+    index(vault.path());
+    let report = common::facts_json(vault.path(), &[]);
+
+    let notes: Vec<&str> = report["notes"]
+        .as_array()
+        .expect("notes")
+        .iter()
+        .map(|note| note.as_str().expect("note"))
+        .collect();
+    assert!(
+        notes.contains(
+            &"no document declares type decision, spec or principle; \
+              showing the newest documents instead"
+        ),
+        "{report}"
+    );
+    assert!(
+        !notes
+            .iter()
+            .any(|note| note.contains("ordered by type authority")),
+        "the fallback list is not authority-ordered: {report}"
+    );
+
+    // Newest of any type, then the undated document last.
+    assert_eq!(
+        result_paths(&report),
+        vec![
+            "notes/2025-07-02-newer.md".to_owned(),
+            "notes/2025-03-04-older.md".to_owned(),
+            "notes/undated.md".to_owned(),
+        ],
+        "{report}"
+    );
+    for hit in report["results"].as_array().unwrap() {
+        assert_eq!(hit["type"], "note", "{hit}");
+        if hit["date_source"] == "absent" {
+            // No anchor means no age, whatever today is.
+            assert_eq!(hit["scores"]["decay"], 1.0, "{hit}");
+        }
+    }
+}
+
+#[test]
+fn facts_keeps_the_fact_list_when_a_fact_type_exists() {
+    // The fixture has decisions, so the note must not appear there.
+    let vault = fixture_vault();
+    index(vault.path());
+    let report = common::facts_json(vault.path(), &[]);
+    assert!(
+        !report["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|note| note.as_str().unwrap().contains("no document declares")),
+        "{report}"
+    );
+}

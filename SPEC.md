@@ -231,7 +231,7 @@ author: "claude-opus"     # optional provenance; opaque, never inferred, not sco
 title: "Local Caching Architecture"
 type: decision           # open set; defaults: decision|spec|principle|finding|journal|idea|note
 status: active           # active | draft | superseded | deprecated
-date: 2026-10-29         # authored/decided date; falls back to mtime
+date: 2026-10-29         # authored/decided date; falls back to a date in a name
 effective_from: 2026-11-01  # optional valid-time start; defaults to date
 effective_to: null          # optional valid-time end (exclusive); usually derived
 supersedes: decisions/2024-11-02-postgres-cache.md
@@ -247,8 +247,10 @@ Rules:
 
 - Missing `type` → inferred from **configurable path patterns** (defaults recognize `decisions/`, `adr/`, `specs/`, `principles/`, `research/`, `findings/`, `ideas/`, `journals/`), else `note`. A vault with folders named `notes/`, `archive/`, or `2026/Q4/` loses nothing: everything falls back to `note` and authority weighting stays flat until the pattern list is extended.
 - Missing `status` → `active` for every type (never `draft` by default).
-- Missing `date` → parse `YYYY-MM-DD` prefix from filename, else frontmatter `created`, else filesystem mtime. Record the *source* of the date (`filename | frontmatter | mtime`) and surface it in responses so the agent can judge confidence.
-- `effective_from` / `effective_to` are optional valid-time keys with their own semantics (§6.10). They never fall back to mtime; if absent, the window is derived from `date` and the supersession chain. When the only available date came from mtime, the document has no trustworthy valid time and is excluded from `as_of` queries with a `no_validity` note.
+- Missing `date` → the date ladder. First the frontmatter date key (`date`, `created`, `decided`), then a date prefix in the file name, then a date in the deepest folder name, then no date. A prefix is `YYYY-MM-DD`, `YYYY-MM` or `YYYY`, year 1970–2099, and must be a whole token: `2026-08-22_notes.md` matches, `2026-08-22x.md` and `1.0.md` do not. **A file's modification time is not on this ladder.**
+- Each result records the *source* of its date — `frontmatter | filename | filename_month | filename_year | folder | folder_month | folder_year | absent` — and surfaces it in responses so the agent can judge confidence (§9.4). The source also carries the precision, so one field answers "where" and "how exact".
+- A month date is anchored on the first day of its month, a year date on the first day of its year. A document with no date has no anchor: its decay factor is `1.0`, so it never loses score for age and is treated as always current.
+- `effective_from` / `effective_to` are optional valid-time keys with their own semantics (§6.10). They never fall back to mtime; if absent, the window is derived from `date` and the supersession chain. A document with no date at all has no trustworthy valid time and is excluded from `as_of` queries with a `no_validity` note.
 - Unknown `status` is not an error: it maps to `status: unknown` and gets the 0.8× gate factor plus a `doctor` note. Unknown `type` keeps its name (types are an open registry, §6.6.1) and gets the fallback weight 0.80 plus a `doctor` note. Fail-open on read, fail-closed on write.
 - Files with no frontmatter are fully supported and are **never** mutated to add one unless the user explicitly calls `write_document` with frontmatter for that path.
 - `doctor` reports: duplicate `id`, missing dates, `supersedes` targets that don't exist, broken chains (A superseded_by B, B superseded_by C but C doesn't supersede B), and `superseded_by` without a reciprocal `supersedes`.
@@ -500,7 +502,7 @@ effective_to: 2026-03-01    # valid-time end, exclusive; usually derived
 
 Rules:
 
-1. `effective_from` defaults to `date`. **Never to mtime.**
+1. `effective_from` defaults to `date`. **Never to mtime.** A file's modification time is not a valid-time source at all: two copies of one vault carry different values, so it never anchors a window, never scores and never sorts (§6.3).
 2. `effective_to` is exclusive. If absent, it is derived as the earliest successor's `effective_from` (§6.7). The chain is the *fallback*; explicit keys win.
 3. `valid = [effective_from, valid_to)` where `valid_to = min(effective_to, earliest successor's effective_from)`.
 4. `valid_to <= effective_from` → `invalid_validity` (`doctor` error). The window is treated as empty; the document still appears in `history` and `exhaustive`.
@@ -1200,6 +1202,11 @@ Hand-written BM25 (inverted index, tokenizer, optional stemmer); scoring module 
 **Done when:** second index run touches zero embeddings for unchanged docs; a rename that leaves the embedded text unchanged costs zero embedding work, while a rename that changes the derived title re-embeds only that document; warm-query latency is **printed** at 200k chunks with the two-file read path, against §13's p50 ≤ 100 ms target; `--no-embeddings` degrades cleanly.
 **Learn:** traits, trait objects vs. generics, `Send`/`Sync`, slices and `chunks_exact`, serde/bincode, feature flags, `Option<&T>` in structs, `Arc`.
 
+### M4B — Works on a vault you did not prepare (2 PRs)
+The date ladder uses authored and name-derived dates only: a frontmatter date key, a date prefix in the file name, a date in the deepest folder name. mtime leaves the ladder, because a value that differs between two copies of one vault cannot affect a ranking. Month (`2026-08`) and year (`2026`) precision join day precision in file and folder names, so `format_version` becomes 3. Every search and facts result carries `date_source` with the rung that answered, one `notes` line counts the results that have no date, `facts` explains a corpus that declares no fact type, and `scan` counts names that look like a date but are not in ISO order.
+**Done when:** shifting every mtime changes no order and no score; `search --json` and `facts --json` name the source of every date; a document with no date reports `absent` and decays by 1.0; `facts` on a vault with no fact types says why and lists the newest documents; `scan` reports the near-miss count.
+**Learn:** fallback ladders as data, `Option` inside a serialized format, an additive DTO change that keeps the API version.
+
 ### M5 — Temporal graph (3–4 days)
 Supersession parsing, transitive chains, cycle detection, intersect-or-global cross-scope rules, scope-relative validity windows, `--as-of` valid-time queries (§6.10), effective-status derivation, `janus lineage` (chain + terminal state), `janus doctor` link/scope checks (`cross_scope_supersession`, `invalid_validity`), `suggest-links` (similarity candidates, no writes), `janus ids`, and §6.9 move handling: derived-identity and exact-hash moves (exact-hash move detection, `path_history`), path alias table, continuation hints, tombstones, `janus moves`.
 **Done when:** `lineage` renders a correct 5-link chain from the fixture vault, `search --as-of` returns the old value for a past date and the new one today, detects the seeded cycle, and survives a simulated “dream cycle” that (a) moves a linked doc unchanged, (b) moves and edits a linked doc with no `id` anywhere, and (c) rewrites a third body — all without breaking any chain, touching any file, or requiring any confirmation step.
@@ -1367,6 +1374,7 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | D47 | Corpus-local config and workspace config are separate files with disjoint responsibilities ("one setting, one home"); no global index | A corpus must be readable standalone and with its own conventions; a workspace must never reinterpret a corpus's parsing or scoring rules | No |
 | D48 | Chunk ids are `blake3(heading_path ‖ 0x00 ‖ normalized_text)` — the document title and `doc_id` do **not** participate | The default title is the filename stem, so including it would re-key every chunk on a rename. §11-M4 requires a renamed-but-unchanged file to cost *zero* embedding work; content-addressing by text is what makes the embedding cache free whenever the embedded text is unchanged — free across edits, moves, renames and copies only under that condition (§11-M4) | Yes (bump `format_version`, rebuild) |
 | D49 | A body `H1` never becomes the identity-bearing `title`; it enters `heading_path` instead | §6.4 rung 3 keys on the title, so promoting a body heading to the title would let an edit to `# Notes` re-key the whole document — precisely what the identity ladder forbids. The breadcrumb still gets the `H1`; identity does not | Yes |
+| D50 | A derived filesystem timestamp is never a date: mtime does not enter the date ladder, never scores and never sorts | A modification time differs between two copies of one vault — a zip download, a checkout, a copy — so a ranking that reads it is not reproducible. Showing it would also invite trust in a value the author never wrote. Only an authored date, or a date in a name, may change a score or an order (§6.3, §6.10) | No |
 
 ### Open questions (to resolve at the milestone in brackets)
 

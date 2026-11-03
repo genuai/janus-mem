@@ -497,3 +497,96 @@ fn scan_json_reports_a_derived_identity_per_document() {
         assert_eq!(doc["id"].as_str().unwrap().len(), 32);
     }
 }
+
+/// A vault whose names sit on both sides of the date parser's boundary.
+fn near_miss_vault() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"names\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("2026-13")).unwrap();
+
+    // Refused names: an impossible month, an impossible day, an incomplete day,
+    // and a month field written in day-first order.
+    for name in [
+        "2026-13-01-bad-month.md",
+        "2024-11-0-post.md",
+        "2026-08-1_notes.md",
+        "2026-22-08-swapped.md",
+    ] {
+        fs::write(root.join(name), "# refused\n").unwrap();
+    }
+    fs::write(root.join("2026-13/inside.md"), "# folder refused\n").unwrap();
+
+    // Accepted names, and names that only look wrong: none of these count.
+    for name in [
+        "2026-08-22-ok.md",
+        "2026-08-22x.md",
+        "2026-08.md",
+        "2026.md",
+        "22-08-2026-day-first.md",
+        "1.0.md",
+    ] {
+        fs::write(root.join(name), "# accepted\n").unwrap();
+    }
+    dir
+}
+
+#[test]
+fn scan_counts_names_that_look_like_a_date_but_are_not_iso_order() {
+    let vault = near_miss_vault();
+    let report = scan_json(vault.path(), &[]);
+
+    // Derived by hand from the tree: the four refused files and the refused
+    // folder, sorted, with each name counted once.
+    let expected = serde_json::json!([
+        "2024-11-0-post.md",
+        "2026-08-1_notes.md",
+        "2026-13",
+        "2026-13-01-bad-month.md",
+        "2026-22-08-swapped.md",
+    ]);
+    assert_eq!(report["date_near_misses"], expected, "{report}");
+
+    // `2026-08-22x.md` is refused too, but its day parses: only the boundary
+    // fails, so it is not counted as a date-order mistake.
+    let names = report["date_near_misses"].as_array().unwrap();
+    assert!(
+        !names.iter().any(|name| name == "2026-08-22x.md"),
+        "{report}"
+    );
+
+    janus()
+        .arg("--vault")
+        .arg(vault.path())
+        .arg("scan")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "note: 5 name(s) look like a date but are not ISO order; \
+             if you write dates day-first, rename them",
+        ));
+}
+
+#[test]
+fn scan_reports_no_near_miss_when_every_name_is_iso_ordered() {
+    let vault = sample_vault();
+    let report = scan_json(vault.path(), &[]);
+    assert_eq!(
+        report["date_near_misses"],
+        serde_json::json!([]),
+        "{report}"
+    );
+
+    // No count, no line: an absent line is the healthy case.
+    janus()
+        .arg("--vault")
+        .arg(vault.path())
+        .arg("scan")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ISO order").not());
+}
