@@ -297,23 +297,21 @@ enum Precision {
 
 /// Parses a date token from the start of `name`.
 ///
-/// The shapes are `YYYY-MM-DD`, `YYYY-MM` and `YYYY`. A dot may replace either
-/// separator, because folder names often use dots. The token must be a whole
-/// prefix: the next character is `-`, `_`, `.` or the end of the name.
+/// The shapes are `YYYY-MM-DD`, `YYYY-MM` and `YYYY`. The separator set is
+/// `-`, `_` and `.`, both inside the token and after it. The token must be a
+/// whole prefix: the next character is a separator or the end of the name.
 ///
-/// A longer shape wins. A name that reaches the day separator must be a valid
-/// day; it does not fall back to a month. So `2026-08-22x` and `2026-13-01`
-/// produce no date rather than a weaker one.
+/// A longer shape wins. A complete day shape must be a valid day; it does not
+/// fall back to a month. So `2026-08-22x` and `2026-13-01` produce no date
+/// rather than a weaker one.
 fn parse_prefix(name: &str) -> Option<(NaiveDate, Precision)> {
     let year = first_four_digits(name)?;
     let bytes = name.as_bytes();
 
-    let has_month = matches!(bytes.get(4), Some(b'-' | b'.'))
-        && name
-            .get(5..7)
-            .is_some_and(|part| part.bytes().all(|byte| byte.is_ascii_digit()));
+    let has_month = bytes.get(4).is_some_and(is_separator) && has_digits(name, 5..7);
+    let has_day = has_month && bytes.get(7).is_some_and(is_separator) && has_digits(name, 8..10);
 
-    if has_month && matches!(bytes.get(7), Some(b'-' | b'.')) {
+    if has_day {
         let date = day_at(name, year)?;
         return is_boundary(name, 10).then_some((date, Precision::Day));
     }
@@ -324,6 +322,17 @@ fn parse_prefix(name: &str) -> Option<(NaiveDate, Precision)> {
 
     let date = year_at(year)?;
     is_boundary(name, 4).then_some((date, Precision::Year))
+}
+
+/// Whether a byte is one of the three date separators.
+fn is_separator(byte: &u8) -> bool {
+    matches!(byte, b'-' | b'_' | b'.')
+}
+
+/// Whether the byte range is present and all ASCII digits.
+fn has_digits(name: &str, range: std::ops::Range<usize>) -> bool {
+    name.get(range)
+        .is_some_and(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Parses `YYYY-MM-DD` or `YYYY.MM.DD` into a date in the allowed year range.
@@ -370,10 +379,7 @@ fn first_four_digits(name: &str) -> Option<i32> {
 /// Whether the token ends at a separator or at the end of the name.
 fn is_boundary(name: &str, end: usize) -> bool {
     match name.get(end..) {
-        Some(rest) => match rest.as_bytes().first() {
-            None | Some(b'-' | b'_' | b'.') => true,
-            Some(_) => false,
-        },
+        Some(rest) => rest.as_bytes().first().is_none_or(is_separator),
         None => false,
     }
 }
@@ -833,25 +839,32 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_separator_inside_the_date_leaves_only_the_year() {
-        // `2024_11_02` has no `YYYY-MM` or `YYYY-MM-DD` prefix, but `2024` is a
-        // whole year token, so the document is dated at year precision.
-        let document = doc("2024_11_02.md", "x");
+    fn an_underscore_is_an_internal_date_separator() {
+        let day = doc("2024_11_02_notes.md", "x");
+        assert_eq!(day.date, NaiveDate::from_ymd_opt(2024, 11, 2));
+        assert_eq!(day.date_source, DateSource::Filename);
 
-        assert_eq!(document.date, NaiveDate::from_ymd_opt(2024, 1, 1));
-        assert_eq!(document.date_source, DateSource::FilenameYear);
+        let month = doc("2026_08_notes.md", "x");
+        assert_eq!(month.date, NaiveDate::from_ymd_opt(2026, 8, 1));
+        assert_eq!(month.date_source, DateSource::FilenameMonth);
+
+        // M1 rejected this as "wrong separators". It is a day date, not a year.
+        let bare = doc("2024_11_02.md", "x");
+        assert_eq!(bare.date, NaiveDate::from_ymd_opt(2024, 11, 2));
+        assert_eq!(bare.date_source, DateSource::Filename);
     }
 
     #[test]
     fn a_date_glued_to_more_text_is_not_a_date() {
-        // A longer shape never falls back to a weaker one.
+        // A complete longer shape never falls back to a weaker one.
         for rel in [
             "2024-11-02notadate.md",
             "2024-13-45-post.md",
-            "2024-11-0-post.md",
             "2026-08-22x.md",
             "2026-13-01.md",
             "2026-08x.md",
+            "2026_08_22x.md",
+            "2026_13_01.md",
         ] {
             let document = doc(rel, "x");
             assert_eq!(document.date, None, "{rel}");
@@ -921,7 +934,17 @@ mod tests {
                 DateSource::Folder,
             ),
             (
+                "2026_08_22_notes/x.md",
+                NaiveDate::from_ymd_opt(2026, 8, 22),
+                DateSource::Folder,
+            ),
+            (
                 "2026-08/x.md",
+                NaiveDate::from_ymd_opt(2026, 8, 1),
+                DateSource::FolderMonth,
+            ),
+            (
+                "2026_08_notes/x.md",
                 NaiveDate::from_ymd_opt(2026, 8, 1),
                 DateSource::FolderMonth,
             ),
@@ -1377,6 +1400,7 @@ mod tests {
             "2026-08-22x.md",
             "😀/2026-08-22x.md",
             "2026.08.22_notes/x.md",
+            "2026_08_22_notes/x.md",
         ] {
             let stem = filename_stem(rel).unwrap_or_default();
             let _ = date_prefix(&stem);

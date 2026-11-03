@@ -110,14 +110,15 @@ Janus reads a date in this order. The first match wins.
 3. A folder name, same three shapes. Janus uses the **deepest** folder that has a date.
 4. No date.
 
-A date token must be a whole prefix. The next character must be a separator (`-`, `_`, `.`) or
-the end of the name. So `2026-08-22_notes.md` matches, and `2026-08-22notes.md` does not.
-This rule already exists for `YYYY-MM-DD`. M4B applies it to the new shapes.
+A date token must be a whole prefix. The separator set is `-`, `_` and `.`, both inside a date
+token and immediately after it. So `2026-08-22_notes.md` matches, and `2026-08-22notes.md` does
+not. This rule already exists for `YYYY-MM-DD`. M4B applies it to the new shapes and separators.
 
-A longer shape wins. A name that reaches the day separator must be a valid day; it does not fall
-back to a month. So `2026-08-22x.md` and `2026-13-01.md` produce no date, not a weaker one. A dot
-may replace a date separator, so `2026.08.22_notes` is a folder date (P1-2, P1-3). The check
-runs before the ladder tries a shorter shape.
+A longer complete shape wins. A complete day shape must be a valid day; it does not fall back to
+a month. So `2026-08-22x.md`, `2026-08_22x.md`, `2026-13-01.md` and `2026_13_01.md` produce no
+date, not a weaker one. A month or year token may use any separator, so `2026_08_notes.md` is
+month precision and `2024_11_02_notes.md` is day precision (P1-2, P1-3, P1-9). The check runs
+before the ladder tries a shorter shape.
 
 A year must be between 1970 and 2099. A name like `1.0` is a version. A name like `2026` at the
 start of a file name is a date. The range check rejects the common false positives.
@@ -236,7 +237,8 @@ Two phases. Each is one PR from `main` after the previous merge.
 - The ladder table: one row per rung, including folder and the three precisions. Each expected
   date is a literal.
 - Prefix rules: `2026-08-22_x.md` matches; `2026-08-22x.md` does not; `1.0.md` does not;
-  `0000-01-01.md` is rejected by the year range; `2026-13-01.md` is rejected by the parser.
+  `0000-01-01.md` is rejected by the year range; `2026-13-01.md` is rejected by the parser. All
+  three separators (`-`, `_`, `.`) work at both positions.
 - Folder dates: `2026.08.22_notes/x.md`, `2026-08/x.md`, `2026/x.md`; the deepest folder wins;
   a file-name date beats a folder date.
 - M4B's own regression: an undated document has decay 1.0 and never loses to a dated document
@@ -332,13 +334,14 @@ P1b: it is the only part P2 does not need.
 | ID | Decision | Why |
 |---|---|---|
 | P1-1 | `DateSource::Mtime` is gone. The ladder is frontmatter, file name, folder name, then `None`. A `None` date gives decay `1.0` and no age. | A disk time differs between two copies of one vault, so it cannot affect a score or an order (B-1, B-5). |
-| P1-2 | The parser tries the longest shape only. A name that reaches the day separator must be a valid day. `2026-08-22x.md`, `2026-13-01.md` and `2024-11-0-post.md` give no date. | A fallback to a shorter shape would turn a glued or malformed day token into a month or a year. |
-| P1-3 | A dot may replace an internal date separator. The token boundary still uses `-`, `_`, `.` or end of name. So `2026.08.22_notes` is a folder date. | Folder names often use dots, and §5 names `2026.08.22_notes/x.md` as a required case. |
+| P1-2 | The parser tries the longest complete shape only. A complete day shape must be a valid day. `2026-08-22x.md`, `2026_08_22x.md`, `2026-13-01.md` and `2026_13_01.md` give no date. | A fallback to a shorter shape would turn a glued or invalid day token into a month or a year. |
+| P1-3 | The separator set is `-`, `_` and `.` at both internal positions and at the token boundary. So `2026.08.22_notes` and `2026_08_22_notes` are folder dates at day precision. | Folder and file names use different conventions, and §5 names `2026.08.22_notes/x.md` as a required case. |
 | P1-4 | `usable_date` keeps only `Frontmatter` and day-precision `Filename`. All new variants return `None` for identity. | This keeps every existing `DocId` unchanged (§3.4), including documents that gain a month, year or folder date. |
 | P1-5 | A month date is stored as the first day of the month; a year date as the first day of the year. | The decay anchor is the start of the period, so janus never makes an old document look newer (B-4). |
 | P1-6 | `tests/common` skips `.janus/` when it copies the fixture vault. A test covers a synthetic stale index and the real fixture copy. | A developer who runs `janus index` on the fixture must not hand a built index to a CLI test. |
 | P1-7 | `FORMAT_VERSION` is 3. A version-2 index is refused with one `stale:` line and rebuilt. | `DocMeta` gains `date_source`, so the old layout cannot be read (B-7). |
 | P1-8 | The `DateSource::None` label is `absent`. The scan golden and two fixture tests now expect a null date for `notes/undated.md`. | §3.5 names `absent` as the output value. The label must name the new sources. |
+| P1-9 | An underscore is an internal date separator. `2026_08_notes.md` is month precision and `2024_11_02_notes.md` is day precision. The M1 test that expected `2024_11_02.md` to have no date now expects day precision. | The requirement names `YYYY_MM`. A fallback to year precision would decay the document from January, up to eleven months too old. |
 
 **Two-copy evidence.** The test `shifting_every_mtime_changes_no_order_and_no_score` failed before
 the change. The undated fixture document moved from rank 2 with final `0.2733` to rank 4 with final
