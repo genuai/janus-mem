@@ -223,9 +223,14 @@ Three phases. One PR each, from `main` after the previous merge. Phase 3 may pro
   each. Query **`what is our q4 okrs`** — the acceptance query, with `okrs` spelled out and the
   question mark gone. Five terms; `q4` alone is in the title. Without the boost the long document is
   outside the top 5; with `w = 1.0` it is rank 1. **This test fails on `main`.**
-  The expected boost is a literal with its arithmetic in the test comment: the fixture's `df` for each
-  query term, the four idfs, `hits`, `total`, `cov`, and the resulting boost. A literal copied from the
-  plan's worked table would pin an idf distribution the test corpus does not have.
+  The expected boost is a literal with its arithmetic in the test comment: **five** `df` counts, five
+  idfs, `hits`, `total`, `cov`, and the resulting boost. A literal copied from the plan's worked table
+  would pin an idf distribution the test corpus does not have.
+
+  **All five query terms must be in the test corpus' vocabulary.** A term missing from the index is
+  excluded from `total`, so a corpus that lacks `our` gives a four-term denominator and a boost that is
+  too high: a favourable case enshrined as the test. Write `our`, `what`, `is`, `q4` and `okrs` into the
+  test documents, and assert the literal is **below 1.5**, so a saturated corpus cannot pass.
 - The formula table above, with literals for all four rows.
 - `w = 0.0` reproduces the stored pre-change snapshot: same order, same `final`, every pre-existing
   field identical. The new key is the only difference.
