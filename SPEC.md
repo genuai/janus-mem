@@ -659,7 +659,12 @@ semantic   = cosine(q_vec, c_vec)                        ∈ [-1, 1] → clamped
 lexical    = bm25_norm(q, c)                             ∈ [0, 1] via sigmoid squash
              = s / (s + s_ref), where s = Σ bm25(t, c) and
                s_ref = Σ idf(t) over query terms present in the index
-relevance  = α · semantic + (1 − α) · lexical            α = 0.5 (0.0 if no embedder)
+blend      = α · semantic + (1 − α) · lexical            α = 0.5 (0.0 if no embedder)
+hits       = Σ idf(t) for t in Q ∩ T ∩ V
+total      = Σ idf(t) for t in Q ∩ V
+title_cov  = hits / total                                = 0 when total is 0
+title_boost = clamp(1 + w · title_cov, 1.0, 2.0)         w = [scoring] title_boost, default 1.0
+relevance  = blend · title_boost                         ∈ [0, 2]
 authority  = AUTHORITY[type] · STATUS_FACTOR[status]
 decay      = exp(−ln(2) · age_days / half_life_days)     = 1.0 if timeless or half_life ≤ 0
 final      = relevance · authority · decay
@@ -667,6 +672,10 @@ final      = relevance · authority · decay
 
 - **Admission is `relevance > 0`.** A chunk is a candidate when `relevance > 0`, not when `lexical > 0`, so a semantic-only match can enter the result set. At α = 0 the two rules coincide, which is what keeps the lexical path unchanged.
 - **α is configurable.** It is `[embedding] alpha` (§16.1), defaulting to the value above and clamped to `[0, 1]` with a config warning. `0.0` is the exact lexical path and is forced whenever no embedder resolves.
+- **The title boost is weighted by rarity.** `Q` is the set of distinct query terms, `T` the distinct terms of the document title, and `V` the terms the index holds. A rare query term in the title counts more than a common one, so a title needs no stoplist.
+- **A leading date is not a topic.** The boost tokenizes the title after `strip_leading_date`, so `2024-12-01-redis-cache` does not match a query for `2024`. The stored title keeps its date: the stored title is identity (§6.4). This is a query-time rule; no index format changes.
+- **The boost is computed once per document per query**, beside the document list, and indexed inside the chunk loop. It never runs per chunk.
+- **`[scoring] title_boost` is clamped to `[0, 1]`** with a config warning, and the warning is tested on the configured value. `0.0` reproduces the pre-boost ranking exactly. `facts` passes `1.0`, because an authority-ordered list cannot be reordered by a multiplier.
 - **Retrieval is candidate-scoped.** The scorer signature is effectively `score(query, candidates: Option<&CandidateSet>)`, where a candidate set is a bitset or sorted `ChunkId` list. v1 always passes `None` (all chunks). This exists so a future graph expansion, tag filter, or “only these docs” restriction reuses the exact same scoring path instead of growing a second one (§8.9).
 - `age_days` uses `effective_from` (falling back to `date`) and the injected `Clock`, clamped at 0 (future-dated docs get decay = 1.0).
 - `as_of` requests bypass the status gate and set `decay = 1.0`; inclusion is decided by the valid-time window alone. The response still reports declared and effective status so the agent can see what the document's standing was.
@@ -677,7 +686,7 @@ final      = relevance · authority · decay
 - Optional MMR-style diversity pass (`--diversity 0.3`, default off) to avoid five chunks of the same doc.
 - Ties break by `final`, then `date` desc, then `chunk_id`; for documents the order is completed by `DocId` asc and then `rel_path` asc (a `ChunkId` excludes the document, so two documents can otherwise tie on every listed key), and within one document by `chunk_id` then the occurrence's `ordinal`. The extra keys only order hits the first three leave tied.
 
-**Hard requirement:** `score()` is a pure function with a `Clock` and config as inputs. Its tests are table-driven and cover: decay monotonicity (`age↑ ⇒ decay↓`), authority ordering, status gating, α endpoints, future dates, missing dates, and `timeless` override. Property tests with `proptest` assert `final ≥ 0` and `final ≤ 1.5 · 1.0 · 1.0`.
+**Hard requirement:** `score()` is a pure function with a `Clock` and config as inputs. Its tests are table-driven and cover: decay monotonicity (`age↑ ⇒ decay↓`), authority ordering, status gating, α endpoints, future dates, missing dates, and `timeless` override. Property tests with `proptest` assert `final ≥ 0`, `relevance ≤ 2.0` and `final ≤ 1.5 · 1.0 · 1.0 · 2.0`.
 
 **Two independent layers, not alternatives.** `fastembed` provides the *semantic* vector (M4); BM25 provides the *lexical* signal (M3). Neither replaces the other:
 
@@ -1133,9 +1142,9 @@ Every tool returns the same outer shape, so agents learn one contract:
                  "shared_with": ["shared:finance"],
                  "author": "claude-opus",
                  "date_source": "frontmatter", "doc_version": "2.0",
-                 "scores": { "semantic": 0.81, "lexical": 0.72, "relevance": 0.77,
-                             "authority": 1.5, "decay": 0.93, "corpus": 1.0,
-                             "final": 1.07 },
+                 "scores": { "semantic": 0.81, "lexical": 0.72, "relevance": 1.10,
+                             "title_boost": 1.43, "authority": 1.5, "decay": 0.93,
+                             "corpus": 1.0, "final": 1.53 },
                  "chunk_id": "…", "heading": "## Decision", "text": "…",
                  "truncated": false } ]
 }
@@ -1480,6 +1489,9 @@ exclude = ["archive/private/**", "**/*.draft.md"]
 [chunking]
 max_chars = 1800
 overlap = 0.15
+
+[scoring]
+title_boost = 1.0             # weight in [0, 1]; 0.0 reproduces the pre-boost ranking
 
 [embedding]
 enabled = true

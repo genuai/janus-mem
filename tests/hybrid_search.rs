@@ -121,6 +121,11 @@ fn facts_reports_a_zero_alpha_and_stays_authority_ordered() {
         last = authority;
         assert_eq!(hit["scores"]["semantic"], 0.0, "{hit}");
         assert_eq!(
+            hit["scores"]["title_boost"],
+            serde_json::json!(1.0),
+            "facts passes no title boost: {hit}"
+        );
+        assert_eq!(
             hit["scores"]["relevance"], hit["scores"]["lexical"],
             "facts is lexical even with an embedder available: {hit}"
         );
@@ -237,7 +242,14 @@ fn a_configured_alpha_is_reported_verbatim() {
     let semantic = hit["scores"]["semantic"].as_f64().expect("semantic");
     let lexical = hit["scores"]["lexical"].as_f64().expect("lexical");
     let relevance = hit["scores"]["relevance"].as_f64().expect("relevance");
-    assert!((relevance - (0.35 * semantic + 0.65 * lexical)).abs() < 1e-12);
+    let boost = hit["scores"]["title_boost"].as_f64().expect("title_boost");
+    // The title is `Alpha` and the query is `alpha`, so the boost is real, and
+    // the blend identity must hold with it (M4C §3.2).
+    assert!(boost > 1.0, "a matching title must boost: {hit}");
+    assert!(
+        (relevance - (0.35 * semantic + 0.65 * lexical) * boost).abs() < 1e-12,
+        "relevance {relevance} must be the blend times {boost}: {hit}"
+    );
 }
 
 /// Wraps the hash double and counts calls, so "no embedder call" is a fact.

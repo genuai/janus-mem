@@ -106,6 +106,13 @@ exclude = ["archive/private/**", "**/*.draft.md"]
 max_chars = 1800
 overlap = 0.15
 
+[scoring]
+# Weight of the title boost in `relevance`, clamped to [0, 1]. A document whose
+# title carries the rare query terms is multiplied by
+# 1 + title_boost · (matched rare terms / query terms), and never above 2.0.
+# 0.0 disables the boost and reproduces the pre-boost ranking.
+title_boost = 1.0
+
 [embedding]
 enabled = true
 model = "AllMiniLML6V2"

@@ -33,11 +33,12 @@ expression: snapshot_json(&text)
       "scores": {
         "authority": 1.5,
         "decay": 1.0,
-        "final": 0.9807165151145152,
+        "final": 1.9614330302290304,
         "lexical": 0.6538110100763435,
-        "relevance": 0.6538110100763435,
+        "relevance": 1.307622020152687,
         "semantic": 0.0,
         "status_factor": 1.0,
+        "title_boost": 2.0,
         "type_authority": 1.5
       },
       "shared_with": [],
@@ -68,11 +69,12 @@ expression: snapshot_json(&text)
       "scores": {
         "authority": 1.5,
         "decay": 1.0,
-        "final": 0.9778324675164126,
+        "final": 1.9556649350328252,
         "lexical": 0.6518883116776084,
-        "relevance": 0.6518883116776084,
+        "relevance": 1.3037766233552168,
         "semantic": 0.0,
         "status_factor": 1.0,
+        "title_boost": 2.0,
         "type_authority": 1.5
       },
       "shared_with": [],
@@ -103,11 +105,12 @@ expression: snapshot_json(&text)
       "scores": {
         "authority": 1.5,
         "decay": 1.0,
-        "final": 0.9754420203514008,
+        "final": 1.9508840407028016,
         "lexical": 0.6502946802342672,
-        "relevance": 0.6502946802342672,
+        "relevance": 1.3005893604685344,
         "semantic": 0.0,
         "status_factor": 1.0,
+        "title_boost": 2.0,
         "type_authority": 1.5
       },
       "shared_with": [],

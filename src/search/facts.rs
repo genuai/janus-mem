@@ -242,6 +242,9 @@ fn rank(
                     semantic: 0.0,
                     intent,
                     alpha: 0.0,
+                    // A boost cannot change an authority-ordered list, so
+                    // reporting one would only inflate `relevance` (§3.2).
+                    title_boost: 1.0,
                     half_life_days: None,
                     include_superseded: false,
                 },

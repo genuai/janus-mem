@@ -7,7 +7,7 @@
 //! ```text
 //! lexical   = squash(s, s_ref)                          §3.3, phase 2
 //! semantic  = clamp(dot(query, chunk), 0, 1)             §3.3, M4
-//! relevance = alpha * semantic + (1 - alpha) * lexical   §7.2, alpha = 0.0 lexically
+//! relevance = (alpha * semantic + (1 - alpha) * lexical) * title_boost
 //! authority = type_authority * status_factor            §6.6, §7.2
 //! decay     = exp(-ln2 * age_days / half_life_days)     or 1.0
 //! final     = relevance * authority * decay
@@ -228,8 +228,11 @@ pub struct Breakdown {
     pub semantic: f64,
     /// Normalised BM25 value from phase 2 (§3.3).
     pub lexical: f64,
-    /// `alpha * semantic + (1 - alpha) * lexical`.
+    /// `alpha * semantic + (1 - alpha) * lexical`, before the title boost.
     pub relevance: f64,
+    /// The title multiplier applied to `relevance`. `1.0` when no rare query
+    /// term is in the title (M4C §3.1).
+    pub title_boost: f64,
     /// `AUTHORITY[type]` (§6.6).
     pub type_authority: f64,
     /// `STATUS_FACTOR[status]` for this intent; `0.0` when excluded.
@@ -256,6 +259,9 @@ pub struct ScoreInput<'a> {
     pub intent: Intent,
     /// Semantic weight in `[0, 1]`; `0.0` is exactly the lexical path (§7.2).
     pub alpha: f64,
+    /// Title multiplier in `[1, 2]`, computed once per document by the caller
+    /// (M4C §3.1). `1.0` applies no boost.
+    pub title_boost: f64,
     /// `--decay-half-life` override; `None` uses the document's type.
     pub half_life_days: Option<f64>,
     /// `--include-superseded`; only widens `current` (S-19).
@@ -266,7 +272,7 @@ pub struct ScoreInput<'a> {
 ///
 /// Pure: the only inputs are the arguments. Preconditions, all satisfied by
 /// phase-2 output: `lexical`, `semantic` and `alpha` are finite and in
-/// `[0, 1]`.
+/// `[0, 1]`; `title_boost` is finite and in `[1, 2]` (M4C §3.1).
 ///
 /// An excluded status yields `status_factor = authority = final = 0.0`; callers
 /// must drop the document with [`IntentPolicy::includes`] instead of relying on
@@ -276,7 +282,8 @@ pub fn score(clock: &dyn Clock, input: &ScoreInput<'_>) -> Breakdown {
     let doc = input.doc;
     let policy = policy(input.intent, input.include_superseded);
     let status_factor = policy.status_factor(doc.status).unwrap_or(0.0);
-    let relevance = input.alpha * input.semantic + (1.0 - input.alpha) * input.lexical;
+    let blended = input.alpha * input.semantic + (1.0 - input.alpha) * input.lexical;
+    let relevance = blended * input.title_boost;
     let authority = doc.type_spec.authority * status_factor;
     let decay = decay(clock, input, policy.decay);
 
@@ -284,6 +291,7 @@ pub fn score(clock: &dyn Clock, input: &ScoreInput<'_>) -> Breakdown {
         semantic: input.semantic,
         lexical: input.lexical,
         relevance,
+        title_boost: input.title_boost,
         type_authority: doc.type_spec.authority,
         status_factor,
         authority,
@@ -617,6 +625,7 @@ mod tests {
             semantic: 0.0,
             intent,
             alpha: 0.0,
+            title_boost: 1.0,
             half_life_days: None,
             include_superseded: superseded,
         }
@@ -754,6 +763,7 @@ mod tests {
             semantic: 0.0,
             lexical: 0.5,
             relevance: 0.5,
+            title_boost: 1.0,
             type_authority: 1.5,
             status_factor: 1.0,
             authority: 1.5,
@@ -827,6 +837,30 @@ mod tests {
                 (relevance - expected).abs() < 1e-12,
                 "alpha {alpha}: expected {expected}, got {relevance}"
             );
+        }
+    }
+
+    #[test]
+    fn the_title_boost_multiplies_relevance_and_nothing_else() {
+        let doc = doc(1, Status::Active);
+        let base = score(&clock(), &input(&doc, Intent::History, false));
+        for boost in [1.0, 1.25, 1.5, 2.0] {
+            let boosted = score(
+                &clock(),
+                &ScoreInput {
+                    title_boost: boost,
+                    ..input(&doc, Intent::History, false)
+                },
+            );
+            // semantic, lexical, authority and decay keep their values.
+            assert_eq!(boosted.semantic, base.semantic, "boost {boost}");
+            assert_eq!(boosted.lexical, base.lexical, "boost {boost}");
+            assert_eq!(boosted.authority, base.authority, "boost {boost}");
+            assert_eq!(boosted.decay, base.decay, "boost {boost}");
+            assert_eq!(boosted.title_boost, boost, "boost {boost}");
+            // relevance and final move by exactly the multiplier.
+            assert!((boosted.relevance - base.relevance * boost).abs() < 1e-12);
+            assert!((boosted.final_score - base.final_score * boost).abs() < 1e-12);
         }
     }
 
@@ -1135,6 +1169,7 @@ mod tests {
                 semantic: 0.0,
                 lexical: 0.0,
                 relevance: 0.0,
+                title_boost: 1.0,
                 type_authority: 1.0,
                 status_factor: 1.0,
                 authority: 1.0,
@@ -1383,6 +1418,7 @@ mod tests {
             lexical in 0.0f64..=1.0,
             semantic in 0.0f64..=1.0,
             alpha in 0.0f64..=1.0,
+            title_boost in 1.0f64..=2.0,
             authority in 0.8f64..=1.5,
             half_life in 0.0f64..=3650.0,
             age in 0i64..=20_000,
@@ -1400,15 +1436,17 @@ mod tests {
                 lexical,
                 semantic,
                 alpha,
+                title_boost,
                 intent,
                 half_life_days: None,
                 include_superseded: superseded,
             });
 
             prop_assert!(breakdown.final_score >= 0.0);
-            prop_assert!(breakdown.final_score <= 1.5);
+            prop_assert!(breakdown.final_score <= 3.0);
             prop_assert!(breakdown.final_score.is_finite());
-            prop_assert!(breakdown.relevance.is_finite() && breakdown.relevance <= 1.0);
+            prop_assert!(breakdown.relevance.is_finite() && breakdown.relevance <= 2.0);
+            prop_assert!(breakdown.title_boost.is_finite() && breakdown.title_boost <= 2.0);
             prop_assert!(breakdown.decay.is_finite() && breakdown.decay <= 1.0);
             prop_assert!(breakdown.authority.is_finite() && breakdown.authority <= 1.5);
         }

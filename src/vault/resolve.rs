@@ -399,6 +399,32 @@ fn date_prefix(name: &str) -> Option<(NaiveDate, DateSource)> {
     Some((date, source))
 }
 
+/// Removes a leading date token from a title, for the title boost only (§7.2).
+///
+/// `2024-12-01-redis-cache` becomes `redis-cache`, so a date is not read as a
+/// topic. The trailing separator is removed too. A title without a date token
+/// is returned unchanged; a title that is only a date becomes empty.
+///
+/// This is a query-time rule. The stored title keeps its date, because the
+/// stored title is document identity (§6.4).
+pub(crate) fn strip_leading_date(title: &str) -> &str {
+    let Some((_, precision)) = parse_prefix(title) else {
+        return title;
+    };
+    let token_len = match precision {
+        Precision::Day => 10,
+        Precision::Month => 7,
+        Precision::Year => 4,
+    };
+    // `parse_prefix` only accepts ASCII digits and separators, so this offset is
+    // always a character boundary.
+    let rest = title.get(token_len..).unwrap_or_default();
+    match rest.as_bytes().first() {
+        Some(byte) if is_separator(byte) => rest.get(1..).unwrap_or_default(),
+        _ => rest,
+    }
+}
+
 /// Finds the deepest folder with a date in its name (B-8).
 ///
 /// The search walks from the folder nearest the file to the vault root. The
@@ -860,6 +886,25 @@ mod tests {
             let document = doc(rel, "x");
             assert_eq!(document.date, year, "{rel}");
             assert_eq!(document.date_source, DateSource::FilenameYear, "{rel}");
+        }
+    }
+
+    #[test]
+    fn a_leading_date_is_stripped_from_a_title_for_the_boost_only() {
+        for (title, expected) in [
+            ("2024-12-01-redis-cache", "redis-cache"),
+            ("2024-11-postgres", "postgres"),
+            ("2024_notes", "notes"),
+            ("2024.11.02_notes", "notes"),
+            ("2024", ""),
+            ("2024-12-01", ""),
+            ("Q4 plan draft", "Q4 plan draft"),
+            ("notes about 2024", "notes about 2024"),
+            ("2024-13-01-invalid", "2024-13-01-invalid"),
+            ("", ""),
+            ("\u{fc}berlegungen", "\u{fc}berlegungen"),
+        ] {
+            assert_eq!(strip_leading_date(title), expected, "{title}");
         }
     }
 

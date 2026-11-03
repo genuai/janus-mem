@@ -92,6 +92,7 @@ fn search_reports_spans_breadcrumbs_and_the_breakdown_but_never_text() {
         "semantic",
         "lexical",
         "relevance",
+        "title_boost",
         "type_authority",
         "status_factor",
         "authority",

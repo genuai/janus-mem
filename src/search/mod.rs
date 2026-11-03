@@ -33,7 +33,8 @@ use crate::index::vectors::{Vectors, dot};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
 use crate::scan::API_VERSION;
 use crate::score::{self, Breakdown, Intent, ScopeFilter, ScoreDoc, ScoreInput};
-use crate::tokenize::Tokenizer;
+use crate::tokenize::{Tokenizer, Tokens};
+use crate::vault::resolve::strip_leading_date;
 
 /// The `--limit` default: ten documents (§3.1, S-16).
 pub const DEFAULT_LIMIT: usize = 10;
@@ -120,6 +121,9 @@ pub struct Outcome {
     pub degraded: Vec<String>,
     /// The resolved query intent.
     pub intent: Intent,
+    /// Title tokenizations this query performed: one per selected document
+    /// (M4C §3.1). An empty query still tokenizes each title once.
+    pub title_tokenizations: usize,
     /// The generation this outcome was computed from.
     pub snapshot: Snapshot,
 }
@@ -197,7 +201,17 @@ pub fn query(
         .map(|index| rows[*index].score_doc())
         .collect();
 
-    let (scores, reference) = query_scores(&prepared.index, &options.query);
+    let tokenizer = Tokenizer::new();
+    let query_tokens = tokenizer.tokenize(&options.query);
+    let query_terms: Vec<&str> = query_tokens.iter().collect();
+    let (scores, reference) = prepared.index.score_query(&query_terms);
+    let titles: Vec<&str> = selected
+        .iter()
+        .map(|index| rows[*index].title.as_str())
+        .collect();
+    let indexed = indexed_terms(&prepared.index, &query_terms);
+    let (title_boosts, title_tokenizations) =
+        title_boosts(&tokenizer, &indexed, &titles, config.scoring.title_boost);
     let policy = score::policy(intent, options.include_superseded);
     let mut ordinals = vec![0_u32; docs.len()];
     let mut occurrences: Vec<Vec<(ChunkId, u32, usize)>> = vec![Vec::new(); docs.len()];
@@ -221,6 +235,7 @@ pub fn query(
                 semantic: semantics.get(index).copied().unwrap_or(0.0),
                 intent,
                 alpha,
+                title_boost: title_boosts.get(*doc_index).copied().unwrap_or(1.0),
                 half_life_days: options.decay_half_life,
                 include_superseded: options.include_superseded,
             },
@@ -295,6 +310,7 @@ pub fn query(
         alpha,
         degraded,
         intent,
+        title_tokenizations,
         snapshot: prepared.snapshot,
     })
 }
@@ -457,6 +473,59 @@ pub(crate) fn query_scores(index: &LexicalIndex, query: &str) -> (Vec<f64>, f64)
     let tokens = Tokenizer::new().tokenize(query);
     let terms: Vec<&str> = tokens.iter().collect();
     index.score_query(&terms)
+}
+
+/// The distinct query terms the index holds, with their idf (M4C §3.1).
+///
+/// A term the index never saw has no idf, so it leaves both the matched sum and
+/// the total. Repetition in the query also changes nothing: the set is distinct.
+fn indexed_terms<'t>(index: &LexicalIndex, terms: &[&'t str]) -> Vec<(&'t str, f64)> {
+    let mut seen = BTreeSet::new();
+    let mut indexed = Vec::new();
+    for term in terms {
+        if !seen.insert(*term) {
+            continue;
+        }
+        let Some(id) = index.pool().lookup(term) else {
+            continue;
+        };
+        let Some(meta) = index.terms().get(id.as_usize()) else {
+            continue;
+        };
+        indexed.push((*term, index.idf(meta.df)));
+    }
+    indexed
+}
+
+/// One title boost per document, in input order (M4C §3.1).
+///
+/// `indexed` is the query's indexed terms with their idf. A title is stripped of
+/// a leading date and tokenized once per document, never once per chunk: the
+/// reference corpus has 200 000 chunks. The returned count is the number of
+/// tokenizations performed, and the eval prints it.
+fn title_boosts(
+    tokenizer: &Tokenizer,
+    indexed: &[(&str, f64)],
+    titles: &[&str],
+    weight: f64,
+) -> (Vec<f64>, usize) {
+    let total: f64 = indexed.iter().map(|(_, idf)| idf).sum();
+    let mut boosts = Vec::with_capacity(titles.len());
+    let mut tokens = Tokens::default();
+
+    for title in titles {
+        tokenizer.tokenize_into(strip_leading_date(title), &mut tokens);
+        let title_terms: BTreeSet<&str> = tokens.iter().collect();
+        let hits: f64 = indexed
+            .iter()
+            .filter(|(term, _)| title_terms.contains(term))
+            .map(|(_, idf)| idf)
+            .sum();
+        let coverage = if total > 0.0 { hits / total } else { 0.0 };
+        boosts.push((1.0 + weight * coverage).clamp(1.0, 2.0));
+    }
+
+    (boosts, titles.len())
 }
 
 /// Resolves the `--intent` name, rejecting an unknown one as a usage error.
@@ -927,5 +996,82 @@ mod tests {
             degraded_reasons(false, false, Some("model not found; lexical only")),
             vec!["model not found; lexical only"]
         );
+    }
+
+    // ─────────────────────────── the title boost ────────────────────────────
+
+    /// The formula table of the M4C plan §3.1, with literals per row.
+    ///
+    /// `what` 0.3, `is` 0.2, `our` 0.4, `q4` 2.6, `okrs` 2.9: `total` is 6.4.
+    fn table() -> Vec<(&'static str, f64)> {
+        vec![
+            ("what", 0.3),
+            ("is", 0.2),
+            ("our", 0.4),
+            ("q4", 2.6),
+            ("okrs", 2.9),
+        ]
+    }
+
+    fn boost_of(title: &str, weight: f64) -> f64 {
+        let tokenizer = Tokenizer::new();
+        let (boosts, _) = title_boosts(&tokenizer, &table(), &[title], weight);
+        boosts.first().copied().unwrap_or_default()
+    }
+
+    #[test]
+    fn the_boost_table_matches_hand_computed_values() {
+        // hits / total, then 1 + w * cov, clamped to [1, 2]. The second row
+        // carries every query term, so it saturates at the bound.
+        for (title, expected) in [
+            ("q4", 1.0 + 2.6 / 6.4),
+            ("what is our q4 okrs", 2.0),
+            ("q4 okrs", 1.0 + 5.5 / 6.4),
+            ("what", 1.0 + 0.3 / 6.4),
+            ("unrelated title", 1.0),
+        ] {
+            let actual = boost_of(title, 1.0);
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "{title:?}: expected {expected}, got {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_weight_scales_the_boost_and_zero_disables_it() {
+        for (weight, expected) in [
+            (0.0, 1.0),
+            (0.5, 1.0 + 0.5 * 2.6 / 6.4),
+            (1.0, 1.0 + 2.6 / 6.4),
+        ] {
+            let actual = boost_of("q4", weight);
+            assert!((actual - expected).abs() < 1e-12, "w {weight}: {actual}");
+        }
+    }
+
+    #[test]
+    fn an_empty_query_or_a_term_outside_the_index_boosts_nothing() {
+        let tokenizer = Tokenizer::new();
+        let (empty, count) = title_boosts(&tokenizer, &[], &["q4 plan", "other"], 1.0);
+        assert_eq!(empty, vec![1.0, 1.0]);
+        assert_eq!(count, 2, "one tokenization per title");
+
+        // Repetition does not duplicate a term: `hits` is a sum over a set.
+        let (repeated, _) = title_boosts(&tokenizer, &[("q4", 2.6)], &["q4 q4 q4"], 1.0);
+        assert_eq!(repeated, vec![2.0]);
+    }
+
+    #[test]
+    fn a_leading_date_does_not_match_a_year_query() {
+        let tokenizer = Tokenizer::new();
+        let indexed = [("2024", 2.6)];
+        let (boost, _) = title_boosts(
+            &tokenizer,
+            &indexed,
+            &["2024-12-01-redis-cache", "redis-cache"],
+            1.0,
+        );
+        assert_eq!(boost, vec![1.0, 1.0]);
     }
 }
