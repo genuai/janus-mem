@@ -159,14 +159,6 @@ Do **not** create `docs/notes/NN-milestone.md` journals — that convention was
 retired; nobody read them. Long-lived, project-level decisions belong in
 `SPEC.md` §15.
 
-## Running a milestone
-
-A milestone is a plan plus one PR per phase, planned and reviewed before any
-feature code. The generic procedure (roles, dispatch briefs, review checklist,
-merge protocol, model policy) is the `milestone-tech-lead` skill; this repo's
-defaults and the accumulated lessons are in `docs/tech-lead-playbook.md`. Read
-both before starting `docs/<milestone>-breakdown.md`.
-
 ## Commits and branches
 
 - Conventional-ish, lowercase, imperative: `feat:`, `fix:`, `docs:`, `chore:`,
