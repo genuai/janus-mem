@@ -1268,8 +1268,8 @@ steps, not its bullets" is for. If the review adds a contract (it will — M2, M
 
 ### 9.0 Review round 1 — resolutions
 
-One independent reviewer (pi, `deepseek-v4.1-flash`, read-only, briefed to verify claims against the
-code rather than trust the plan) returned 15 findings and the verdict *needs another round*. Every
+One independent reviewer (read-only, briefed to verify claims against the code rather than
+trust the plan) returned 15 findings and the verdict *needs another round*. Every
 finding was re-verified here before being accepted; none was rejected. The three blockers were real
 defects in the first draft, and two of them were defects in **shipped M3 code** that M4's predicate
 was about to copy.
@@ -1452,7 +1452,7 @@ Remaining open questions this plan does **not** resolve, listed so they are not 
 
 ### P1a — the embedder trait and the payload format
 
-Branch: `bb/m4-p1a-embedder-trait-vectors-f32-thr_za9nny6u2i`. Scope is `src/index/embed.rs` and
+Branch: `m4-p1a-embedder-trait-vectors-f32`. Scope is `src/index/embed.rs` and
 `src/index/vectors.rs` (new), their unit tests, one public-API round-trip in `tests/vectors.rs`,
 the module declarations in `src/index/mod.rs`, and the one `ConfigWarning` variant in
 `src/config.rs` noted below. No store, build, search, CLI, manifest, feature or dependency change:
@@ -1474,7 +1474,7 @@ P1b owns the publication protocol and P3 owns the `fastembed` module.
 
 ### P1b — the two-file generation, writer half
 
-Branch: `bb/m4-p1b-publish-vectors-f32-thr_q2fyy3ptxm`, stacked P1c on top. Scope is the manifest
+Branch: `m4-p1b-publish-vectors-f32`, stacked P1c on top. Scope is the manifest
 fields and `format_version = 2`, `DocMeta::body_hash`, the nine publication stages, the degraded
 drop, `build::plan` embedding every chunk, `main`'s `ModelDirs`/`resolve` seam, `--no-embeddings` on
 `index`, the fixture's `hash-64`, and the writer-side tests. The reader half is P1c.
@@ -1501,7 +1501,7 @@ against P1b (`BASE=origin/<p1b branch>`).
 
 ### P1c — the two-file generation, reader half
 
-Branch: `bb/m4-p1c-two-file-read-thr_q2fyy3ptxm`, stacked on P1b (measured against it, not against
+Branch: `m4-p1c-two-file-read`, stacked on P1b (measured against it, not against
 `main`). Scope is `Expected`'s V-21 ordering and the three-way manifest check, `LoadOptions`'s
 `want_vectors`/`embedder`, the payload read/hash/decode path, `Load.vectors`, the retry cause's file
 name, every row of §3.1's table asserted in both read modes, and (review fix P1c-8) the read-side
@@ -1521,7 +1521,7 @@ CLI-flag or feature change.
 
 ## 11. Implementation log — Phase 2 (hybrid scoring)
 
-Branch: `bb/m4-p2-hybrid-scoring-thr_uxwcx2u3g4`. Scope is `src/config.rs` (α), `src/score.rs`
+Branch: `m4-p2-hybrid-scoring`. Scope is `src/config.rs` (α), `src/score.rs`
 (docs and the α table test), `src/search/mod.rs` (query vector, semantic scan, admission, report),
 `src/search/facts.rs` (V-15), `src/cli.rs`/`src/main.rs` (`--no-embeddings`, the resolution
 reason), `tests/hybrid_search.rs` (new), `tests/golden_search.rs` and its two snapshots. No store,
@@ -1546,7 +1546,7 @@ build, vectors, embed, manifest, feature or `SPEC.md` change.
 
 ## 12. Implementation log — Phase 3 (real embedder behind a feature)
 
-Branch: `bb/m4-p3-fastembed-behind-a-feature-thr_7bcr2qhnm5`, from `main`. Scope is
+Branch: `m4-p3-fastembed-behind-a-feature`, from `main`. Scope is
 `Cargo.toml` (one optional dependency, one non-default feature), `src/index/embed.rs` (the
 `fastembed` module, the feature-on arm of `resolve`, and the feature-gated tests),
 `tests/batching.rs` (new), `tests/cli_index.rs` (one test made feature-set-aware),
@@ -1595,7 +1595,7 @@ now a CI step rather than a local run.
 
 ## 13. Implementation log — Phase 4 (incremental embedding)
 
-Branch: `bb/m4-p4-incremental-embedding-thr_dcbiwnhndv`, from `main`. Scope is
+Branch: `m4-p4-incremental-embedding`, from `main`. Scope is
 `src/index/build.rs` (the predicate, row assembly, counters, dry-run planning), `src/index/store.rs`
 (`Previous`, the previous-generation read, the drop count), `src/index/cmd.rs` (previous generation,
 `--dry-run` planner, receipt), `tests/incremental.rs` (new), `tests/cli_index.rs` and
@@ -1629,7 +1629,7 @@ one drop line. No golden moved.
 
 ## 14. Implementation log — Phase 5 (eval, baseline, docs)
 
-Branch: `bb/m4-p5-eval-baseline-thr_9ff7vyen4b-1`, from `main`. Scope is
+Branch: `m4-p5-eval-baseline`, from `main`. Scope is
 `tests/eval_quality.rs` (the α sweep), `scripts/eval.sh` (`--sweep`, `--baseline`),
 `scripts/baseline/` (new standalone crate), `src/config.rs` (**one line**: the default α),
 the five test assertions and one golden that pin that default, `SPEC.md` (§9.1's

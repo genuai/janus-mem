@@ -1187,8 +1187,7 @@ should close. They are listed so nothing is silently overridden.
 
 ## 10. Implementation log — Phase 1 (tokenizer)
 
-Branch: `bb/m3-phase-1-tokenizer-thr_hygnssihnf` (the bb worktree branch, based on
-`main` at `3638c6c`); the plan's `m3-tokenize` name was superseded by the worktree
+Branch: `m3-phase-1-tokenizer` (based on `main` at `3638c6c`); the plan's `m3-tokenize` name was superseded by the worktree
 branch before implementation started. Scope is exactly `src/tokenize.rs` (new) and
 `pub mod tokenize;` in `src/lib.rs`: no dependency, no index types, no stemmer beyond
 `Stemmer::None`, no phase-2 stub.
@@ -1259,7 +1258,7 @@ the module docs and pinned by a test; changing it is a tokenizer-version change.
 
 ## 11. Implementation log — Phase 2 (BM25)
 
-Branch: `bb/m3-phase-2-bm25-index-thr_zy5ycze2pt` (the bb worktree branch, based on
+Branch: `m3-phase-2-bm25-index` (based on
 `main` at `910f7df`); the phase name in §5 is descriptive, not a branch name. Scope
 is exactly `src/index/mod.rs` (new), `src/index/lexical.rs` (new), and
 `pub mod index;` in `src/lib.rs`. Deliberately absent: persistence, `bincode`,
@@ -1351,7 +1350,7 @@ the PR body. The phase's build target is the B-10 measurement, not a test assert
 
 ## 12. Implementation log — Phase 3 (scoring)
 
-Branch: `bb/m3-phase-3-scoring-thr_trfj4mbwws` (the bb worktree branch, based on
+Branch: `m3-phase-3-scoring` (based on
 `main` at `f1905b6`); the phase name in §5 is descriptive, not a branch name.
 Scope is exactly `src/score.rs` (new), `src/clock.rs` (new),
 `tests/no_wall_clock.rs` (new), and the `pub mod` lines plus layout list in
@@ -1484,8 +1483,8 @@ phase 6's DTO concern and the enum is not user-visible in phase 3.
 
 ## 13. Implementation log — Phase 4 (snapshot + incremental)
 
-Branches: `bb/m3-phase-4-store-thr_dqfeu8btnh` (4a, from `main` at `cf3e4de`) and
-`bb/m3-phase-4-snapshot-rebuild-thr_dqfeu8btnh` (4b, stacked on 4a). The split is a
+Branches: `m3-phase-4-store` (4a, from `main` at `cf3e4de`) and
+`m3-phase-4-snapshot-rebuild` (4b, stacked on 4a). The split is a
 size decision, not a scope change: the single-branch diff measured 885 logic lines
 against the 600 ceiling, so storage/validation and incremental build became two
 reviewable PRs. Scope across the pair is `src/index/store.rs` (new),
@@ -1577,8 +1576,7 @@ Markdown is not budgeted.
 
 ## 14. Implementation log — Phase 5 (publication)
 
-Branch: `bb/m3-phase-5-publication-lock-thr_7ptkmjkuza`, the bb worktree branch
-based on `main` at `8312077`; the plan's `m3-publish` name was superseded by the
+Branch: `m3-phase-5-publication-lock`, based on `main` at `8312077`; the plan's `m3-publish` name was superseded by the
 worktree branch before implementation started, as in phase 1. Scope is
 `src/index/store.rs` (the publication and reader halves), `src/error.rs` (two
 variants), `Cargo.toml` (`fs4`, `tempfile` promoted), and `tests/publish.rs`.
@@ -1715,10 +1713,10 @@ Branches, stacked (each based on the previous one, not on `main`):
 
 | PR | Branch | Base | Logic | Tests |
 |---|---|---|---|---|
-| 6a | `bb/m3-phase-6a-index-thr_gkkixp7f4e` | `main` at `34e1e06` | 318 | 176 |
-| 6b | `bb/m3-phase-6b-search-thr_gkkixp7f4e` | 6a | 599 | 445 |
-| 6c | `bb/m3-phase-6c-filters-thr_gkkixp7f4e` | 6b | 177 | 267 |
-| 6d | `bb/m3-phase-6d-facts-eval-docs-thr_gkkixp7f4e` | 6c | 439 | 310 |
+| 6a | `m3-phase-6a-index` | `main` at `34e1e06` | 318 | 176 |
+| 6b | `m3-phase-6b-search` | 6a | 599 | 445 |
+| 6c | `m3-phase-6c-filters` | 6b | 177 | 267 |
+| 6d | `m3-phase-6d-facts-eval-docs` | 6c | 439 | 310 |
 
 The plan asked for two PRs. The single phase-6 diff measured **1384 logic lines**
 against the 600 ceiling, so the surface was split four ways along reviewable
