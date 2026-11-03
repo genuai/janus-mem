@@ -890,18 +890,18 @@ fn a_payload_whose_manifest_shape_disagrees_rebuilds() {
 }
 
 #[test]
-fn a_format_version_1_manifest_is_stale_and_the_rebuild_writes_version_2() {
+fn a_format_version_2_manifest_is_stale_and_the_rebuild_writes_version_3() {
     let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
     let root = vault.path().to_path_buf();
     publish(&root, &clean_plan(&root));
     patch_manifest(&root, |manifest| {
-        manifest["format_version"] = serde_json::json!(1)
+        manifest["format_version"] = serde_json::json!(2)
     });
 
     let load = load_with(&root, false, None).expect("load");
-    assert!(load.rebuilt, "an M3 index is refused and rebuilt");
+    assert!(load.rebuilt, "an M4 index is refused and rebuilt");
     let stale = load.stale.expect("cause");
-    assert!(stale.contains("format_version 1 != 2"), "{stale}");
+    assert!(stale.contains("format_version 2 != 3"), "{stale}");
     assert_eq!(
         read_manifest(&root).format_version,
         janus_mem::index::FORMAT_VERSION

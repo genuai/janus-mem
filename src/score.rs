@@ -1354,6 +1354,25 @@ mod tests {
         assert!(!is_fact(&view), "a draft decision is never a fact");
     }
 
+    #[test]
+    fn an_undated_document_does_not_decay_and_sorts_after_a_dated_tie() {
+        let undated = with_date(doc(1, Status::Active), None);
+        let dated = with_date(doc(1, Status::Active), Some(days_ago(3650)));
+
+        // No date means no age, so no decay. Janus does not invent one.
+        assert_eq!(score_doc(&undated).decay, 1.0);
+        assert!(score_doc(&dated).decay < 1.0);
+
+        // On an exact final-score tie, the undated document goes last.
+        let base = hit(1, 0.5, 1);
+        let undated_hit = ScoredDoc {
+            doc: with_date(base.doc, None),
+            ..base
+        };
+        assert_eq!(cmp_documents(&base, &undated_hit), Ordering::Less);
+        assert_eq!(cmp_documents(&undated_hit, &base), Ordering::Greater);
+    }
+
     // ──────────────────────────────── property ───────────────────────────────
 
     use proptest::prelude::*;

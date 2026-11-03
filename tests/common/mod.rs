@@ -9,9 +9,12 @@
 //! absolute root, config path, every document path and its `mtime`. Scanning the
 //! checkout would make the golden depend on where the repo lives.
 //!
-//! `notes/undated.md` deliberately has no frontmatter or filename date, so its
-//! `date` is the checkout time. The redactor replaces it with `<mtime-date>`;
-//! its declared id keeps the golden's identity stable.
+//! `notes/undated.md` deliberately has no frontmatter, file-name or folder date.
+//! Its `date` is absent and its `date_source` is `absent`; its declared id keeps
+//! the golden's identity stable.
+//!
+//! The copy skips `.janus/`. A developer who runs `janus index` against the
+//! committed fixture must not hand a built index to a CLI test.
 
 // Each integration-test crate compiles this module separately, so helpers used
 // by only one of them would otherwise be dead code in the others.
@@ -127,9 +130,6 @@ pub fn redact(report: &mut Value) {
             .to_owned();
         document["path"] = json!(format!("<vault>/{rel_path}"));
         document["mtime"] = json!("<mtime>");
-        if document["date_source"] == "mtime" {
-            document["date"] = json!("<mtime-date>");
-        }
     }
 }
 
@@ -195,11 +195,17 @@ pub fn result_paths(report: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Recursively copies `from` to `to`, byte-for-byte.
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Recursively copies `from` to `to`, byte-for-byte, and skips `.janus/`.
+///
+/// The index is a cache, not vault content. Copying it would let a stale
+/// generation decide what a CLI test reads.
+pub fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;
+        if entry.file_name() == ".janus" {
+            continue;
+        }
         let target: PathBuf = to.join(entry.file_name());
         if entry.file_type()?.is_dir() {
             copy_tree(&entry.path(), &target)?;

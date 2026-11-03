@@ -39,9 +39,10 @@ pub use lexical::{LexicalIndex, squash};
 /// The on-disk snapshot layout; a mismatch is a rebuild, never an error (S-6, §8.3).
 ///
 /// Version 2 (M4 V-1) adds `DocMeta::body_hash` to the snapshot and the
-/// `vectors.f32` payload with its three manifest fields. An M3 index is refused
-/// by `Expected::check` and rebuilt with one warning, never misread.
-pub const FORMAT_VERSION: u16 = 2;
+/// `vectors.f32` payload with its three manifest fields. Version 3 (M4B B-7)
+/// adds `DocMeta::date_source`. An older index is refused by `Expected::check`
+/// and rebuilt with one warning, never misread.
+pub const FORMAT_VERSION: u16 = 3;
 
 /// The compact persisted status (§3.2); the resolver's `Status` is reused.
 pub use crate::document::Status as StatusCode;
@@ -99,8 +100,10 @@ pub struct DocMeta {
     pub shared_with: Vec<StringId>,
     /// Frontmatter tags, preserved for `--tags` after reload.
     pub tags: Vec<StringId>,
-    /// Authored date.
+    /// Authored or name-derived date.
     pub date: Option<NaiveDate>,
+    /// Where [`DocMeta::date`] came from, so a result can explain itself (§3.5).
+    pub date_source: crate::document::DateSource,
     /// Valid-time start (§6.10).
     pub effective_from: Option<NaiveDate>,
     /// Whether the type (or the document) is exempt from decay.

@@ -234,15 +234,19 @@ fn doc_version(document: &Document) -> Option<&str> {
         .filter(|version| !version.trim().is_empty())
 }
 
-/// The date identity may use: frontmatter or filename, never `mtime`.
+/// The date identity may use: frontmatter or a day-precision file name only.
 ///
-/// §6.4 excludes `mtime` because clones, checkouts and copies churn it, so a
-/// document whose only date came from the filesystem has no date for identity
-/// purposes.
+/// §6.4 excludes values that copies churn. A month, year or folder date is also
+/// excluded here, so this milestone moves no existing `DocId` (§3.4).
 fn usable_date(document: &Document) -> Option<NaiveDate> {
     match document.date_source {
         DateSource::Frontmatter | DateSource::Filename => document.date,
-        DateSource::Mtime | DateSource::None => None,
+        DateSource::FilenameMonth
+        | DateSource::FilenameYear
+        | DateSource::Folder
+        | DateSource::FolderMonth
+        | DateSource::FolderYear
+        | DateSource::None => None,
     }
 }
 
@@ -457,11 +461,11 @@ mod tests {
     }
 
     #[test]
-    fn mtime_never_contributes_to_identity() {
+    fn an_undated_document_never_contributes_a_date_to_identity() {
         // No date and no version: rung 3 is unavailable, so the unique title wins.
         let documents = derived(&[("notes.md", "x")]);
 
-        assert_eq!(documents[0].date_source, DateSource::Mtime);
+        assert_eq!(documents[0].date_source, DateSource::None);
         assert_eq!(documents[0].id_source, IdentityTier::Title);
     }
 
