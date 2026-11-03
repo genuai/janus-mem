@@ -114,11 +114,12 @@ A date token must be a whole prefix. The separator set is `-`, `_` and `.`, both
 token and immediately after it. So `2026-08-22_notes.md` matches, and `2026-08-22notes.md` does
 not. This rule already exists for `YYYY-MM-DD`. M4B applies it to the new shapes and separators.
 
-A longer complete shape wins. A complete day shape must be a valid day; it does not fall back to
-a month. So `2026-08-22x.md`, `2026-08_22x.md`, `2026-13-01.md` and `2026_13_01.md` produce no
-date, not a weaker one. A month or year token may use any separator, so `2026_08_notes.md` is
-month precision and `2024_11_02_notes.md` is day precision (P1-2, P1-3, P1-9). The check runs
-before the ladder tries a shorter shape.
+A longer complete shape wins. A day token starts when a separator follows a valid month and a
+digit or the end follows that separator. A separator followed by text closes the month token. A
+day token must be a valid day; it does not fall back to a month. So `2024-11-0-post.md`,
+`2026-08-1_notes.md`, `2026-08-22x.md`, `2026-08_22x.md`, `2026-13-01.md` and `2026_13_01.md`
+produce no date. `2026_08_notes.md` stays at month precision, and `2024_11_02_notes.md` is day
+precision (P1-2, P1-3, P1-9, P1-10). The check runs before the ladder tries a shorter shape.
 
 A year must be between 1970 and 2099. A name like `1.0` is a version. A name like `2026` at the
 start of a file name is a date. The range check rejects the common false positives.
@@ -238,7 +239,8 @@ Two phases. Each is one PR from `main` after the previous merge.
   date is a literal.
 - Prefix rules: `2026-08-22_x.md` matches; `2026-08-22x.md` does not; `1.0.md` does not;
   `0000-01-01.md` is rejected by the year range; `2026-13-01.md` is rejected by the parser. All
-  three separators (`-`, `_`, `.`) work at both positions.
+  three separators (`-`, `_`, `.`) work at both positions. An incomplete day such as
+  `2024-11-0-post.md` or `2026-08-1_notes.md` has no date.
 - Folder dates: `2026.08.22_notes/x.md`, `2026-08/x.md`, `2026/x.md`; the deepest folder wins;
   a file-name date beats a folder date.
 - M4B's own regression: an undated document has decay 1.0 and never loses to a dated document
@@ -342,6 +344,7 @@ P1b: it is the only part P2 does not need.
 | P1-7 | `FORMAT_VERSION` is 3. A version-2 index is refused with one `stale:` line and rebuilt. | `DocMeta` gains `date_source`, so the old layout cannot be read (B-7). |
 | P1-8 | The `DateSource::None` label is `absent`. The scan golden and two fixture tests now expect a null date for `notes/undated.md`. | §3.5 names `absent` as the output value. The label must name the new sources. |
 | P1-9 | An underscore is an internal date separator. `2026_08_notes.md` is month precision and `2024_11_02_notes.md` is day precision. The M1 test that expected `2024_11_02.md` to have no date now expects day precision. | The requirement names `YYYY_MM`. A fallback to year precision would decay the document from January, up to eleven months too old. |
+| P1-10 | A day token starts only when a digit or the end follows the separator after a valid month. `2024-11-0-post.md` and `2026-08-1_notes.md` have no date. `2026_08_notes.md` stays at month precision. | A bare separator rule cannot tell `2026_08_notes` from a malformed day. The digit-or-end check keeps the month suffix and still refuses an invalid day. |
 
 **Two-copy evidence.** The test `shifting_every_mtime_changes_no_order_and_no_score` failed before
 the change. The undated fixture document moved from rank 2 with final `0.2733` to rank 4 with final

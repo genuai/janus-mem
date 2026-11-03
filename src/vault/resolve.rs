@@ -301,17 +301,21 @@ enum Precision {
 /// `-`, `_` and `.`, both inside the token and after it. The token must be a
 /// whole prefix: the next character is a separator or the end of the name.
 ///
-/// A longer shape wins. A complete day shape must be a valid day; it does not
-/// fall back to a month. So `2026-08-22x` and `2026-13-01` produce no date
-/// rather than a weaker one.
+/// A longer shape wins. A day token starts when a separator follows a valid
+/// month and a digit or the end follows that separator. A separator followed by
+/// text closes the month token. A day token must be a valid day; it does not
+/// fall back to a month. So `2024-11-0-post` and `2026-08-1_notes` produce no
+/// date, and `2026_08_notes` stays at month precision.
 fn parse_prefix(name: &str) -> Option<(NaiveDate, Precision)> {
     let year = first_four_digits(name)?;
     let bytes = name.as_bytes();
 
     let has_month = bytes.get(4).is_some_and(is_separator) && has_digits(name, 5..7);
-    let has_day = has_month && bytes.get(7).is_some_and(is_separator) && has_digits(name, 8..10);
+    let starts_day = has_month
+        && bytes.get(7).is_some_and(is_separator)
+        && bytes.get(8).is_none_or(|byte| byte.is_ascii_digit());
 
-    if has_day {
+    if starts_day {
         let date = day_at(name, year)?;
         return is_boundary(name, 10).then_some((date, Precision::Day));
     }
@@ -873,6 +877,19 @@ mod tests {
     }
 
     #[test]
+    fn an_incomplete_day_token_is_not_a_date() {
+        for rel in ["2024-11-0-post.md", "2026-08-1_notes.md"] {
+            let document = doc(rel, "x");
+            assert_eq!(document.date, None, "{rel}");
+            assert_eq!(document.date_source, DateSource::None, "{rel}");
+        }
+
+        let complete = doc("2024-11-02-post.md", "x");
+        assert_eq!(complete.date, NaiveDate::from_ymd_opt(2024, 11, 2));
+        assert_eq!(complete.date_source, DateSource::Filename);
+    }
+
+    #[test]
     fn a_year_outside_the_range_is_not_a_date() {
         for rel in [
             "1969-12-31.md",
@@ -1401,6 +1418,8 @@ mod tests {
             "😀/2026-08-22x.md",
             "2026.08.22_notes/x.md",
             "2026_08_22_notes/x.md",
+            "2024-11-0-post.md",
+            "2026-08-1_notes.md",
         ] {
             let stem = filename_stem(rel).unwrap_or_default();
             let _ = date_prefix(&stem);
