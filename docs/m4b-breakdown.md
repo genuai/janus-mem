@@ -375,8 +375,13 @@ scores on both copies.
 | P2-5 | **Added to Phase 2 after the plan was written.** `scan --json` carries the near-miss names in `date_near_misses`, not the formatted sentence. The human output prints the sentence once, with the count. The list is sorted and deduplicated, so a folder name counts once however many documents sit under it. | A consumer can count and locate the names without parsing prose, and the sentence has one owner. The count exists because a day-first vault gets no dates at all, and silence gives the user nothing to act on. |
 | P2-6 | **Added to Phase 2 after the plan was written.** The near-miss test is a new `pub(crate) fn is_date_near_miss` in `src/vault/resolve.rs`. `parse_prefix`, the ladder and `DocMeta` are unchanged. A name whose year is out of range is not a near miss, and nor is `2026-08-22x.md`, whose day parses. | The test needs the same separators and digit rules as the parser, and a second copy of them in `scan` would drift. The count reports a date *order* problem, so an implausible year and a bad token boundary are different problems. |
 | P2-7 | SPEC §9.4 needed no edit: its example already carried `"date_source": "frontmatter"`. SPEC §6.3 had one stale sentence more than §9 listed: the `effective_from` bullet said a document can take its only date from mtime. It now says "no date at all". | §9.4 was corrected when the field was first specified. The leftover sentence described a rung that no longer exists (B-1). |
-| P2-8 | The comment in the fixture `notes/undated.md` still calls its source `mtime`. It is not changed here. | A comment in a fixture is not output, and editing the file changes its `content_hash` in the scan golden. A golden must move only by this phase's field and note, so this wording waits for a change that already touches the fixture. |
+| P2-8 | The comment in the fixture `notes/undated.md` still called its source `mtime`. It now says `absent`, and the two goldens it feeds are regenerated. | A fixture that names a rung the code does not have is the same defect as a wrong SPEC line. The first commit left it to keep both goldens narrow; review asked for the fix in the same PR, so it moved here. |
 
 **Golden evidence.** The two search goldens gained three lines each: `"date_source": "filename"`
 on the three `cache` results, which have no frontmatter `date`. The scan golden gained one field,
 `date_near_misses: []`. No score, span, chunk id, breadcrumb, date or note line moved.
+
+**Fixture evidence (P2-8).** Rewording `notes/undated.md` moves five lines in two other goldens,
+all derived from that one file and nothing else: its `content_hash`, its `size` (265 → 267 bytes),
+and for its only chunk the `chars` and `end` byte span (216 → 218) and the content-addressed
+`id`. No score, path, title, date, status or identity moved, and no assertion test changed.

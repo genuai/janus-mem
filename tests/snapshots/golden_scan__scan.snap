@@ -417,7 +417,7 @@ expression: json
     },
     {
       "author": null,
-      "content_hash": "c33a338fb5cbf87315616328c415a5e468a295c9e5afd1087176a7d6947d7651",
+      "content_hash": "50837aabdca64dfb0fafa76001aaf27a2f94a9cc97422d6c6de24170f7dc10a7",
       "date": null,
       "date_source": "absent",
       "doc_version": null,
@@ -433,7 +433,7 @@ expression: json
       "schema_version": null,
       "scope": "global",
       "shared_with": [],
-      "size": 265,
+      "size": 267,
       "status": "active",
       "superseded_by": [],
       "supersedes": [],
