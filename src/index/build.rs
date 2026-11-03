@@ -435,6 +435,7 @@ fn plan_inner(
             shared_with,
             tags,
             date: doc.date,
+            date_source: doc.date_source,
             effective_from: doc.effective_from,
             timeless: doc.type_spec.timeless,
             content_hash: doc.content_hash,

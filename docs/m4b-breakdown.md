@@ -114,6 +114,11 @@ A date token must be a whole prefix. The next character must be a separator (`-`
 the end of the name. So `2026-08-22_notes.md` matches, and `2026-08-22notes.md` does not.
 This rule already exists for `YYYY-MM-DD`. M4B applies it to the new shapes.
 
+A longer shape wins. A name that reaches the day separator must be a valid day; it does not fall
+back to a month. So `2026-08-22x.md` and `2026-13-01.md` produce no date, not a weaker one. A dot
+may replace a date separator, so `2026.08.22_notes` is a folder date (P1-2, P1-3). The check
+runs before the ladder tries a shorter shape.
+
 A year must be between 1970 and 2099. A name like `1.0` is a version. A name like `2026` at the
 start of a file name is a date. The range check rejects the common false positives.
 
@@ -206,8 +211,12 @@ Two phases. Each is one PR from `main` after the previous merge.
 
 **Goal:** the ranking no longer depends on the disk, and the two-copy test passes.
 
-**Files:** `src/vault/resolve.rs`, `src/document.rs`, `src/index/mod.rs`, `src/index/build.rs`,
-`src/score.rs`, `tests/date_ladder.rs` (new), `tests/no_wall_clock.rs` if it needs the new file.
+**Files:** `src/vault/resolve.rs`, `src/document.rs`, `src/vault/identity.rs`,
+`src/vault/frontmatter.rs`, `src/index/mod.rs`, `src/index/build.rs`, `src/index/store.rs`,
+`src/score.rs`,
+`tests/date_ladder.rs` (new), `tests/common/mod.rs`, `tests/fixture_scan.rs`, `tests/cli_scan.rs`,
+`tests/cli_index.rs`, `tests/publish.rs`, `tests/snapshots/golden_scan__scan.snap`, and this plan.
+`tests/no_wall_clock.rs` only if the new file needs it.
 
 **Build (~250 logic lines):**
 1. Extend `DateSource` with the six new variants and remove `Mtime`. Keep `None`.
@@ -320,7 +329,21 @@ P1b: it is the only part P2 does not need.
 
 ## 10. Implementation log — Phase 1
 
-_Nothing recorded yet._
+| ID | Decision | Why |
+|---|---|---|
+| P1-1 | `DateSource::Mtime` is gone. The ladder is frontmatter, file name, folder name, then `None`. A `None` date gives decay `1.0` and no age. | A disk time differs between two copies of one vault, so it cannot affect a score or an order (B-1, B-5). |
+| P1-2 | The parser tries the longest shape only. A name that reaches the day separator must be a valid day. `2026-08-22x.md`, `2026-13-01.md` and `2024-11-0-post.md` give no date. | A fallback to a shorter shape would turn a glued or malformed day token into a month or a year. |
+| P1-3 | A dot may replace an internal date separator. The token boundary still uses `-`, `_`, `.` or end of name. So `2026.08.22_notes` is a folder date. | Folder names often use dots, and §5 names `2026.08.22_notes/x.md` as a required case. |
+| P1-4 | `usable_date` keeps only `Frontmatter` and day-precision `Filename`. All new variants return `None` for identity. | This keeps every existing `DocId` unchanged (§3.4), including documents that gain a month, year or folder date. |
+| P1-5 | A month date is stored as the first day of the month; a year date as the first day of the year. | The decay anchor is the start of the period, so janus never makes an old document look newer (B-4). |
+| P1-6 | `tests/common` skips `.janus/` when it copies the fixture vault. A test covers a synthetic stale index and the real fixture copy. | A developer who runs `janus index` on the fixture must not hand a built index to a CLI test. |
+| P1-7 | `FORMAT_VERSION` is 3. A version-2 index is refused with one `stale:` line and rebuilt. | `DocMeta` gains `date_source`, so the old layout cannot be read (B-7). |
+| P1-8 | The `DateSource::None` label is `absent`. The scan golden and two fixture tests now expect a null date for `notes/undated.md`. | §3.5 names `absent` as the output value. The label must name the new sources. |
+
+**Two-copy evidence.** The test `shifting_every_mtime_changes_no_order_and_no_score` failed before
+the change. The undated fixture document moved from rank 2 with final `0.2733` to rank 4 with final
+`4.5e-17` after its mtime moved to 2001. It passes after the change: the same order and the same
+scores on both copies.
 
 ## 11. Implementation log — Phase 2
 

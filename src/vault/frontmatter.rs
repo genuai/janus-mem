@@ -321,8 +321,8 @@ fn string_list(mapping: &Mapping, config: &Config, field: Field) -> Vec<String> 
 /// A date, accepting a full timestamp by taking its date part.
 ///
 /// Returns `None` for anything unparseable rather than failing the document; the
-/// date hierarchy (§6.3) then falls through to the filename and finally to
-/// `mtime`, and `date_source` reports which rung won.
+/// date hierarchy (§6.3) then falls through to the file name, the folder name,
+/// and finally no date. `date_source` reports which rung won.
 fn date_value(mapping: &Mapping, config: &Config, field: Field) -> Option<NaiveDate> {
     parse_date(&scalar_string(mapping, config, field)?)
 }

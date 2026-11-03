@@ -417,8 +417,8 @@ expression: json
     {
       "author": null,
       "content_hash": "c33a338fb5cbf87315616328c415a5e468a295c9e5afd1087176a7d6947d7651",
-      "date": "<mtime-date>",
-      "date_source": "mtime",
+      "date": null,
+      "date_source": "absent",
       "doc_version": null,
       "effective_from": null,
       "effective_to": null,

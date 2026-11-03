@@ -48,8 +48,8 @@ pub struct Document {
     /// Byte offsets of the frontmatter region within the file; serves the
     /// span-preserving patcher in M7.
     pub span: FrontmatterSpan,
-    /// Filesystem modification time. Diagnostic only: never used for identity,
-    /// and only a last-resort date source (§6.3).
+    /// Filesystem modification time. Diagnostic only: never used for identity
+    /// and never a date source (§6.3, B-1).
     pub mtime: SystemTime,
     /// File size in bytes, as observed during the read.
     pub size: u64,
@@ -171,19 +171,28 @@ pub struct Frontmatter {
 
 /// Where a document's date came from (§6.3).
 ///
-/// Surfaced in every response so an agent can tell an authored date from a
-/// filesystem accident.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The variant also records the precision, so one value answers "where" and
+/// "how precise" (B-3). Surfaced in every response so an agent can tell an
+/// authored date from a name-derived one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DateSource {
     /// Parsed from a frontmatter date key.
     Frontmatter,
-    /// Parsed from a `YYYY-MM-DD` prefix in the filename.
+    /// Parsed from a `YYYY-MM-DD` prefix in the file name.
     Filename,
-    /// Fell back to the filesystem modification time. The weakest source, and
-    /// the only one excluded from identity (§6.4).
-    Mtime,
-    /// No date at all. The document is excluded from `as_of` queries (§6.10
-    /// rule 9).
+    /// Parsed from a `YYYY-MM` prefix in the file name.
+    FilenameMonth,
+    /// Parsed from a `YYYY` prefix in the file name.
+    FilenameYear,
+    /// Parsed from a folder name, day precision.
+    Folder,
+    /// Parsed from a folder name, month precision.
+    FolderMonth,
+    /// Parsed from a folder name, year precision.
+    FolderYear,
+    /// No authored or name-derived date. The document is always current, so it
+    /// never decays (§6.10 rule 9, B-5).
     #[default]
     None,
 }
@@ -195,8 +204,12 @@ impl DateSource {
         match self {
             Self::Frontmatter => "frontmatter",
             Self::Filename => "filename",
-            Self::Mtime => "mtime",
-            Self::None => "none",
+            Self::FilenameMonth => "filename_month",
+            Self::FilenameYear => "filename_year",
+            Self::Folder => "folder",
+            Self::FolderMonth => "folder_month",
+            Self::FolderYear => "folder_year",
+            Self::None => "absent",
         }
     }
 }

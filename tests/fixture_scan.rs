@@ -80,12 +80,12 @@ fn fixture_parses_every_ugly_case_into_the_expected_documents() {
     assert_eq!(bare["date_source"], "filename", "{bare}");
     assert_eq!(bare["title"], "2025-03-07-no-frontmatter", "{bare}");
 
-    // The one deliberate mtime-sourced document. Its declared id keeps identity
-    // stable even though its date is the checkout time.
+    // The one deliberate undated document. Its declared id keeps identity
+    // stable, and no checkout time is invented as its date.
     let undated = doc(&report, "notes/undated.md");
-    assert_eq!(undated["date_source"], "mtime", "{undated}");
+    assert_eq!(undated["date_source"], "absent", "{undated}");
     assert_eq!(undated["id_source"], "declared_id", "{undated}");
-    assert!(undated["date"].is_string(), "{undated}");
+    assert!(undated["date"].is_null(), "{undated}");
 
     // Comments in YAML are ignored, not treated as part of the values.
     let commented = doc(&report, "notes/yaml-comments.md");
@@ -209,14 +209,22 @@ fn every_document_reports_a_date_source() {
         "fixture document count changed"
     );
     assert_eq!(
-        sources.iter().filter(|source| **source == "mtime").count(),
+        sources.iter().filter(|source| **source == "absent").count(),
         1,
-        "exactly one document deliberately falls back to mtime: {sources:?}"
+        "exactly one document deliberately has no date: {sources:?}"
     );
     assert!(
-        sources
-            .iter()
-            .all(|source| ["frontmatter", "filename", "mtime"].contains(source)),
+        sources.iter().all(|source| [
+            "frontmatter",
+            "filename",
+            "filename_month",
+            "filename_year",
+            "folder",
+            "folder_month",
+            "folder_year",
+            "absent",
+        ]
+        .contains(source)),
         "unexpected date source: {sources:?}"
     );
 

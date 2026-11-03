@@ -16,7 +16,7 @@
 //! title     frontmatter title → filename stem (H1 arrives with M2)
 //! type      frontmatter → [paths] hint → [defaults]; unknown keeps its name
 //! status    frontmatter → [defaults]; unknown becomes `unknown`
-//! date      frontmatter → filename `YYYY-MM-DD` prefix → mtime (never identity)
+//! date      frontmatter → file name prefix → folder name prefix → none
 //! from/to   frontmatter only — never derived, never from mtime
 //! scope     frontmatter, normalised; invalid → `global`
 //! shared    frontmatter, deduplicated, order-preserving; never identity
@@ -30,7 +30,6 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::Path;
-use std::time::SystemTime;
 
 use chrono::NaiveDate;
 
@@ -45,9 +44,11 @@ use crate::vault::{self, DiscoveredFile};
 /// one that declares something invalid (§6.12 rule 1).
 pub const GLOBAL_SCOPE: &str = "global";
 
-/// Length of a `YYYY-MM-DD` prefix in bytes. ASCII by construction, so slicing
-/// this far into a filename can never split a character.
-const DATE_PREFIX_LEN: usize = 10;
+/// The earliest year a name may declare as a date (B-2).
+pub const MIN_DATE_YEAR: i32 = 1970;
+
+/// The latest year a name may declare as a date (B-2).
+pub const MAX_DATE_YEAR: i32 = 2099;
 
 /// A file the walk admitted but that could not become a document.
 ///
@@ -121,7 +122,7 @@ pub fn resolve(file: &DiscoveredFile, config: &Config) -> Result<Document, ReadS
     };
 
     let status = resolve_status(frontmatter.status.as_deref(), config, &mut notes);
-    let (date, date_source) = resolve_date(&frontmatter, &file.rel_path, content.mtime);
+    let (date, date_source) = resolve_date(&frontmatter, &file.rel_path);
     let scope = resolve_scope(frontmatter.scope.as_deref(), &mut notes);
     let shared_with = dedupe_shared_with(&frontmatter.shared_with);
     let (id, id_source) = provisional_identity(&file.rel_path);
@@ -271,49 +272,142 @@ fn resolve_status(declared: Option<&str>, config: &Config, notes: &mut Vec<DocNo
 
 /// Applies the date hierarchy and reports which rung produced the date.
 ///
-/// `mtime` is a legitimate last resort for display but never for identity
-/// (§6.4), which is why the source travels with the value instead of being
-/// re-derived by whoever needs it.
-fn resolve_date(
-    frontmatter: &Frontmatter,
-    rel_path: &str,
-    mtime: SystemTime,
-) -> (Option<NaiveDate>, DateSource) {
+/// The order is frontmatter, file name, folder name, then no date (B-1). A
+/// filesystem time is never a rung, so two copies of one vault always agree.
+fn resolve_date(frontmatter: &Frontmatter, rel_path: &str) -> (Option<NaiveDate>, DateSource) {
     if let Some(date) = frontmatter.date {
         return (Some(date), DateSource::Frontmatter);
     }
-    if let Some(date) = filename_date(rel_path) {
-        return (Some(date), DateSource::Filename);
+    if let Some((date, source)) = filename_stem(rel_path).as_deref().and_then(date_prefix) {
+        return (Some(date), source);
     }
-    // Every file has an mtime today, so the `None` arm is currently
-    // unreachable. `DateSource::None` stays defined for a source that genuinely
-    // has no date (a synthetic document, a filesystem without mtimes) rather
-    // than being removed and re-added later.
-    (
-        Some(chrono::DateTime::<chrono::Utc>::from(mtime).date_naive()),
-        DateSource::Mtime,
-    )
+    if let Some((date, source)) = folder_date(rel_path) {
+        return (Some(date), source);
+    }
+    (None, DateSource::None)
 }
 
-/// Parses a `YYYY-MM-DD` prefix from the filename stem, e.g.
-/// `2024-11-02-postgres.md`.
-///
-/// The date must be a whole prefix: the character after it is a separator
-/// (`-`, `_`, `.`) or the end of the stem. So `2024-11-02.md`,
-/// `2024-11-02_postgres.md` and `2024-11-02.v2.md` all match, while
-/// `2024_11_02.md` (wrong separators) and `2024-11-02notadate.md` do not — a
-/// date glued to more text is a version string far more often than a date.
-fn filename_date(rel_path: &str) -> Option<NaiveDate> {
-    let stem = filename_stem(rel_path)?;
-    // `get` rather than slicing: a stem shorter than the prefix, or one whose
-    // byte 10 is mid-character, must return `None`, not panic.
-    let prefix = stem.get(..DATE_PREFIX_LEN)?;
-    let rest = stem.get(DATE_PREFIX_LEN..)?;
+/// The precision a name token carries. The source variant records it (B-3).
+#[derive(Debug, Clone, Copy)]
+enum Precision {
+    Day,
+    Month,
+    Year,
+}
 
-    match rest.chars().next() {
-        None | Some('-' | '_' | '.') => NaiveDate::parse_from_str(prefix, "%Y-%m-%d").ok(),
-        Some(_) => None,
+/// Parses a date token from the start of `name`.
+///
+/// The shapes are `YYYY-MM-DD`, `YYYY-MM` and `YYYY`. A dot may replace either
+/// separator, because folder names often use dots. The token must be a whole
+/// prefix: the next character is `-`, `_`, `.` or the end of the name.
+///
+/// A longer shape wins. A name that reaches the day separator must be a valid
+/// day; it does not fall back to a month. So `2026-08-22x` and `2026-13-01`
+/// produce no date rather than a weaker one.
+fn parse_prefix(name: &str) -> Option<(NaiveDate, Precision)> {
+    let year = first_four_digits(name)?;
+    let bytes = name.as_bytes();
+
+    let has_month = matches!(bytes.get(4), Some(b'-' | b'.'))
+        && name
+            .get(5..7)
+            .is_some_and(|part| part.bytes().all(|byte| byte.is_ascii_digit()));
+
+    if has_month && matches!(bytes.get(7), Some(b'-' | b'.')) {
+        let date = day_at(name, year)?;
+        return is_boundary(name, 10).then_some((date, Precision::Day));
     }
+    if has_month {
+        let date = month_at(name, year)?;
+        return is_boundary(name, 7).then_some((date, Precision::Month));
+    }
+
+    let date = year_at(year)?;
+    is_boundary(name, 4).then_some((date, Precision::Year))
+}
+
+/// Parses `YYYY-MM-DD` or `YYYY.MM.DD` into a date in the allowed year range.
+fn day_at(name: &str, year: i32) -> Option<NaiveDate> {
+    let month: u32 = name.get(5..7)?.parse().ok()?;
+    let day: u32 = name.get(8..10)?.parse().ok()?;
+    if !in_range(year) {
+        return None;
+    }
+    NaiveDate::from_ymd_opt(year, month, day)
+}
+
+/// Parses `YYYY-MM` or `YYYY.MM` into the first day of that month.
+fn month_at(name: &str, year: i32) -> Option<NaiveDate> {
+    let month: u32 = name.get(5..7)?.parse().ok()?;
+    if !in_range(year) {
+        return None;
+    }
+    NaiveDate::from_ymd_opt(year, month, 1)
+}
+
+/// Parses `YYYY` into the first day of that year.
+fn year_at(year: i32) -> Option<NaiveDate> {
+    if !in_range(year) {
+        return None;
+    }
+    NaiveDate::from_ymd_opt(year, 1, 1)
+}
+
+/// Whether `year` is inside the accepted range.
+fn in_range(year: i32) -> bool {
+    (MIN_DATE_YEAR..=MAX_DATE_YEAR).contains(&year)
+}
+
+/// Reads the first four bytes as a year number, without slicing a character.
+fn first_four_digits(name: &str) -> Option<i32> {
+    let year = name.get(0..4)?;
+    if !year.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    year.parse().ok()
+}
+
+/// Whether the token ends at a separator or at the end of the name.
+fn is_boundary(name: &str, end: usize) -> bool {
+    match name.get(end..) {
+        Some(rest) => match rest.as_bytes().first() {
+            None | Some(b'-' | b'_' | b'.') => true,
+            Some(_) => false,
+        },
+        None => false,
+    }
+}
+
+/// Parses a date prefix from a file name and labels it as a file name source.
+fn date_prefix(name: &str) -> Option<(NaiveDate, DateSource)> {
+    let (date, precision) = parse_prefix(name)?;
+    let source = match precision {
+        Precision::Day => DateSource::Filename,
+        Precision::Month => DateSource::FilenameMonth,
+        Precision::Year => DateSource::FilenameYear,
+    };
+    Some((date, source))
+}
+
+/// Finds the deepest folder with a date in its name (B-8).
+///
+/// The search walks from the folder nearest the file to the vault root. The
+/// first match wins, so a nearer date is more specific than a further one.
+fn folder_date(rel_path: &str) -> Option<(NaiveDate, DateSource)> {
+    let mut parts: Vec<&str> = rel_path.split('/').collect();
+    parts.pop()?;
+
+    for folder in parts.into_iter().rev() {
+        if let Some((date, precision)) = parse_prefix(folder) {
+            let source = match precision {
+                Precision::Day => DateSource::Folder,
+                Precision::Month => DateSource::FolderMonth,
+                Precision::Year => DateSource::FolderYear,
+            };
+            return Some((date, source));
+        }
+    }
+    None
 }
 
 /// Normalises and validates a declared scope (§6.12 rule 1).
@@ -411,6 +505,7 @@ fn provisional_identity(rel_path: &str) -> (DocId, IdentityTier) {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::SystemTime;
 
     fn config(toml: &str) -> Config {
         Config::from_toml(toml, Path::new("<test>")).expect("test config must parse")
@@ -675,7 +770,30 @@ mod tests {
     }
 
     #[test]
-    fn a_filename_date_is_parsed_and_reported_as_such() {
+    fn the_date_ladder_tries_frontmatter_then_file_then_folder_then_none() {
+        let frontmatter_wins = doc(
+            "2020_outer/2021-02-03_file.md",
+            &frontmatter("date: 2026-10-29\n"),
+        );
+        assert_eq!(frontmatter_wins.date, NaiveDate::from_ymd_opt(2026, 10, 29));
+        assert_eq!(frontmatter_wins.date_source, DateSource::Frontmatter);
+
+        let file_wins = doc("2020_outer/2021-02-03_file.md", "x");
+        assert_eq!(file_wins.date, NaiveDate::from_ymd_opt(2021, 2, 3));
+        assert_eq!(file_wins.date_source, DateSource::Filename);
+
+        let folder_wins = doc("2020_outer/plain.md", "x");
+        assert_eq!(folder_wins.date, NaiveDate::from_ymd_opt(2020, 1, 1));
+        assert_eq!(folder_wins.date_source, DateSource::FolderYear);
+
+        let none = doc("plain.md", "x");
+        assert_eq!(none.date, None);
+        assert_eq!(none.date_source, DateSource::None);
+    }
+
+    #[test]
+    fn a_file_name_date_is_parsed_with_its_precision() {
+        let day = NaiveDate::from_ymd_opt(2024, 11, 2);
         for rel in [
             "2024-11-02-postgres.md",
             "notes/2024-11-02-postgres.md",
@@ -684,35 +802,90 @@ mod tests {
             "2024-11-02.v2.md",
         ] {
             let document = doc(rel, "x");
-            assert_eq!(
-                document.date,
-                NaiveDate::from_ymd_opt(2024, 11, 2),
-                "{rel} should carry a filename date"
-            );
+            assert_eq!(document.date, day, "{rel}");
             assert_eq!(document.date_source, DateSource::Filename, "{rel}");
+        }
+
+        let month = NaiveDate::from_ymd_opt(2024, 11, 1);
+        for rel in ["2024-11_notes.md", "2024-11.md"] {
+            let document = doc(rel, "x");
+            assert_eq!(document.date, month, "{rel}");
+            assert_eq!(document.date_source, DateSource::FilenameMonth, "{rel}");
+        }
+
+        let year = NaiveDate::from_ymd_opt(2024, 1, 1);
+        for rel in ["2024_notes.md", "2024.md"] {
+            let document = doc(rel, "x");
+            assert_eq!(document.date, year, "{rel}");
+            assert_eq!(document.date_source, DateSource::FilenameYear, "{rel}");
         }
     }
 
     #[test]
-    fn a_filename_with_the_wrong_separators_is_not_a_date() {
-        // §6.3 asks for a `YYYY-MM-DD` prefix specifically.
+    fn a_dot_may_replace_a_date_separator() {
+        let day = doc("2024.11.02_notes.md", "x");
+        assert_eq!(day.date, NaiveDate::from_ymd_opt(2024, 11, 2));
+        assert_eq!(day.date_source, DateSource::Filename);
+
+        let month = doc("2024.11_notes.md", "x");
+        assert_eq!(month.date, NaiveDate::from_ymd_opt(2024, 11, 1));
+        assert_eq!(month.date_source, DateSource::FilenameMonth);
+    }
+
+    #[test]
+    fn a_wrong_separator_inside_the_date_leaves_only_the_year() {
+        // `2024_11_02` has no `YYYY-MM` or `YYYY-MM-DD` prefix, but `2024` is a
+        // whole year token, so the document is dated at year precision.
         let document = doc("2024_11_02.md", "x");
 
-        assert_eq!(document.date_source, DateSource::Mtime);
+        assert_eq!(document.date, NaiveDate::from_ymd_opt(2024, 1, 1));
+        assert_eq!(document.date_source, DateSource::FilenameYear);
     }
 
     #[test]
     fn a_date_glued_to_more_text_is_not_a_date() {
-        // `2024-11-02notadate` is a version string, not an authored date.
-        assert_eq!(
-            doc("2024-11-02notadate.md", "x").date_source,
-            DateSource::Mtime
-        );
-        assert_eq!(
-            doc("2024-13-45-post.md", "x").date_source,
-            DateSource::Mtime
-        );
-        assert_eq!(doc("2024-11-0-post.md", "x").date_source, DateSource::Mtime);
+        // A longer shape never falls back to a weaker one.
+        for rel in [
+            "2024-11-02notadate.md",
+            "2024-13-45-post.md",
+            "2024-11-0-post.md",
+            "2026-08-22x.md",
+            "2026-13-01.md",
+            "2026-08x.md",
+        ] {
+            let document = doc(rel, "x");
+            assert_eq!(document.date, None, "{rel}");
+            assert_eq!(document.date_source, DateSource::None, "{rel}");
+        }
+    }
+
+    #[test]
+    fn a_year_outside_the_range_is_not_a_date() {
+        for rel in [
+            "1969-12-31.md",
+            "2100-01-01.md",
+            "1969.md",
+            "2100.md",
+            "0000-01-01.md",
+        ] {
+            let document = doc(rel, "x");
+            assert_eq!(document.date, None, "{rel}");
+            assert_eq!(document.date_source, DateSource::None, "{rel}");
+        }
+
+        let first = doc("1970-01-01.md", "x");
+        assert_eq!(first.date, NaiveDate::from_ymd_opt(MIN_DATE_YEAR, 1, 1));
+        let last = doc("2099-12-31.md", "x");
+        assert_eq!(last.date, NaiveDate::from_ymd_opt(MAX_DATE_YEAR, 12, 31));
+    }
+
+    #[test]
+    fn a_version_like_name_is_not_a_date() {
+        for rel in ["1.0.md", "10.0.0.md", "v2026.md"] {
+            let document = doc(rel, "x");
+            assert_eq!(document.date, None, "{rel}");
+            assert_eq!(document.date_source, DateSource::None, "{rel}");
+        }
     }
 
     #[test]
@@ -727,16 +900,57 @@ mod tests {
     fn a_multibyte_filename_shorter_than_a_date_prefix_is_safe() {
         let document = doc("日本語.md", "x");
 
-        assert_eq!(document.date_source, DateSource::Mtime);
+        assert_eq!(document.date, None);
+        assert_eq!(document.date_source, DateSource::None);
     }
 
     #[test]
-    fn mtime_is_the_last_resort_and_uses_the_utc_date() {
+    fn an_undated_document_has_no_date_and_no_invented_age() {
         let document = doc("undated.md", "x");
-        let expected = chrono::DateTime::<chrono::Utc>::from(document.mtime).date_naive();
 
-        assert_eq!(document.date, Some(expected));
-        assert_eq!(document.date_source, DateSource::Mtime);
+        assert_eq!(document.date, None);
+        assert_eq!(document.date_source, DateSource::None);
+    }
+
+    #[test]
+    fn a_folder_date_is_parsed_with_its_precision() {
+        for (rel, expected, source) in [
+            (
+                "2026.08.22_notes/x.md",
+                NaiveDate::from_ymd_opt(2026, 8, 22),
+                DateSource::Folder,
+            ),
+            (
+                "2026-08/x.md",
+                NaiveDate::from_ymd_opt(2026, 8, 1),
+                DateSource::FolderMonth,
+            ),
+            (
+                "2026/x.md",
+                NaiveDate::from_ymd_opt(2026, 1, 1),
+                DateSource::FolderYear,
+            ),
+        ] {
+            let document = doc(rel, "x");
+            assert_eq!(document.date, expected, "{rel}");
+            assert_eq!(document.date_source, source, "{rel}");
+        }
+    }
+
+    #[test]
+    fn the_deepest_folder_with_a_date_wins() {
+        let document = doc("2020_outer/2026-08-22_inner/x.md", "x");
+
+        assert_eq!(document.date, NaiveDate::from_ymd_opt(2026, 8, 22));
+        assert_eq!(document.date_source, DateSource::Folder);
+    }
+
+    #[test]
+    fn a_file_name_date_beats_a_folder_date() {
+        let document = doc("2020_outer/2025-03-04_file.md", "x");
+
+        assert_eq!(document.date, NaiveDate::from_ymd_opt(2025, 3, 4));
+        assert_eq!(document.date_source, DateSource::Filename);
     }
 
     #[test]
@@ -759,8 +973,8 @@ mod tests {
         );
         assert_eq!(declared.effective_to, NaiveDate::from_ymd_opt(2027, 1, 1));
 
-        // `date` and `mtime` both exist here, and neither may fill the window:
-        // §6.10 derivation belongs to M5, not to a read.
+        // A file-name date and an mtime both exist here, and neither may fill
+        // the window: §6.10 derivation belongs to M5, not to a read.
         let absent = doc("2024-11-02-postgres.md", "x");
         assert_eq!(absent.date_source, DateSource::Filename);
         assert_eq!(absent.effective_from, None);
@@ -1131,7 +1345,7 @@ mod tests {
 
         assert_eq!(document.title, "empty");
         assert!(document.body.is_empty());
-        assert_eq!(document.date_source, DateSource::Mtime);
+        assert_eq!(document.date_source, DateSource::None);
     }
 
     #[test]
@@ -1159,9 +1373,14 @@ mod tests {
             "2024-11-02",
             "2024-11-02--",
             "notes/2024-11-02-ü.md",
+            "2024-11-0-post.md",
+            "2026-08-22x.md",
+            "😀/2026-08-22x.md",
+            "2026.08.22_notes/x.md",
         ] {
-            let _ = filename_date(rel);
-            let _ = filename_stem(rel).unwrap_or_default();
+            let stem = filename_stem(rel).unwrap_or_default();
+            let _ = date_prefix(&stem);
+            let _ = folder_date(rel);
             let _ = resolve_title(None, rel);
         }
         for scope in ["", " ", "-", ":", "org acme", "ORG", "org:ACME"] {

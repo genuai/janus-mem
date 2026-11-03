@@ -273,7 +273,7 @@ fn scan_json_is_a_versioned_report_with_one_entry_per_document() {
 
     for doc in docs {
         assert!(doc["date_source"].is_string(), "{doc}");
-        assert!(doc["date"].is_string(), "{doc}");
+        assert!(doc["date"].is_string() || doc["date"].is_null(), "{doc}");
         assert!(doc["type"].is_string(), "{doc}");
         assert!(doc["status"].is_string(), "{doc}");
         assert!(doc["content_hash"].as_str().unwrap().len() == 64, "{doc}");

@@ -180,7 +180,7 @@ fn index_writes_vectors_f32_that_match_the_manifest() {
 
     let bytes = fs::read(vault.path().join(".janus/vectors.f32")).expect("the payload exists");
     let chunks = report["chunks"].as_u64().expect("chunks");
-    assert_eq!(manifest["format_version"], 2);
+    assert_eq!(manifest["format_version"], 3);
     assert_eq!(manifest["embedder"]["name"], "hash-64");
     assert_eq!(manifest["embedder"]["dim"], 64);
     assert_eq!(manifest["vectors_len"], bytes.len() as u64);
@@ -354,11 +354,11 @@ fn a_vectors_bearing_generation_is_read_by_search_without_a_rebuild() {
 }
 
 #[test]
-fn a_format_version_1_manifest_is_refused_with_a_warning_and_rebuilt() {
+fn a_format_version_2_manifest_is_refused_with_a_warning_and_rebuilt() {
     let vault = fixture_vault();
     index(vault.path());
     patch_manifest(vault.path(), |manifest| {
-        manifest["format_version"] = serde_json::json!(1)
+        manifest["format_version"] = serde_json::json!(2)
     });
 
     let output = run(vault.path(), &["search", "cache"]);
@@ -369,12 +369,12 @@ fn a_format_version_1_manifest_is_refused_with_a_warning_and_rebuilt() {
         .filter(|line| line.starts_with("stale:"))
         .collect();
     assert_eq!(stale.len(), 1, "expected one stale line, got {stderr:?}");
-    assert!(stale[0].contains("format_version 1 != 2"), "{stale:?}");
-    assert_eq!(manifest(vault.path())["format_version"], 2);
+    assert!(stale[0].contains("format_version 2 != 3"), "{stale:?}");
+    assert_eq!(manifest(vault.path())["format_version"], 3);
 
     // `--no-rebuild` refuses the same state without writing.
     patch_manifest(vault.path(), |manifest| {
-        manifest["format_version"] = serde_json::json!(1)
+        manifest["format_version"] = serde_json::json!(2)
     });
     let before = dir_snapshot(&vault.path().join(".janus"));
     let output = run(vault.path(), &["search", "cache", "--no-rebuild"]);
