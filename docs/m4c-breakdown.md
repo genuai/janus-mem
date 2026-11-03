@@ -72,7 +72,8 @@ pub struct ScoringConfig {
 }
 ```
 
-`Breakdown` gains one field, so `search --json` gains one key. The change is additive; `api` stays `1`.
+`Breakdown` gains one field, so **both** `search --json` and `facts --json` gain one key: each reports
+the whole `Breakdown`. The change is additive; `api` stays `1`.
 
 The corpus table is `[scoring]`, not `[search]`. A `[search]` table already exists in the *workspace*
 config (§16.2) and holds federation policy; two tables with one name and two owners is a trap.
@@ -118,10 +119,19 @@ carries every rare query term. The clamp keeps a caller from inventing ×5. A co
 **`w = 0.0` reproduces the old ranking.** Multiplying by 1.0 is exact in IEEE 754 and constant for
 every chunk of one document, so the argmax and the comparator see identical inputs.
 
-**The title of a file-stem fallback has its date prefix removed.** A file named
+**A date prefix in the title is stripped, at query time only.** A file named
 `2024-12-01-redis-cache.md` has the title `2024-12-01-redis-cache`, which tokenizes to `2024`, `12`,
 `01`, `redis`, `cache`. Without the strip, a query containing `2024` doubles every dated document in
-the vault. The resolver already parses that prefix, so the strip is one call.
+the vault.
+
+The strip happens **inside the boost path**, on the title text, immediately before tokenizing it. It is
+never applied to the stored title. The stored title feeds `DocId` (rungs 3–5), `lex_key`, `vec_key`,
+the embedded text and the reported `title`; stripping it there would move identities, invalidate every
+reuse key, force the rebuild this milestone forbids, and move the goldens. A frontmatter title that
+starts with a date is stripped too: the rule is about the token, not about its source.
+
+The parser already exists in `src/vault/resolve.rs`. M4C adds one pure helper beside it,
+`pub(crate) fn strip_leading_date(title: &str) -> &str`, and changes no stored value.
 
 **Cost and site.** `query()` tokenizes each document title **once per query**, before the chunk loop,
 and keeps a `Vec<f64>` beside `docs`. The chunk loop indexes it by `doc_index`. Do not tokenize inside
@@ -170,14 +180,14 @@ change, or the flag keeps punishing an unknown status.
 |---|---|---|---|
 | C-1 | Query time or index time | **Query time.** Index-time duplication needs an 18-minute rebuild and a format bump for a weight | `search/mod.rs` |
 | C-2 | Title only, or title and breadcrumb | **Title only.** Per-chunk breadcrumbs need a tokenized heading index to stay cheap | `search/mod.rs` |
-| C-3 | The weight | `Σ idf` over the matched rare terms ÷ `Σ idf` over the query, `1 + w·cov`, clamp `[1,2]`, `w` default 1.0 in `[0,1]` | `score.rs` |
+| C-3 | The weight | `Σ idf` over the matched rare terms ÷ `Σ idf` over the query, `1 + w·cov`, clamp `[1,2]`, `w` default 1.0 in `[0,1]`. The idf lookup happens in `search/mod.rs`, because `score()` is pure and has no index | `search/mod.rs`, `score.rs` |
 | C-4 | Is the boost reported | **Yes**, in `Breakdown`, and the bounds in the property test and SPEC move with it | `score.rs` |
 | C-5 | Document-level aboutness | **Deferred** to phase 3's measurement | §5 phase 3 |
 | C-6 | Unknown type and status | **Neutral (1.0)**, both `current` rows, notes keep working | `config.rs`, `score.rs` |
 | C-7 | Regression switch | `w = 0.0`. A stored snapshot proves the old ranking returns | `config.rs` |
 | C-8 | Format version | **Unchanged** | — |
 | C-9 | Config table name | `[scoring]` in the corpus config. `[search]` belongs to the workspace config | `config.rs` |
-| C-10 | A date in a file-stem title | Stripped before tokenizing. A date is not a topic | `resolve.rs` |
+| C-10 | A date in the title | Stripped **in the boost path only**, from the title text. A date is not a topic, and the stored title is identity | `resolve.rs` (helper), `search/mod.rs` |
 
 ## 5. Phases
 
@@ -189,27 +199,33 @@ Three phases. One PR each, from `main` after the previous merge. Phase 3 may pro
 
 **Files:** `src/score.rs` (the factor, the bounds), `src/search/mod.rs` (precompute, report),
 `src/search/facts.rs` (`title_boost: 1.0`, E0063 without it), `src/config.rs` (`[scoring]`),
-`src/vault/resolve.rs` (date strip for the stem fallback), `tests/title_boost.rs` (new),
+`src/vault/resolve.rs` (one pure helper, `strip_leading_date`), `janus.toml` (`[scoring]`), `tests/title_boost.rs` (new),
 `tests/golden_search.rs` (both identity assertions and the module comment), `tests/hybrid_search.rs`
-(the identity at `:239`), `tests/eval_quality.rs` (`JANUS_EVAL_TITLE_BOOST`).
+(the identity at `:239`), `tests/eval_quality.rs` (`JANUS_EVAL_TITLE_BOOST`),
+`tests/snapshots/` (a **new** pre-change snapshot; phase 1 regenerates the existing one).
 
 **Build (~220 logic lines):**
 
 1. `ScoringConfig.title_boost`: default 1.0, warn on a configured value outside `[0,1]`, then clamp.
-2. Strip the parsed date prefix from a file-stem title before tokenizing.
-3. In `query()`: tokenize the query once, tokenize each document title once, compute a `Vec<f64>` of
-   boosts beside `docs`, and index it by `doc_index` in the chunk loop.
+2. `pub(crate) fn strip_leading_date(&str) -> &str` in `vault::resolve`, beside the date parser, and
+   use it in the boost path. No stored value changes. Add `[scoring] title_boost = 1.0` to the
+   `janus.toml` template so a fresh corpus shows the knob.
+3. In `query()`: tokenize the query once; for each document strip its date prefix, tokenize the title
+   once, and compute a `Vec<f64>` of boosts beside `docs`. Index it by `doc_index` in the chunk loop.
 4. Multiply `relevance`; report `title_boost`.
 5. Update the bounds: `relevance ≤ 2.0`, `final ≤ 3.0` in the property test's generator and assertions.
 6. Update the three identity assertions named above.
 
 **Tests (~280 lines):**
 
-- **The reproduction, written first, in the real query shape.** Ten short notes that mention `q4` once,
-  plus one long document titled `Q4 plan draft` whose eight sections mention it once each. Query
-  `what is our q4 plan draft` — five terms, one in the title. Expected boost is a literal, computed by
-  hand from the fixture's idfs and written in the test's comment. Without the boost the long document
-  is outside the top 5; with it, it is rank 1. **This test fails on `main`.**
+- **The reproduction, written first, in the real query shape.** Ten short notes that mention `q4` and
+  `okrs` once, plus one long document titled `Q4 plan draft` whose eight sections mention `q4` once
+  each. Query **`what is our q4 okrs`** — the acceptance query, with `okrs` spelled out and the
+  question mark gone. Five terms; `q4` alone is in the title. Without the boost the long document is
+  outside the top 5; with `w = 1.0` it is rank 1. **This test fails on `main`.**
+  The expected boost is a literal with its arithmetic in the test comment: the fixture's `df` for each
+  query term, the four idfs, `hits`, `total`, `cov`, and the resulting boost. A literal copied from the
+  plan's worked table would pin an idf distribution the test corpus does not have.
 - The formula table above, with literals for all four rows.
 - `w = 0.0` reproduces the stored pre-change snapshot: same order, same `final`, every pre-existing
   field identical. The new key is the only difference.
@@ -237,7 +253,10 @@ rows), `src/document.rs` (the note prints the configured factor, not a literal),
 (its `0.80` assertion), `janus.toml` (the comment on line 56), the goldens, `SPEC.md`.
 
 **Build (~40 logic lines):** unknown type `0.80 → 1.00`; unknown status `0.80 → 1.00` in **both**
-`current` rows. The note text takes the factor from the constant.
+`current` rows. The type note keeps its number and reads `UNKNOWN_TYPE_AUTHORITY`, which lives in
+`config.rs` and is importable. The status note **drops** its number: the factor is a table cell in
+`score.rs`, and `document.rs` cannot import `score.rs` without a module cycle. Its new text says the
+status is treated as active for inclusion.
 
 **Tests (~120 lines):** the intent table's `unknown` cells at 1.0 for both rows; a document with an
 unknown type and status ranks as its relevance says; both notes still appear and agree with the code.
