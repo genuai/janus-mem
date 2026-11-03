@@ -1,0 +1,344 @@
+# M4C — Retrieval that finds the document you meant
+
+> Branch: `m4c-plan` (this document), then one branch per phase from `main`.
+> Spec: §6.6, §7.2, §9.4, §11, §15, §16.1.
+> Evidence: a corpus of 2 119 documents, counted by `janus scan`, measured in M4B.
+>
+> **Done when:** a document whose *title* names the topic outranks documents that merely mention
+> it, and a document with metadata the config does not know is not punished for it.
+
+**Words used here.** **title**: the document title, from frontmatter or the file stem.
+**relevance**: the blended semantic and lexical score. **final**: relevance × authority × decay.
+**idf**: inverse document frequency, the index's measure of how rare a term is.
+**boost**: a multiplier of 1.0 or more.
+
+## 0. Scope
+
+**Decision: a document that is *about* a topic must beat a document that *mentions* it.**
+
+Measured on the real corpus, with the query `what is our q4 okrs?`:
+
+| fact | value |
+|---|---|
+| the document the user wanted | `1.martin/planning/q4-2026-plan-draft.md` |
+| documents `janus scan` reports | 2 119 |
+| its mentions of `q4` | 17, across 18 chunks |
+| its rank for `q4` | **27** |
+| its rank for its own file name | **miss, below 5** |
+| documents containing `q4` | 152 |
+| its type and status | `personal-operating-plan`, `unknown`, both unknown to the config |
+| its multiplier from authority × status | **0.64**, against 0.90 for a note |
+
+Three causes:
+
+1. **A title match counts the same as a body mention.** The index concatenates the title to the body as one more string.
+2. **A document's many mentions collapse into one.** A document is scored by its best chunk, so 17 mentions across 18 sections count as one.
+3. **Unknown metadata is a penalty.** Unknown type ×0.80, unknown status ×0.80, so 0.64 against 0.90.
+
+### In scope
+
+- A title boost at query time, weighted by how rare the matched query terms are.
+- Neutral treatment of an unknown type and an unknown status.
+- Measurement before and after, with a knob to turn the boost off.
+- A decision gate on cause 2. Fix it only if causes 1 and 3 are not enough.
+
+### Not in scope
+
+- Breadcrumb weighting. It needs index-time support to stay cheap per query (C-2).
+- Changing "a document's score is its best chunk". Deferred behind phase 3's measurement (C-5).
+- Stemming, stopwords, synonyms, query expansion. The idf weighting in §3.1 makes a stoplist unnecessary.
+- Staleness detection, incremental refresh, progress output. Those are M4D.
+- Any change to the index format. **No `format_version` bump, no rebuild.**
+- A second index, a new file, a new dependency.
+
+## 1. Dependencies
+
+None.
+
+## 2. Data model
+
+```rust
+// src/score.rs — one new reported factor.
+pub struct Breakdown {
+    /* … unchanged … */
+    /// The title multiplier applied to `relevance`. `1.0` when no rare query term is in the title.
+    pub title_boost: f64,
+}
+
+// src/config.rs — a new corpus table, beside `[embedding]` and `[chunking]`.
+pub struct ScoringConfig {
+    /// Weight of the title boost. `0.0` disables it and reproduces the old ranking.
+    pub title_boost: f64, // default 1.0, clamped to [0.0, 1.0]
+}
+```
+
+`Breakdown` gains one field, so **both** `search --json` and `facts --json` gain one key: each reports
+the whole `Breakdown`. The change is additive; `api` stays `1`.
+
+The corpus table is `[scoring]`, not `[search]`. A `[search]` table already exists in the *workspace*
+config (§16.2) and holds federation policy; two tables with one name and two owners is a trap.
+
+## 3. Contracts
+
+### 3.1 The title boost, weighted by rarity
+
+**A result whose title contains rare query terms is multiplied by a factor between 1.0 and 2.0.**
+
+Read the query terms and the title terms with the one tokenizer. Take idf from the index that the
+query already uses.
+
+```
+Q      = distinct query terms
+T      = distinct title terms
+V      = terms present in the index          (a term outside V has no idf)
+hits   = Σ idf(t) for t in Q ∩ T ∩ V
+total  = Σ idf(t) for t in Q ∩ V
+title_cov   = if total > 0 then hits / total else 0
+title_boost = clamp(1 + w · title_cov, 1.0, 2.0)      w = [scoring] title_boost, default 1.0
+relevance   = (α · semantic + (1 − α) · lexical) · title_boost
+```
+
+**Why idf, and not a count.** A count divides by every query term, and a question carries noise:
+`what is our q4 okrs` has five terms, so one title match is `1/5 = 0.2`, a boost of only 1.2. Rare
+terms carry the meaning, and the index already knows which ones are rare. The same query with
+plausible idfs (`what` 0.3, `is` 0.2, `our` 0.4, `q4` 2.6, `okrs` 2.9) gives:
+
+| title contains | hits / total | title_cov | boost at w = 1.0 |
+|---|---|---|---|
+| `q4` | 2.6 / 6.4 | 0.406 | **1.41** |
+| `q4`, `okrs` | 6.4 / 6.4 | 1.000 | **2.00** |
+| `what` only | 0.3 / 6.4 | 0.047 | 1.05 |
+| nothing from Q ∩ V | 0 | 0.000 | **1.00** |
+
+The fourth row is why no stoplist is needed: a common word in a title buys almost nothing.
+
+**The weight `w` lives in `[0, 1]`.** At `w = 1.0` the largest possible boost is ×2.0, on a title that
+carries every rare query term. The clamp keeps a caller from inventing ×5. A configured value outside
+`[0, 1]` is **tested before it is clamped**, so the warning fires; the value used is the clamped one.
+
+**`w = 0.0` reproduces the old ranking.** Multiplying by 1.0 is exact in IEEE 754 and constant for
+every chunk of one document, so the argmax and the comparator see identical inputs.
+
+**A date prefix in the title is stripped, at query time only.** A file named
+`2024-12-01-redis-cache.md` has the title `2024-12-01-redis-cache`, which tokenizes to `2024`, `12`,
+`01`, `redis`, `cache`. Without the strip, a query containing `2024` doubles every dated document in
+the vault.
+
+The strip happens **inside the boost path**, on the title text, immediately before tokenizing it. It is
+never applied to the stored title. The stored title feeds `DocId` (rungs 3–5), `lex_key`, `vec_key`,
+the embedded text and the reported `title`; stripping it there would move identities, invalidate every
+reuse key, force the rebuild this milestone forbids, and move the goldens. A frontmatter title that
+starts with a date is stripped too: the rule is about the token, not about its source.
+
+The parser already exists in `src/vault/resolve.rs`. M4C adds one pure helper beside it,
+`pub(crate) fn strip_leading_date(title: &str) -> &str`, and changes no stored value.
+
+**Cost and site.** `query()` tokenizes each document title **once per query**, before the chunk loop,
+and keeps a `Vec<f64>` beside `docs`. The chunk loop indexes it by `doc_index`. Do not tokenize inside
+the loop: the loop runs per chunk, and the reference corpus is 200 000 chunks per §13.
+
+### 3.2 Where the boost applies, and where it must not
+
+**The boost multiplies `relevance`, before authority and decay.**
+
+| stage | changes? |
+|---|---|
+| `semantic`, `lexical` | no. They keep their meaning and their reported values |
+| `relevance` | yes, multiplied. The bound becomes `≤ 2.0` |
+| `authority`, `status_factor`, `decay` | no |
+| `final` | yes, through `relevance`. The bound becomes `≤ 3.0` |
+| the total order, the tie-breaks, one-hit-per-document | no |
+
+`facts` passes `title_boost = 1.0`. It orders by `type_authority`, so a boost cannot change its order,
+and a factor that cannot change an order must not inflate a reported score.
+
+### 3.3 Neutral metadata for words the config does not know
+
+**An unknown type and an unknown status stop being penalties.**
+
+| field | today | after |
+|---|---|---|
+| unknown type | ×0.80 | **×1.00** |
+| unknown status under `current` | ×0.80 | **×1.00** |
+
+Both notes stay, and their text must print the factor the code used, not a literal. An unknown type is
+not evidence of low authority; it is evidence of a vocabulary the config has not seen.
+
+The intent table has **two** `current` rows, one with and one without `--include-superseded`. Both
+change, or the flag keeps punishing an unknown status.
+
+### 3.4 What does not change
+
+- **No index format change.** The boost is computed at query time from `DocMeta.title`, which the
+  snapshot already holds. No rebuild, no `format_version` bump.
+- **A document is still scored by its best chunk.** Phase 3 decides whether to revisit that.
+- **One hit per document.** The boost reorders; it never adds a result.
+
+## 4. Decisions
+
+| # | Question | Default | Where |
+|---|---|---|---|
+| C-1 | Query time or index time | **Query time.** Index-time duplication needs an 18-minute rebuild and a format bump for a weight | `search/mod.rs` |
+| C-2 | Title only, or title and breadcrumb | **Title only.** Per-chunk breadcrumbs need a tokenized heading index to stay cheap | `search/mod.rs` |
+| C-3 | The weight | `Σ idf` over the matched rare terms ÷ `Σ idf` over the query, `1 + w·cov`, clamp `[1,2]`, `w` default 1.0 in `[0,1]`. The idf lookup happens in `search/mod.rs`, because `score()` is pure and has no index | `search/mod.rs`, `score.rs` |
+| C-4 | Is the boost reported | **Yes**, in `Breakdown`, and the bounds in the property test and SPEC move with it | `score.rs` |
+| C-5 | Document-level aboutness | **Deferred** to phase 3's measurement | §5 phase 3 |
+| C-6 | Unknown type and status | **Neutral (1.0)**, both `current` rows, notes keep working | `config.rs`, `score.rs` |
+| C-7 | Regression switch | `w = 0.0`. A stored snapshot proves the old ranking returns | `config.rs` |
+| C-8 | Format version | **Unchanged** | — |
+| C-9 | Config table name | `[scoring]` in the corpus config. `[search]` belongs to the workspace config | `config.rs` |
+| C-10 | A date in the title | Stripped **in the boost path only**, from the title text. A date is not a topic, and the stored title is identity | `resolve.rs` (helper), `search/mod.rs` |
+
+## 5. Phases
+
+Three phases. One PR each, from `main` after the previous merge. Phase 3 may produce no code.
+
+### Phase 1 — the title boost
+
+**Goal:** a document whose title names the topic outranks documents that mention it.
+
+**Files:** `src/score.rs` (the factor, the bounds), `src/search/mod.rs` (precompute, report),
+`src/search/facts.rs` (`title_boost: 1.0`, E0063 without it), `src/config.rs` (`[scoring]`),
+`src/vault/resolve.rs` (one pure helper, `strip_leading_date`), `janus.toml` (`[scoring]`), `tests/title_boost.rs` (new),
+`tests/golden_search.rs` (both identity assertions and the module comment), `tests/hybrid_search.rs`
+(the identity at `:239`), `tests/eval_quality.rs` (`JANUS_EVAL_TITLE_BOOST`),
+`tests/snapshots/` (a **new** pre-change snapshot; phase 1 regenerates the existing one).
+
+**Build (~220 logic lines):**
+
+1. `ScoringConfig.title_boost`: default 1.0, warn on a configured value outside `[0,1]`, then clamp.
+2. `pub(crate) fn strip_leading_date(&str) -> &str` in `vault::resolve`, beside the date parser, and
+   use it in the boost path. No stored value changes. Add `[scoring] title_boost = 1.0` to the
+   `janus.toml` template so a fresh corpus shows the knob.
+3. In `query()`: tokenize the query once; for each document strip its date prefix, tokenize the title
+   once, and compute a `Vec<f64>` of boosts beside `docs`. Index it by `doc_index` in the chunk loop.
+4. Multiply `relevance`; report `title_boost`.
+5. Update the bounds: `relevance ≤ 2.0`, `final ≤ 3.0` in the property test's generator and assertions.
+6. Update the three identity assertions named above.
+
+**Tests (~280 lines):**
+
+- **The reproduction, written first, in the real query shape.** Ten short notes that mention `q4` and
+  `okrs` once, plus one long document titled `Q4 plan draft` whose eight sections mention `q4` once
+  each. Query **`what is our q4 okrs`** — the acceptance query, with `okrs` spelled out and the
+  question mark gone. Five terms; `q4` alone is in the title. Without the boost the long document is
+  outside the top 5; with `w = 1.0` it is rank 1. **This test fails on `main`.**
+  The expected boost is a literal with its arithmetic in the test comment: **five** `df` counts, five
+  idfs, `hits`, `total`, `cov`, and the resulting boost. A literal copied from the plan's worked table
+  would pin an idf distribution the test corpus does not have.
+
+  **All five query terms must be in the test corpus' vocabulary.** A term missing from the index is
+  excluded from `total`, so a corpus that lacks `our` gives a four-term denominator and a boost that is
+  too high: a favourable case enshrined as the test. Write `our`, `what`, `is`, `q4` and `okrs` into the
+  test documents, and assert the literal is **below 1.5**, so a saturated corpus cannot pass.
+- The formula table above, with literals for all four rows.
+- `w = 0.0` reproduces the stored pre-change snapshot: same order, same `final`, every pre-existing
+  field identical. The new key is the only difference.
+- A title with no rare query term scores exactly 1.0. An empty query scores exactly 1.0.
+- A file-stem title `2024-12-01-redis-cache` gives boost 1.0 for the query `2024`.
+- The blend identity `relevance == (α·semantic + (1−α)·lexical) · title_boost` within `1e-12`.
+- The eval prints the number of title tokenizations it performed. Fixture: 24.
+
+**Handoff (paste):** "Implement phase 1 of M4C per `docs/m4c-breakdown.md` §3.1–§3.3 and §5. Query time
+only: no rebuild, no format bump. The boost is idf-weighted, computed once per document per query in
+`query()`, and indexed by `doc_index`. Update the two identity assertions and the property test's
+bounds; the goldens move. `w = 0` must reproduce the stored pre-change snapshot. Write the
+reproduction test first and show it failing on `main`. Comments in Simplified Technical English."
+
+**Accept:** gates green. The reproduction test passes. `w = 0` reproduces the old ranking and scores.
+The goldens move only in `scores.relevance`, `scores.final`, and the new `scores.title_boost`, and the
+top-3 order does not change.
+
+### Phase 2 — neutral metadata
+
+**Goal:** a document with an unknown type or status is not punished for it.
+
+**Files:** `src/config.rs` (`UNKNOWN_TYPE_AUTHORITY`, the doc comment), `src/score.rs` (both `current`
+rows), `src/document.rs` (the note prints the configured factor, not a literal), `src/vault/resolve.rs`
+(its `0.80` assertion), `janus.toml` (the comment on line 56), the goldens, `SPEC.md`.
+
+**Build (~40 logic lines):** unknown type `0.80 → 1.00`; unknown status `0.80 → 1.00` in **both**
+`current` rows. The type note keeps its number and reads `UNKNOWN_TYPE_AUTHORITY`, which lives in
+`config.rs` and is importable. The status note **drops** its number: the factor is a table cell in
+`score.rs`, and `document.rs` cannot import `score.rs` without a module cycle. Its new text says the
+status is treated as active for inclusion.
+
+**Tests (~120 lines):** the intent table's `unknown` cells at 1.0 for both rows; a document with an
+unknown type and status ranks as its relevance says; both notes still appear and agree with the code.
+
+**SPEC:** §6.3, §6.6 (two tables), §6.6.1, §9.2 — the four places that state 0.80.
+
+**Accept:** gates green. Goldens move only for documents whose type or status is unknown.
+
+### Phase 3 — measure, then decide
+
+**Goal:** the numbers decide whether cause 2 is worth fixing.
+
+**Files:** `docs/m4c-breakdown.md` §12, and code only if the numbers demand it.
+
+**Work:**
+
+1. Run the fixture eval at `w ∈ {0.0, 1.0}` and `α ∈ {0, 0.5}`, driven by the two env knobs. Record
+   `active top-1`, `nDCG@10`, and elapsed time.
+2. **Author-only, outside the PR gate:** run the three real queries against the 2 119-document corpus
+   and record the rank of the target document.
+3. If the target is still outside the top 5, write the smallest change that scores a document by more
+   than its best chunk, and record the number that justifies it.
+4. If it is inside the top 5, record that and close the question.
+
+**Accept:** the numbers are in §12 with the corpus named. The fixture eval must not fall below its M4
+value (α = 0: 0.9590; α = 0.5: 0.9694). A reviewer can re-run the fixture half; the real-corpus half is
+the author's, as in M3 and M4B.
+
+## 6. Cross-cutting
+
+- **Determinism.** No wall clock. The boost is a pure function of the query and the snapshot.
+- **No format change, no rebuild.**
+- **Explainable.** `title_boost` is reported beside the other factors.
+- **Small.** Two code PRs, both under 300 logic lines, plus one measurement.
+
+## 7. Definition of done
+
+1. A document whose title names the topic outranks ten short documents that mention it. The test
+   exists and failed before the change.
+2. `w = 0.0` reproduces the pre-change ranking and every pre-existing field.
+3. `relevance == (α·semantic + (1−α)·lexical) · title_boost` within `1e-12`, and the property test
+   bounds are `relevance ≤ 2.0`, `final ≤ 3.0`.
+4. An unknown type and an unknown status score 1.0 in both `current` rows, with their notes.
+5. The fixture eval does not fall below its M4 value at either α.
+6. No `format_version` change, no rebuild, no new dependency.
+7. Gates: fmt, clippy, tests, doc, Windows cross-check, `scripts/pr-size.sh`.
+8. **Milestone acceptance, by the author, outside the PR gate:** `search "what is our q4 okrs?"`
+   returns the Q4 plan draft in the top 5, and `search "q4-2026-plan-draft"` returns it first.
+
+## 8. PR plan and size budget
+
+| PR | Branch | Logic | Tests | Content |
+|---|---|---|---|---|
+| P1 | `m4c-title-boost` | ~220 | ~280 | the idf-weighted boost, the reported factor, the bounds, the reproduction test |
+| P2 | `m4c-neutral-metadata` | ~40 | ~120 | unknown type and status at 1.0, both rows, the notes, four SPEC places |
+| P3 | `m4c-measure` | ~0–80 | ~0–80 | the sweep knob, the measurement, a change only if the numbers demand it |
+
+## 9. SPEC corrections
+
+1. **§7.2** — `relevance` gains the title boost. State the idf-weighted formula and the default weight.
+2. **§7.2** — the hard bound becomes `final ≤ 1.5 · 1.0 · 1.0 · 2.0`. The property test asserts it.
+3. **§7.2** — a document is still scored by its best chunk; if phase 3 changes it, that lands then.
+4. **§6.6** — an unknown type is neutral (1.0), not 0.80. Replace the "fail-low" sentence with the reason.
+5. **§6.6** — an unknown status under `current` is neutral (1.0), not 0.80. Both rows.
+6. **§6.3, §6.6.1, §9.2** — the four other places that state 0.80.
+7. **§16.1** — the corpus config gains a `[scoring]` block with `title_boost`.
+8. **§9.4** — the `scores` example gains `title_boost`.
+9. **§11** — add M4C between M4B and M5.
+
+## 10. Implementation log — Phase 1
+
+_Nothing recorded yet._
+
+## 11. Implementation log — Phase 2
+
+_Nothing recorded yet._
+
+## 12. Implementation log — Phase 3
+
+_Nothing recorded yet._
