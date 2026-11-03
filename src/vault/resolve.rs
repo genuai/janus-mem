@@ -255,7 +255,7 @@ fn note_if_unknown_type(resolved: &ResolvedType<'_>, notes: &mut Vec<DocNote>) {
 ///
 /// An unrecognised value becomes [`Status::Unknown`] rather than the default:
 /// the file declared something, and pretending it said `active` would hide the
-/// typo that the 0.8× factor and the note exist to surface (§6.3).
+/// typo that the note exists to surface (§6.3).
 fn resolve_status(declared: Option<&str>, config: &Config, notes: &mut Vec<DocNote>) -> Status {
     let Some(raw) = declared.map(str::trim).filter(|value| !value.is_empty()) else {
         return config.defaults.status;
@@ -707,7 +707,7 @@ mod tests {
         let document = doc("a.md", &frontmatter("type: runbook\n"));
 
         assert_eq!(document.type_name, "runbook");
-        assert_eq!(document.type_spec.authority, 0.80);
+        assert_eq!(document.type_spec.authority, 1.0);
         assert_eq!(
             document.notes,
             [DocNote::UnknownType {

@@ -137,7 +137,7 @@ pub const INTENT_TABLE: [IntentPolicy; 5] = [
         intent: Intent::Current,
         include_superseded: false,
         decay: true,
-        statuses: &[(Active, 1.0), (Draft, 0.7), (Unknown, 0.8)],
+        statuses: &[(Active, 1.0), (Draft, 0.7), (Unknown, 1.0)],
     },
     IntentPolicy {
         intent: Intent::Current,
@@ -146,7 +146,7 @@ pub const INTENT_TABLE: [IntentPolicy; 5] = [
         statuses: &[
             (Active, 1.0),
             (Draft, 0.7),
-            (Unknown, 0.8),
+            (Unknown, 1.0),
             (Superseded, 1.0),
         ],
     },
@@ -462,7 +462,7 @@ pub fn rank_documents<'a>(
 ///
 /// A canonical fact type **and** declared status `active` — deliberately
 /// narrower than `current`'s gate, which admits `draft` (0.7×) and `unknown`
-/// (0.8×). A weight is not an inclusion rule. `--include-superseded` does not
+/// (1.0×). A weight is not an inclusion rule. `--include-superseded` does not
 /// reach this predicate, and the scope filter is applied separately.
 #[must_use]
 pub fn is_fact(doc: &ScoreDoc<'_>) -> bool {
@@ -654,11 +654,11 @@ mod tests {
     const TABLE: [Row; 5] = [
         (
             (Intent::Current, false, true),
-            [Some(1.0), Some(0.7), None, None, Some(0.8)],
+            [Some(1.0), Some(0.7), None, None, Some(1.0)],
         ),
         (
             (Intent::Current, true, true),
-            [Some(1.0), Some(0.7), None, Some(1.0), Some(0.8)],
+            [Some(1.0), Some(0.7), None, Some(1.0), Some(1.0)],
         ),
         (
             (Intent::History, false, false),
@@ -778,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn draft_and_unknown_are_the_documented_fractions_of_active() {
+    fn draft_is_a_fraction_of_active_and_unknown_is_neutral() {
         let active = score_doc(&doc(1, Status::Active));
         let draft = score_doc(&doc(1, Status::Draft));
         let unknown = score_doc(&doc(1, Status::Unknown));
@@ -786,7 +786,7 @@ mod tests {
         // 0.5 lexical * 1.5 authority * 1.0 factor * 0.5 decay = 0.375.
         assert!((active.final_score - 0.375).abs() < 1e-12);
         assert!((draft.final_score / active.final_score - 0.7).abs() < 1e-12);
-        assert!((unknown.final_score / active.final_score - 0.8).abs() < 1e-12);
+        assert!((unknown.final_score / active.final_score - 1.0).abs() < 1e-12);
     }
 
     #[test]
@@ -891,7 +891,8 @@ mod tests {
     fn status_is_an_inclusion_rule_not_a_zero_weight() {
         let docs = all_statuses();
 
-        // current: 1.0*1.5*0.5 = 0.75, 0.8*1.5*0.5 = 0.6, 0.7*1.5*0.5 = 0.525.
+        // current: 1.0*1.5*0.5 = 0.75 for active and unknown, 0.7*1.5*0.5 =
+        // 0.525 for draft. Active wins the tie on chunk id.
         assert_eq!(
             statuses_ranked(Intent::Current, false, &docs),
             vec![Status::Active, Status::Unknown, Status::Draft]

@@ -164,8 +164,10 @@ and a factor that cannot change an order must not inflate a reported score.
 | unknown type | ×0.80 | **×1.00** |
 | unknown status under `current` | ×0.80 | **×1.00** |
 
-Both notes stay, and their text must print the factor the code used, not a literal. An unknown type is
-not evidence of low authority; it is evidence of a vocabulary the config has not seen.
+Both notes stay. The type note prints `UNKNOWN_TYPE_AUTHORITY`, so its text follows the code. The
+status note states that an unknown status is treated as active for inclusion, because `document.rs`
+cannot read the table cell in `score.rs` without a module cycle. An unknown type is not evidence of
+low authority; it is evidence of a vocabulary the config has not seen.
 
 The intent table has **two** `current` rows, one with and one without `--include-superseded`. Both
 change, or the flag keeps punishing an unknown status.

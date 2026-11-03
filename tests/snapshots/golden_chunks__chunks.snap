@@ -156,11 +156,11 @@ expression: json
       "notes": [
         {
           "code": "unknown_type",
-          "message": "unknown type `speculative`; using the fallback weight 0.80"
+          "message": "unknown type `speculative`; using the fallback weight 1.00"
         },
         {
           "code": "unknown_status",
-          "message": "unknown status `frozen`; using the fallback factor 0.8"
+          "message": "unknown status `frozen`; treated as active for inclusion"
         }
       ],
       "rel_path": "notes/2025-03-05-unknown-type.md",

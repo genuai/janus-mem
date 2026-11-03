@@ -99,9 +99,11 @@ pub const ALWAYS_EXCLUDED_DIRS: [&str; 9] = [
 /// (exit 4), not a skip.
 pub const FORBIDDEN_DIRS: [&str; 2] = [JANUS_DIR, ".git"];
 
-/// Authority applied to a type that is not in the registry (§6.6.1):
-/// fail-low, never fail-silent.
-pub const UNKNOWN_TYPE_AUTHORITY: f64 = 0.80;
+/// Authority applied to a type that is not in the registry (§6.6.1).
+///
+/// `1.00` is neutral, not fail-low. A new vault is made of unlisted words, so
+/// an unlisted type is evidence of a new vocabulary, not of low authority.
+pub const UNKNOWN_TYPE_AUTHORITY: f64 = 1.0;
 
 /// The shipped example config, written by `janus init` and shipped at the repo
 /// root (§8.1).
