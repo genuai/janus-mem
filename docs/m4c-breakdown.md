@@ -164,8 +164,10 @@ and a factor that cannot change an order must not inflate a reported score.
 | unknown type | ×0.80 | **×1.00** |
 | unknown status under `current` | ×0.80 | **×1.00** |
 
-Both notes stay, and their text must print the factor the code used, not a literal. An unknown type is
-not evidence of low authority; it is evidence of a vocabulary the config has not seen.
+Both notes stay. The type note prints `UNKNOWN_TYPE_AUTHORITY`, so its text follows the code. The
+status note states that an unknown status is treated as active for inclusion, because `document.rs`
+cannot read the table cell in `score.rs` without a module cycle. An unknown type is not evidence of
+low authority; it is evidence of a vocabulary the config has not seen.
 
 The intent table has **two** `current` rows, one with and one without `--include-superseded`. Both
 change, or the flag keeps punishing an unknown status.
@@ -371,7 +373,26 @@ test count includes the new 127-line pre-boost snapshot; the budget excludes Mar
 
 ## 11. Implementation log — Phase 2
 
-_Nothing recorded yet._
+**Status: implemented.** Logic 38 lines, tests 191 lines, 229 total (`scripts/pr-size.sh`).
+
+| # | Decision | Why | Where |
+|---|---|---|---|
+| P2-1 | The status note states the inclusion rule, not a factor | The factor is a table cell in `score.rs`, and `document.rs` cannot import it without a module cycle. §3.3 said both notes print the factor; that holds for the type note only | §3.3, `src/document.rs` |
+| P2-2 | The type note formats `UNKNOWN_TYPE_AUTHORITY` with two decimals | `1.00` keeps the old note's shape and still follows the constant if it changes | `src/document.rs` |
+| P2-3 | The note text moves only the scan and chunks goldens | No search golden result carries the fixture's unknown-metadata document, so the ranking goldens are unchanged | `tests/snapshots/` |
+| P2-4 | The doc comments that stated `0.8` move with the table: `is_fact` and the facts module | A stale number in a doc comment contradicts the code it describes | `src/score.rs`, `src/search/facts.rs` |
+
+**Evidence.**
+
+| Claim | Evidence |
+|---|---|
+| The reproduction failed before the change | `assert_eq!(unknown.scores.status_factor, 1.0)` saw `0.8`; the status note still said `using the fallback factor 0.8` |
+| The reproduction passes after | `an_unknown_type_and_status_rank_as_their_relevance_says` |
+| Unknown type and status are 1.0 in both `current` rows | The 25-cell table test; both `current` rows changed |
+| The unknown document outranks a plain note | The two documents have equal relevance and decay; `final` ratio is `1.00 / 0.90 = 1.111…` |
+| Both notes still appear and agree with the code | `both_unknown_metadata_notes_state_the_rule_the_code_uses`, plus the scan and chunks goldens |
+| No ranking golden moved | Only the two note messages changed in `golden_scan` and `golden_chunks`; both search goldens are unchanged |
+| No format change | `format_version` untouched; no rebuild is required |
 
 ## 12. Implementation log — Phase 3
 

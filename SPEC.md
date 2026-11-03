@@ -251,7 +251,7 @@ Rules:
 - Each result records the *source* of its date — `frontmatter | filename | filename_month | filename_year | folder | folder_month | folder_year | absent` — and surfaces it in responses so the agent can judge confidence (§9.4). The source also carries the precision, so one field answers "where" and "how exact".
 - A month date is anchored on the first day of its month, a year date on the first day of its year. A document with no date has no anchor: its decay factor is `1.0`, so it never loses score for age and is treated as always current.
 - `effective_from` / `effective_to` are optional valid-time keys with their own semantics (§6.10). They never fall back to mtime; if absent, the window is derived from `date` and the supersession chain. A document with no date at all has no trustworthy valid time and is excluded from `as_of` queries with a `no_validity` note.
-- Unknown `status` is not an error: it maps to `status: unknown` and gets the 0.8× gate factor plus a `doctor` note. Unknown `type` keeps its name (types are an open registry, §6.6.1) and gets the fallback weight 0.80 plus a `doctor` note. Fail-open on read, fail-closed on write.
+- Unknown `status` is not an error: it maps to `status: unknown` and gets a neutral 1.0× gate factor plus a `doctor` note. Unknown `type` keeps its name (types are an open registry, §6.6.1) and gets the neutral fallback weight 1.00 plus a `doctor` note. Fail-open on read, fail-closed on write.
 - Files with no frontmatter are fully supported and are **never** mutated to add one unless the user explicitly calls `write_document` with frontmatter for that path.
 - `doctor` reports: duplicate `id`, missing dates, `supersedes` targets that don't exist, broken chains (A superseded_by B, B superseded_by C but C doesn't supersede B), and `superseded_by` without a reciprocal `supersedes`.
 
@@ -360,7 +360,7 @@ Authority is a multiplier applied after relevance, derived from `type` and `stat
 | `journal` | 1.00 | Baseline, personal, provisional |
 | `note` | 0.90 | Unclassified |
 | `idea` | 0.85 | A proposal or speculation. Lowest bindingness; often short-lived |
-| unknown type | 0.80 | Fail-low, not fail-silent |
+| unknown type | 1.00 | Neutral. A new vault is made of unlisted words, so an unlisted type is new vocabulary, not low authority |
 
 Status gate (before scoring):
 
@@ -370,7 +370,7 @@ Status gate (before scoring):
 | `draft` | ✅ (0.7×) | ✅ | ❌ | ✅ |
 | `deprecated` | ❌ | ✅ | ✅ | ✅ |
 | `superseded` | ❌ | ✅ | ✅ | ✅ |
-| `unknown` | ✅ (0.8×) | ✅ | ✅ | ✅ |
+| `unknown` | ✅ (1.0×) | ✅ | ✅ | ✅ |
 
 `exhaustive` is the debug/audit intent: every status is included, every status
 factor is 1.0, and there is no decay. A status absent from a row is *excluded*,
@@ -408,7 +408,7 @@ idea = 90
 
 **Types encode behavior; tags encode genre.** A type earns its place only if it needs a different authority weight, decay, or lifecycle. `report` and `proposal` are genres: `proposal` is an alias for `idea`, and `report` is an alias for `finding` plus a `report` tag. If reports turn out to be systematically derivative and should rank below primary evidence, that is a behavioral difference and justifies a real config entry (`[authority] report = 1.05`, `[decay.by_type] report = 120`) — no release required.
 
-The Rust side resolves each type once into a `TypeSpec { authority, timeless, half_life_days }` at config load and passes it to the scorer. Unknown types get weight 0.80, the global half-life, and a `doctor` note — never a hard failure. `type` never influences identity (§6.4).
+The Rust side resolves each type once into a `TypeSpec { authority, timeless, half_life_days }` at config load and passes it to the scorer. Unknown types get the neutral weight 1.00, the global half-life, and a `doctor` note — never a hard failure. `type` never influences identity (§6.4).
 
 ### 6.7 Supersession
 
@@ -1085,7 +1085,7 @@ Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash,
 | `get_authoritative_facts` | `query?`, `tags?`, `types?`, `scope?`, `limit?` | Active decisions/specs/principles only |
 | `read_document` | `path`, `max_chars?`, `chunk_id?` | Frontmatter as JSON + body (or a specific chunk's span) |
 
-`authoritative_facts` uses its own **active-only inclusion rule** — canonical type in {`decision`, `spec`, `principle`} and declared status `active`, no decay, status factor 1.0 — and not the `current` intent's gate, which admits `draft` (0.7×) and `unknown` (0.8×). A weight is not an inclusion rule.
+`authoritative_facts` uses its own **active-only inclusion rule** — canonical type in {`decision`, `spec`, `principle`} and declared status `active`, no decay, status factor 1.0 — and not the `current` intent's gate, which admits `draft` (0.7×) and `unknown` (1.0×). A weight is not an inclusion rule.
 
 Plus `janus_status` (read-only, no params): index freshness, doc/chunk counts, embedder, vault root, whether writes are enabled. Cheap, and it stops agents from guessing.
 

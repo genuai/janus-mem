@@ -53,7 +53,7 @@ proposal = "idea"
 
 [authority]
 # Canonical type -> multiplier applied after relevance. Merged over defaults.
-# An unlisted type gets 0.80 (fail-low, never fail-silent).
+# An unlisted type is neutral at 1.00, not fail-low.
 decision = 1.50
 spec = 1.35
 principle = 1.20

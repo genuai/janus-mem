@@ -3,7 +3,7 @@
 //! The predicate is an **inclusion rule**, not the `current` gate: a document is
 //! a fact when its canonical type is `decision`, `spec` or `principle` *and* its
 //! declared status is `active`. `current` admits `draft` (0.7×) and `unknown`
-//! (0.8×), so reusing it would surface draft specifications as authoritative
+//! (1.0×), so reusing it would surface draft specifications as authoritative
 //! facts; a weight is not an inclusion rule (§3.6).
 //!
 //! No decay and no status factor: every included document has factor 1.0 and is

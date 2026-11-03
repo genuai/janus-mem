@@ -20,7 +20,7 @@ use std::time::SystemTime;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
-use crate::config::TypeSpec;
+use crate::config::{TypeSpec, UNKNOWN_TYPE_AUTHORITY};
 use crate::id::{Blake3Hash, DocId};
 
 /// One parsed Markdown document and everything the scan resolved about it.
@@ -224,7 +224,7 @@ impl fmt::Display for DateSource {
 ///
 /// Modelled as an enum because only these five values change behaviour. An
 /// unrecognised value is not an error — it becomes [`Status::Unknown`] with a
-/// 0.8× gate factor and a doctor note, so one typo cannot hide a document.
+/// neutral gate factor and a doctor note, so one typo cannot hide a document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Status {
     /// Current and in force.
@@ -323,7 +323,7 @@ impl fmt::Display for IdentityTier {
 /// the serious ones into warnings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocNote {
-    /// The declared type is not in the registry; weighted 0.80 (§6.6.1).
+    /// The declared type is not in the registry; weighted at the neutral fallback (§6.6.1).
     UnknownType {
         /// The name as declared.
         value: String,
@@ -421,10 +421,12 @@ impl DocNote {
     pub fn message(&self) -> String {
         match self {
             Self::UnknownType { value } => {
-                format!("unknown type `{value}`; using the fallback weight 0.80")
+                format!(
+                    "unknown type `{value}`; using the fallback weight {UNKNOWN_TYPE_AUTHORITY:.2}"
+                )
             }
             Self::UnknownStatus { value } => {
-                format!("unknown status `{value}`; using the fallback factor 0.8")
+                format!("unknown status `{value}`; treated as active for inclusion")
             }
             Self::InvalidScope { value } => {
                 format!("invalid scope `{value}`; falling back to `global`")
