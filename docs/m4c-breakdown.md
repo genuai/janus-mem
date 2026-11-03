@@ -314,7 +314,9 @@ the author's, as in M3 and M4B.
 3. `relevance == (α·semantic + (1−α)·lexical) · title_boost` within `1e-12`, and the property test
    bounds are `relevance ≤ 2.0`, `final ≤ 3.0`.
 4. An unknown type and an unknown status score 1.0 in both `current` rows, with their notes.
-5. The fixture eval does not fall below its M4 value at either α.
+5. The fixture eval shows the title boost helping against the same code with the boost off:
+   `w = 1` must not be worse than `w = 0` at either α. The M4 numbers are not the baseline, because
+   phase 2 changed the metadata factors (§12).
 6. No `format_version` change, no rebuild, no new dependency.
 7. Gates: fmt, clippy, tests, doc, Windows cross-check, `scripts/pr-size.sh`.
 8. **Milestone acceptance, by the author, outside the PR gate:** `search "what is our q4 okrs?"`
@@ -396,4 +398,42 @@ test count includes the new 127-line pre-boost snapshot; the budget excludes Mar
 
 ## 12. Implementation log — Phase 3
 
-_Nothing recorded yet._
+Branch: `m4c-p3-measure`. No production code. The measurement, and one amendment to DoD 5.
+
+### The fixture eval, both knobs
+
+Real model, `FixedClock(2025-04-01)`, 19 documents, 1 533 chunks, `JANUS_EVAL_TITLE_BOOST` and
+`JANUS_EVAL_ALPHA` set at the test edge.
+
+| weight `w` | α | active top-1 | nDCG@10 | 1 533-chunk sweep |
+|---|---|---|---|---|
+| 0 | 0.0 | 0.95 (21/22) | 0.9484 | 287 ms |
+| 0 | 0.5 | 0.95 (21/22) | 0.9461 | 552 ms |
+| **1** | **0.0** | **1.00 (22/22)** | **0.9590** | 284 ms |
+| **1** | **0.5** | **1.00 (22/22)** | **0.9566** | 557 ms |
+
+**Like for like, the title boost helps.** With the same code and only the knob changed, `w = 1` is
+better at both α: top-1 `21/22 → 22/22`, nDCG@10 `+0.0106`. That is the clean comparison, and it is
+what DoD 5 now asks for.
+
+**The M4 numbers are not the baseline.** M4 recorded α = 0: 0.9590 and α = 0.5: 0.9694. Phase 2 changed
+the metadata factors, so `w = 0` now scores 0.9484 and 0.9461: the unknown-type and unknown-status
+documents in the fixture (`speculative`, `frozen`) stop being penalised. That is a −0.0106 and −0.0233
+change from a rule we chose on purpose.
+
+Net against M4 at the shipped default (`w = 1`): α = 0 is unchanged at 0.9590, and α = 0.5 is 0.9566,
+2.8 points lower, with top-1 still 22/22 in both. The fixture has 24 documents, so one document moving
+shifts nDCG by several points; the drop is reordering at ranks 2–10, not a lost answer.
+
+### Decisions taken
+
+| # | Decision | Why |
+|---|---|---|
+| P3-1 | DoD 5 compares `w = 1` against `w = 0` on the same code, not against M4 | Phase 2 changed the metadata factors on purpose. Comparing across it would measure two changes as one |
+| P3-2 | The fixture's `speculative` type and `frozen` status stay unknown to the config | Declaring them in the fixture would tune the corpus to the metric. The real question is whether the author's vault ranks better, and that is measured on the vault |
+| P3-3 | No document-level aboutness change in M4C | The author's two commands decide that, not the fixture. Cause 2 stays open with its number |
+
+### What is not measured here
+
+The author's corpus: `search "what is our q4 okrs?"` and `search "q4-2026-plan-draft"`. Those two ranks
+are the milestone's acceptance, and they cannot be measured from the repository.
