@@ -404,7 +404,7 @@ chunk. Tests use a counting embedder and assert the values, never the text.
 | D-15 | What `passes` reports on `--dry-run` | **`0`.** No pass ran: a dry run plans once and writes nothing. A receipt that claimed one pass would describe a build that did not happen | `cmd.rs` |
 | D-16 | Who prints the incomplete line | **`build_until_stable` itself.** Both writers reach this one function, and a caller-side flag would let one of them forget the line | `store.rs` |
 | D-17 | Already-resolved documents in the writer | **Resolved only when they are needed.** `PATHS` resolves the walk to find the `DocId`s it forces; a plain write resolves once, inside the loop. A second resolve of the same walk would read every file twice | `cmd.rs`, `refresh.rs` |
-| D-18 | Does P1 split at the 450-line seam | **No.** P1 lands at 543 logic lines and 659 test lines: under the 600 ceiling. The seam would put the digest in one PR and the writer that stores it in the next, so the first PR would have no behaviour a test can see | — |
+| D-18 | Does P1 split at the 450-line seam | **No.** P1 lands at 559 logic lines and 686 test lines: under the 600 ceiling. The seam would put the digest in one PR and the writer that stores it in the next, so the first PR would have no behaviour a test can see | — |
 
 ## 5. Phases
 
@@ -697,7 +697,7 @@ Two decisions are agreed and belong to the temporal milestone, not to M4D:
 - **Not in this phase.** No refresh on read, no `refresh:` line, no `try_acquire`,
   no `Check`/`Mismatch`, no progress sink or flag, no `Expected::check` change, no
   payload or `format_version` change, no new dependency.
-- **Size.** 543 logic lines and 659 test lines. The 450-line split seam was not
+- **Size.** 559 logic lines and 686 test lines. The 450-line split seam was not
   used, for the reason in D-18.
 
 ## 12. Implementation log — Phase 2
