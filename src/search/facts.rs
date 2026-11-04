@@ -31,6 +31,7 @@ use std::time::Instant;
 use crate::clock::Clock;
 use crate::config::Config;
 use crate::error::JanusError;
+use crate::graph::EffectiveStatus;
 use crate::index::embed::Embedder;
 use crate::score::{self, Intent, ScoreDoc, ScoreInput, ScoredDoc};
 
@@ -132,7 +133,7 @@ pub fn run(
         let included = if fallback {
             policy.includes(row.status)
         } else {
-            score::is_fact(&row.score_doc())
+            score::is_fact(&row.score_doc(), EffectiveStatus::from(row.status))
         };
         included && filter.matches(row)
     });
@@ -246,6 +247,7 @@ fn rank(
                     lexical,
                     semantic: 0.0,
                     intent,
+                    effective_status: EffectiveStatus::from(docs[doc_index].status),
                     alpha: 0.0,
                     // A boost cannot change an authority-ordered list, so
                     // reporting one would only inflate `relevance` (§3.2).
@@ -335,6 +337,7 @@ mod tests {
         // `current` gate admits draft/unknown besides it (§3.6).
         use crate::config::TypeSpec;
         use crate::document::Status;
+        use crate::graph::EffectiveStatus;
         use crate::id::DocId;
 
         let spec = TypeSpec {
@@ -354,7 +357,12 @@ mod tests {
                 scope: "global",
                 shared_with: &[],
             };
-            assert_eq!(score::is_fact(&doc), status == Status::Active, "{status}");
+            let effective = EffectiveStatus::from(status);
+            assert_eq!(
+                score::is_fact(&doc, effective),
+                status == Status::Active,
+                "{status}"
+            );
             assert_eq!(
                 score::policy(Intent::Current, false).includes(status),
                 status != Status::Deprecated && status != Status::Superseded,
