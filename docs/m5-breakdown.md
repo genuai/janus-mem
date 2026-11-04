@@ -1507,6 +1507,11 @@ derivation, then the eligibility gate and the flag.
   `bad/one-sided.md` and `bad/status-lies.md` are reported.
 - **Deviations.** Cases 10.2, 10.3 and 10.8 were recomputed against the committed
   fixtures (M5-41, M5-43). The code table and the exit rule are unchanged.
+- **Size and split.** Measured as one change, the phase was 563 logic lines, over
+  the 420-line split threshold. It ships as two PRs at the seam of §5: part 1 is
+  the report and scan half (357 logic, 115 test lines against `main`); part 2 is
+  the graph half (206 logic, 314 test lines against part 1). Each is under the
+  ceiling.
 - **Not included.** `moves`, `suggest-links`, quarter dates, the undated decay,
   and any repair or write. No golden moved, no dependency was added, and
   `format_version` stays 5.
