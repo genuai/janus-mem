@@ -66,8 +66,10 @@ applies `--limit` to documents — a document with ten good chunks appears once.
 ownership, and `--types`/`--tags` filter on persisted metadata. `--json` carries the
 path, span, breadcrumb and full score breakdown (`lexical`, `relevance`,
 `type_authority`, `status_factor`, `authority`, `decay`, `final`) and never chunk
-text. A read auto-builds a missing index and rebuilds a stale one, printing one
-`stale: <cause>` line to stderr.
+text. A read auto-builds a missing index, refreshes a changed one, and prints one
+`refresh: <what>` line to stderr. A format, tokenizer, chunker, corpus or embedder
+mismatch refuses with one line that names `janus index`, because only a cold build
+cures it. `--no-rebuild` reads the generation it has and says it skipped.
 
 The index records a digest of the corpus it was built from (the sorted path, size
 and mtime of every file), so `--json` answers `index: {"stale": true}` when the
