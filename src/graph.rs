@@ -98,6 +98,15 @@ impl Node {
     }
 }
 
+/// One node of a rendered chain: its id and its depth below a root (§3.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainNode {
+    /// The document this row describes.
+    pub id: DocId,
+    /// 0 at a root, one more per edge below it.
+    pub depth: u32,
+}
+
 /// The resolved graph for one generation.
 #[derive(Debug, Clone, Default)]
 pub struct Graph {
@@ -280,6 +289,113 @@ impl Graph {
     #[must_use]
     pub fn inert(&self) -> &BTreeSet<Pair> {
         &self.inert
+    }
+
+    /// The node that occupies one vault-relative path, live or retired.
+    ///
+    /// A path can be held twice: by the file on disk, and by the tombstone of a
+    /// document whose last path it was (§2.1). The path names the live document,
+    /// so a live endpoint wins and a retired one answers only when no live
+    /// document holds it. The scan is over ids, so without that rule the answer
+    /// would depend on which of the two ids happens to hash lower.
+    #[must_use]
+    pub fn by_path(&self, rel_path: &str) -> Option<DocId> {
+        let mut retired = None;
+        for endpoint in self.endpoints.values() {
+            let facts = endpoint.facts();
+            if facts.rel_path != rel_path {
+                continue;
+            }
+            match endpoint {
+                Endpoint::Live(_) => return Some(facts.id),
+                Endpoint::Retired(_) => retired.get_or_insert(facts.id),
+            };
+        }
+        retired
+    }
+
+    /// The chain that contains one node: every root above it, then every node
+    /// below those roots, ordered by `(depth, path)` (§3.9). A root replaced
+    /// nothing, so it has no predecessors.
+    ///
+    /// `depth` is 0 at a root and one more per edge below it. The breadth-first
+    /// walk gives every node its smallest depth, so a node reachable by two
+    /// paths appears once. The visited set is not an optimisation: it caps the
+    /// walk at one visit per node, so a graph the cycle breaker could not make
+    /// acyclic still terminates.
+    #[must_use]
+    pub fn chain(&self, from: DocId) -> Vec<ChainNode> {
+        if !self.nodes.contains_key(&from) {
+            return Vec::new();
+        }
+
+        // 1. Every node reachable backwards from `from`, `from` included.
+        let mut seen: BTreeSet<DocId> = BTreeSet::from([from]);
+        let mut stack = vec![from];
+        while let Some(id) = stack.pop() {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            for predecessor in &node.predecessors {
+                if seen.insert(*predecessor) {
+                    stack.push(*predecessor);
+                }
+            }
+        }
+
+        // 2. The roots of that set. Each of them replaced nothing, so a chain
+        //    starts at all of them at depth 0.
+        let mut roots: Vec<DocId> = seen
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.nodes
+                    .get(id)
+                    .is_some_and(|node| node.predecessors.is_empty())
+            })
+            .collect();
+        roots.sort_unstable();
+
+        // 3. Forwards from every root. The first visit wins, so one depth per
+        //    node and one visit per node.
+        let mut queue: std::collections::VecDeque<(DocId, u32)> =
+            roots.iter().map(|id| (*id, 0)).collect();
+        let mut depth: BTreeMap<DocId, u32> = roots.iter().map(|id| (*id, 0)).collect();
+        while let Some((id, level)) = queue.pop_front() {
+            let Some(node) = self.nodes.get(&id) else {
+                continue;
+            };
+            for successor in &node.successors {
+                if depth.contains_key(successor) {
+                    continue;
+                }
+                let below = level.saturating_add(1);
+                depth.insert(*successor, below);
+                queue.push_back((*successor, below));
+            }
+        }
+
+        // `(depth, path)` is the contract's order. The id breaks a tie, which
+        // only two nodes sharing one path could make, and keeps the order total.
+        let mut ordered: Vec<(u32, String, DocId)> = depth
+            .into_iter()
+            .map(|(id, level)| {
+                let path = self
+                    .endpoint(id)
+                    .map_or_else(String::new, |endpoint| endpoint.facts().rel_path.clone());
+                (level, path, id)
+            })
+            .collect();
+        ordered.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        ordered
+            .into_iter()
+            .map(|(level, _, id)| ChainNode { id, depth: level })
+            .collect()
     }
 }
 
@@ -1011,6 +1127,109 @@ mod tests {
         assert_eq!(
             status_of(&chain(), 5, &scopes(&[])),
             Some(EffectiveStatus::Active)
+        );
+    }
+
+    /// The diamond of P4 scope 10: `a` is replaced by `b` and by `c`, and both
+    /// are replaced by `d`.
+    ///
+    /// ```text
+    /// a -> b -> d
+    /// a -> c -> d
+    /// ```
+    fn diamond() -> Graph {
+        let edges = [edge(1, 2), edge(1, 3), edge(2, 4), edge(3, 4)];
+        let endpoints = [
+            live(1, "a.md", "global", &[]),
+            live(2, "b.md", "global", &[]),
+            live(3, "c.md", "global", &[]),
+            live(4, "d.md", "global", &[]),
+        ];
+        Graph::build(&edges, endpoints, false)
+    }
+
+    #[test]
+    fn case_9_1_the_chain_renders_root_first() {
+        // The graph fixture chain by hand: five links, each replacing the one
+        // before. Asking from the last link gives a root at depth 0, one node
+        // per edge below it, and `cache-returns` itself at depth 4.
+        let graph = chain();
+        let rendered = graph.chain(id(5));
+        assert_eq!(
+            rendered
+                .iter()
+                .map(|node| (node.depth, node.id))
+                .collect::<Vec<_>>(),
+            [(0, id(1)), (1, id(2)), (2, id(3)), (3, id(4)), (4, id(5))]
+        );
+    }
+
+    #[test]
+    fn case_9_2_asking_from_the_root_renders_the_same_chain() {
+        // `adopt-postgres` replaced nothing, so it is the root and the chain
+        // below it is the chain above the last link: the same five nodes.
+        assert_eq!(chain().chain(id(1)), chain().chain(id(5)));
+    }
+
+    #[test]
+    fn a_reused_path_resolves_to_the_live_document() {
+        // A path can be held twice: by the live file, and by the tombstone of a
+        // document whose last path it was. Both id orders are tried, so the
+        // answer cannot depend on which of the two ids sorts lower.
+        for (live_id, retired_id) in [(2, 1), (1, 2)] {
+            let endpoints = [
+                live(live_id, "notes/a.md", "global", &[]),
+                Endpoint::Retired(facts(retired_id, "notes/a.md", "global", &[])),
+            ];
+            let graph = Graph::build(&[], endpoints, false);
+            assert_eq!(
+                graph.by_path("notes/a.md"),
+                Some(id(live_id)),
+                "the live document owns the path: live id {live_id}, retired id {retired_id}"
+            );
+        }
+        // A path only a tombstone holds still answers, which is what case 9.9
+        // renders.
+        let graph = Graph::build(
+            &[],
+            [Endpoint::Retired(facts(3, "notes/gone.md", "global", &[]))],
+            false,
+        );
+        assert_eq!(graph.by_path("notes/gone.md"), Some(id(3)));
+        assert_eq!(graph.by_path("notes/never.md"), None);
+    }
+
+    #[test]
+    fn a_diamond_renders_every_node_once() {
+        // Both branches sit at depth 1 and `d` at depth 2, because the walk
+        // takes the smallest distance from a root. A walk that did not carry a
+        // visited set would reach `d` twice here, and would never stop on a
+        // cycle the breaker could not remove.
+        let graph = diamond();
+        let expected = [(0, id(1)), (1, id(2)), (1, id(3)), (2, id(4))];
+        let rendered: Vec<(u32, DocId)> = graph
+            .chain(id(1))
+            .iter()
+            .map(|node| (node.depth, node.id))
+            .collect();
+        assert_eq!(rendered, expected);
+        assert_eq!(
+            graph
+                .chain(id(4))
+                .iter()
+                .map(|node| (node.depth, node.id))
+                .collect::<Vec<_>>(),
+            expected,
+            "a leaf sees the same diamond, root first"
+        );
+        assert_eq!(
+            graph
+                .chain(id(2))
+                .iter()
+                .map(|node| (node.depth, node.id))
+                .collect::<Vec<_>>(),
+            expected,
+            "the sibling branch is part of the chain"
         );
     }
 }
