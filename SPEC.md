@@ -266,7 +266,7 @@ Two mechanisms, in this order:
 
 Match keys, in order. The first key that yields exactly one unmatched candidate wins; two or more candidates is ambiguous and falls through to the next key. Never merge.
 
-Match keys 3–5 are namespaced: `corpus_id ‖ scope ‖ title ‖ date`, where `scope` defaults to `global` (§6.12). Keys 1–2 are already globally unique and are not namespaced. Consequences:
+Match keys 3–5 are namespaced: `corpus_id ‖ scope ‖ title ‖ date`, where `scope` defaults to `global` (§6.12). Keys 1–2 are already globally unique and are not namespaced in their encoding. The namespace qualifies the *candidate set* for every key, keys 1–2 included: a candidate in another scope is never a match, so a scope change is a re-key and not a move. Consequences:
 
 - Identical documents in different corpora cannot collide.
 - `Q4 plan` in `org:acme` and `Q4 plan` in `org:beta` cannot collide.

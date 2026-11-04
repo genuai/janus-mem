@@ -438,7 +438,7 @@ prints one row with `retired: true` and the last known title.
 | 1.1 | index; edit the body of `notes/flow-mapping.md`; index | same `DocId`; `identity` key unchanged; one `PathEntry` |
 | 1.2 | index; change `title:` in `decisions/2025-02-01-cache-revisited.md`; index | same `DocId`; `tier` stays `title_date`; the stored keys are refreshed to the new title, so a later move still matches (M5-25) |
 | 1.3 | move `notes/flow-mapping.md` to `notes/flow.md` unchanged; index | same `DocId`; `tier` = `content_hash`; two `PathEntry`s, the first not a tombstone |
-| 1.4 | move `decisions/2024-11-02-postgres-cache.md` to `decisions/postgres.md`, edit its body only; index | same `DocId`; `tier` = `title_date`; the alias map maps the old path to the same id |
+| 1.4 | move `decisions/2024-11-02-postgres-cache.md` to `decisions/postgres.md`, edit its body only; index | same `DocId`; `tier` = `title_date`; `path_history` holds both paths, oldest first (the alias map is P2's) |
 | 1.5 | move a document and change both title and date; index | new `DocId`; the old id is a tombstone; one `Hint` (P6) |
 | 1.6 | copy a document byte-identically to a second path; index | two `DocId`s; the copy falls through to `rel_path`; `duplicate_identity` note on the key |
 | 1.7 | delete `.janus/`; index | ids identical to case 1.3's *unmoved* set; the moved document may churn |
@@ -904,6 +904,7 @@ in the corpus, instead of by `1.0`.
 | M5-24 | The three new tables store text, not `StringId` | `alias_map` must return paths as text, and a pool handle would make every reader of the tables depend on the interned pool. The tables are cache-sized, not chunk-sized, so the duplication is small and it removes one coupling. |
 | M5-25 | `tier` is the rung that carried or matched the id; the record's keys are refreshed on every build | §3.1 step 4 refreshes the keys, so a later move matches the title the document has now. A path-stable document keeps its tier (case 1.2); a move reports the matching rung (case 1.3), which is what makes the content-hash rung visible. |
 | M5-26 | Case 1.15 tests a removal, not a move | A move tombstones nothing (R-7): the id follows the document to its new path. Only a document that leaves the corpus retires, so only a removal can exercise the cleared flag. |
+| M5-27 | Scope qualifies every match key, including rungs 1 and 2 | A scope change is a re-key, not a move (§6.12 rule 5), so the id is not reported as `inherited`, and P6 does not report it as a confirmed move. The declared-id and content-hash id *values* are unaffected: only the candidate set is narrowed. §6.4's "keys 1–2 are not namespaced" describes the encoding, not the match. |
 
 ## 5. Phases
 
@@ -1238,6 +1239,9 @@ These amendments ship in the phase that owns them. Each is in the same PR as the
     `path_history`, and that the row still closes its predecessor's window and still renders
     in `lineage`. (P1.)
 
+14. **§6.4 namespacing.** Add that the `corpus_id ‖ scope` namespace enters the *encoding*
+    of rungs 3–5, and that scope still qualifies the candidate set for every rung, rungs 1
+    and 2 included. A scope change is a re-key, not a move (M5-27). (P1.)
 ## 10. Handoff to M6
 
 - `lineage`, `doctor`, `ids`, `moves` and `suggest-links` are core functions with DTOs in the
@@ -1265,8 +1269,8 @@ readers and `janus ids`. Both are gated and within budget.
 - **`format_version` 4.** The snapshot carries the three tables, so an older
   index is rebuilt once with the usual warning.
 - **Deviations.** M5-24 (text, not `StringId`), M5-25 (`tier` and the refreshed
-  keys), M5-26 (case 1.15 is a removal). `alias_map` moves to P2, its first
-  reader.
+  keys), M5-26 (case 1.15 is a removal), M5-27 (scope qualifies every match key).
+  `alias_map` moves to P2, its first reader.
 - **A new reader entry point.** `store::validated_snapshot` loads the published
   generation under `Policy::Refuse`, so `scan`, `chunks` and `ids` resolve
   against it without a lock, a build or a write.
