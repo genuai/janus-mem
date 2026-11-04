@@ -129,6 +129,15 @@ pub enum JanusError {
         path: PathBuf,
     },
 
+    /// A `--topic` query returned no `current` result, so there is no document
+    /// whose chain could be rendered. Not an error in the corpus: the query is
+    /// the subject, and the message repeats it verbatim.
+    #[error("lineage --topic {topic:?} matched no current document")]
+    TopicNotFound {
+        /// The query text as the user supplied it.
+        topic: String,
+    },
+
     /// A file could not be written.
     #[error("failed to write {path}")]
     Write {
@@ -207,6 +216,7 @@ impl JanusError {
             | Self::VaultNotFound { .. }
             | Self::PathResolve { .. }
             | Self::DocumentNotInCorpus { .. }
+            | Self::TopicNotFound { .. }
             | Self::ChangedDuringRead { .. }
             | Self::ConfigMissing { .. }
             | Self::ConfigRead { .. }

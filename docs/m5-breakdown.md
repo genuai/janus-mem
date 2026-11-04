@@ -724,7 +724,8 @@ the top result; zero results is `not_found`.
 
 `depth` is 0 at the root and increases by one per edge. The array is ordered by
 `(depth, path)`. A node that the cycle breaker separates is still listed; the ignored edge
-appears in `cycle_breaks`. A node with several successors is followed depth-first.
+appears in `cycle_breaks`, and only when both of its endpoints are rows of that report
+(M5-38). A node with several successors is followed depth-first.
 
 `terminal` is a separate object: `{state, paths}` where `state` is one of `active`, `draft`,
 `deprecated`, `quiet_expired`, `unknown`, `retired`. A `retired` node carries `id`, `path`,
@@ -732,6 +733,9 @@ appears in `cycle_breaks`. A node with several successors is followed depth-firs
 `declared_status: null`, `effective_status: null` and `valid_to: null`. Those four are null
 because a retired document has no current metadata to read; nothing is invented. `retired`
 is a `terminal.state` and never an `EffectiveStatus`: the enum stays at five variants (M5-10).
+A chain can end in more than one leaf, because a diamond has one root and several branches.
+`paths` then names every leaf in `(depth, path)` order, `state` is the first leaf's state, and
+a leaf whose state differs adds one note naming it (M5-37).
 
 `--json` uses the §9.4 envelope with `results` holding the nodes, `api: 1`, and a `notes`
 line for a cycle break.
@@ -749,6 +753,7 @@ line for a cycle break.
 | 9.7 | `lineage` with neither argument | exit 2 |
 | 9.8 | `lineage` with both | exit 2 |
 | 9.9 | a moved, tombstoned target | a `retired` node with the last path |
+| 9.10 | delete `notes/a.md`, then create a new `notes/a.md` | the live document renders; the tombstone does not shadow it, whatever the two ids sort like |
 
 ### 3.10 `janus doctor` (P5)
 
@@ -968,6 +973,10 @@ in the corpus, instead of by `1.0`.
 | M5-35 | The hidden-count notes count documents, and an `--as-of` query emits only the `no_validity` count | The gate runs before scoring, so "results" would claim a relevance the code never computed. For `--as-of` the window is the query: an out-of-window document is not hidden by a gate, it is not the answer, and a second line would only repeat that. |
 | M5-36 | Three acceptance cases were recomputed against the committed fixtures: 7.7, 8.2 and 8.4 (query), and 8.9 (date) | 7.7 asked for a `superseded` document to be `current`; 8.2 and 8.4 used `cache`, which the near-identical pair also matches; 8.9 used 2020-03-01, which is the exclusive end of G's window. The rule under test is unchanged; only the input that can show it moved. |
 | M5-28 | `Graph::build` owns its endpoint facts, and `Graph::for_snapshot(snapshot, config)` is the only caller | Two callers need one graph: the `index --json` counts and every read. A borrowed `DocRow` would force each caller to hold rows of its own, and a snapshot-only builder is what keeps the counts and the answers equal. The disjoint flag is a rule parameter, so it is an argument, not a second function. |
+| M5-37 | `terminal.paths` names every leaf in `(depth, path)` order; `terminal.state` is the first leaf's state, and a leaf whose state differs adds one note | A diamond ends in one leaf, but two branches of one root can end in two. One object carries one state, so the report says which leaf it came from by order and never hides a disagreement. |
+| M5-38 | `lineage` resolves its target through `Graph::by_path`, which matches a live or a retired endpoint, and `cycle_breaks` reports an ignored pair only when both endpoints are rows of the report | One lookup answers for both states, so a retired path renders without a second table. An unrelated cycle is another chain's note. |
+| M5-39 | `lineage` answers from `search::prepare` for a `PATH` and from `search::query` for `--topic`; it never loads or builds on its own | One loader, one read policy: a refresh the command triggers must publish the generation `search` would publish, or the two answers can drift (V-21 row 5). |
+| M5-40 | `Graph::by_path` prefers a live endpoint and answers for a retired one only when no live document holds the path | A path can be held twice: by the file on disk and by the tombstone whose last path it was (§2.1). The path names the live document, and the endpoints iterate in id order, so without the rule the answer depends on which id hashes lower. Two rules cannot disagree: `ids` already prefers the live document. |
 
 ## 5. Phases
 
@@ -1135,7 +1144,11 @@ prompt. This is DoD rows 4–8.
 
 **Accept.** Cases 9.1–9.9 and the dream-cycle test.
 
-**Split seam.** Traversal and shapes versus rendering and `--topic`.
+**Split seam.** Traversal and shapes versus rendering and `--topic`. As delivered, the
+seam sits between the graph and everything that calls it: part 1 is `src/graph.rs` alone
+(`ChainNode`, `by_path`, `chain`), part 2 is the command, the DTO and the two renderers. The
+phase measured 652 logic lines as one change, so the split is what puts each PR inside the
+ceiling; splitting off the dream-cycle test would not, because a test file is not logic.
 
 ### Phase 5 — `janus doctor`
 
@@ -1424,7 +1437,54 @@ derivation, then the eligibility gate and the flag.
 
 ### Phase 4 — `janus lineage`
 
-_(empty)_
+- **One traversal.** `Graph::chain` walks predecessors back to the roots, then
+  forwards from every root. The visited set is load-bearing twice: it makes a
+  diamond render once, and it caps the walk at one visit per node, so a graph
+  the breaker could not make acyclic still terminates (P4 scope 10). `depth` is
+  the smallest distance from a root, which is what `(depth, path)` needs.
+- **One read policy.** `lineage` calls `search::prepare` for a `PATH` and
+  `search::query` for `--topic`, so a refresh it triggers publishes the
+  generation `search` would (M5-39). `--no-rebuild` and `--no-embeddings` pass
+  through; neither is re-implemented.
+- **One lookup for both states.** `Graph::by_path` matches a live or a retired
+  endpoint's path, so a retired path renders and case 9.9 needs no second table
+  (M5-38).
+- **A retired document declares nothing.** Its row stays in the chain only
+  through a live predecessor's `superseded_by`; a link that only the vanished
+  side declared leaves with it. Case 9.9 declares both of its links that way,
+  and every document in the dream cycle stays live.
+- **The documented limit.** A move that changes both the title and the date
+  matches no rung, so it is a new document and the old id retires. The test
+  asserts both halves, so a later reader cannot call it a bug (D23).
+- **Deviations.** M5-37 makes `terminal` total for a chain with several leaves;
+  M5-38 and M5-39 name the lookup and the loader. §3.9 gained two sentences.
+- **Review round 1.** A path can be held twice, and `by_path` returned the first
+  endpoint in id order, so a reused path could answer about the retired document
+  while the file was on disk. The rule is now live first, retired when no live
+  document holds the path (M5-40, case 9.10). The case is built so the retired id
+  sorts lower, which is the only way it can fail on the old code.
+- **Size and split.** Measured as one change: 652 logic and 859 test lines, over
+  the 600 ceiling. The phase budget of 350 was wrong by 1.9x: the estimate
+  assumed a command with no DTO, no terminal rule and no second renderer. The
+  change ships as two PRs at the seam of §5: part 1 is `src/graph.rs` (116 logic,
+  103 test lines), part 2 is the command (536 logic, 756 test lines), each
+  measured against its own base. Splitting off the dream-cycle test instead
+  would not help, because a test file is not logic.
+- **Evidence.** The graph fixture renders five links at depths 0–4 with
+  `cache-returns` at depth 4 and terminal `active`; the main fixture's cycle
+  renders `redis → postgres → revisited` with one `cycle_breaks` entry and one
+  note naming `(revisited, redis)`; `bad/quiet-expiry.md` reports
+  `quiet_expired`; `--topic cache` renders the top `current` result's chain.
+  `tests/dream_cycle.rs` moves a link byte for byte, then moves and edits the
+  body of a link that declares no `id`, then rewrites a third body: the three
+  ids are unchanged after every step, and every vault file keeps its hash and
+  its mtime.
+- **Failing first.** A chain sorted by descending depth fails case 9.1 with the
+  order reversed. A `lineage` that reads without refreshing fails the dream
+  cycle at step 1 with `no document at decisions/adopt-postgres.md`.
+- **Not included.** `doctor`, `moves`, `suggest-links`, quarter dates, the
+  undated decay, and any write to a vault file. No golden moved, no dependency
+  was added, and `format_version` stays 5.
 
 ### Phase 5 — `janus doctor`
 
