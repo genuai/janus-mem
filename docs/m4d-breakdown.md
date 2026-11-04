@@ -186,7 +186,7 @@ corrupt. It refuses only when a full build is the only cure.**
 | corpus changed | **refresh, then read**. `refresh: N document(s) changed` | refuse; write nothing |
 | index absent | **build once, then read**. `refresh: no index yet` | `no index yet: run janus index` (exit 1) |
 | pair corrupt, retries exhausted | **rebuild once, then read**. `refresh: index repaired` | refuse; write nothing (exit 1) |
-| `format_version`, `tokenizer`, `chunker`, `corpus_id` or `embedder` mismatch | **refuse**: `index needs a full build: run janus index` (exit 1) | same |
+| `format_version`, `tokenizer`, `chunker`, `corpus_id` or `embedder` mismatch | **refuse**: `index needs a full build: run janus index` (exit 1) | refuse (`IndexUnstable`, exit 1; unchanged) |
 | `built_root` mismatch | **refresh, then read**. `refresh: N document(s) changed` | refuse |
 
 **Which mismatches refuse.** A refusal is correct only when an incremental build cannot cure the
@@ -213,7 +213,9 @@ is empty of history. Refusing would deadlock an MCP-only agent: SPEC §9.2 gives
 `--no-rebuild` and offers no index tool. The build is no longer silent, so the user sees why it is
 slow (§3.6).
 
-**`--no-rebuild` keeps today's promise.** A read that refuses writes nothing, byte for byte.
+**`--no-rebuild` keeps today's promise.** A read that refuses writes nothing, byte for byte, and
+keeps M3's `IndexUnstable` message naming the file. The new `index needs a full build` error belongs
+to the default path only, because it names the command the user must run.
 
 **`[index] refresh = "manual"` disables only the corpus-changed row.** It prints
 `refresh: skipped, refresh = manual` and answers from the validated generation. An absent index and
@@ -401,8 +403,8 @@ the lines). P2b is stacked on P2a with `BASE=origin/m4d-refresh-a scripts/pr-siz
 
 - Edit one document, then `search`: the new text is found, and the refreshed `.janus/index.bin` and
   `.janus/vectors.f32` are **byte-identical** to a `--rebuild` copy taken before the refresh (R-8).
-- An edit that only touches frontmatter embeds nothing (`embedded 0` in the receipt of a following
-  `index --dry-run`).
+- An edit that changes only `status` (never the title or the body) costs no embedding work: after
+  the edit, `janus index --json` reports `embedded: 0` and reuses the row for every chunk.
 - A format or embedder mismatch refuses with one line naming `janus index`, and `.janus/` is
   byte-identical afterwards.
 - A changed `corpus_id` refuses; a moved root refreshes.
