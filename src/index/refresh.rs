@@ -21,13 +21,16 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::NaiveDate;
+
 use crate::config::{Config, Refresh};
 use crate::error::JanusError;
 use crate::id::DocId;
+use crate::index::Snapshot;
 use crate::index::build::{self, BuildPlan, EmbedSink};
 use crate::index::embed::Embedder;
 use crate::index::store::{self, Load, LoadOptions, Lock, Policy};
-use crate::vault::{DiscoveredFile, WalkResult, identity, resolve};
+use crate::vault::{DiscoveredFile, WalkResult, resolve};
 
 /// Tag of an mtime at or after the Unix epoch (1970-01-01T00:00:00Z).
 const AFTER_EPOCH: u8 = 0;
@@ -206,17 +209,21 @@ impl Witness {
 ///
 /// Propagates a read failure that is not a skip, and any [`build::plan_forced`]
 /// failure such as an embedder that breaks its contract.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_from_walk(
     config: &Config,
     walk: &WalkResult,
     dir: &Path,
     embedder: Option<&dyn Embedder>,
+    basis: Option<&Snapshot>,
+    today: NaiveDate,
     forced: &BTreeSet<DocId>,
     rebuild: bool,
     sink: EmbedSink<'_>,
 ) -> Result<BuildPlan, JanusError> {
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
-    identity::derive_identity(&mut documents, config);
+    // `rebuild` drops the reuse source, never the identity basis (M5-2): a
+    // rebuild re-tokenizes, and re-identifying would churn every id.
     let previous = if rebuild {
         None
     } else {
@@ -224,8 +231,10 @@ pub fn plan_from_walk(
     };
     Ok(build::plan_forced(
         config,
-        &documents,
+        &mut documents,
         previous.as_ref(),
+        basis,
+        today,
         forced,
         embedder,
         sink,
@@ -443,13 +452,15 @@ fn rebuild(
     walk: WalkResult,
     lock: &Lock,
 ) -> Result<Load, JanusError> {
+    let basis = store::previous_snapshot(dir);
     let outcome = store::build_until_stable(
         dir,
         options.root,
         options.config,
         options.embedder,
-        options.built_at,
+        options.today,
         walk,
+        basis.as_ref(),
         &BTreeSet::new(),
         false,
         options.sink,

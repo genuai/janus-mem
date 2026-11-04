@@ -366,7 +366,7 @@ pub(crate) fn prepare(
     for warning in &config.warnings {
         eprintln!("warning: {warning}");
     }
-    let built_at = format!("{}T00:00:00Z", clock.today());
+    let today = clock.today();
     // One walk, made here because the refresh reuses it for its own plan
     // (§3.1). The witness is exact, so the walk is its whole price.
     let walk = vault::walk(root, config, WalkOptions::default())?;
@@ -378,7 +378,7 @@ pub(crate) fn prepare(
         &LoadOptions {
             root,
             config,
-            built_at: &built_at,
+            today,
             lock_timeout: store::LOCK_TIMEOUT,
             policy,
             // A lexical-only read never opens the payload (V-4) and a generation

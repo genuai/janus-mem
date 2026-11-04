@@ -154,9 +154,11 @@ Write these types first. Every later contract refers to them.
 ```rust
 /// One path a document has occupied. `path_history` is keyed by `DocId`, so a
 /// path survives a move that the document itself no longer occupies.
+///
+/// The three new tables store text, not `StringId`: see M5-24.
 pub struct PathEntry {
     /// Vault-relative, `/`-separated (§8.7).
-    pub rel_path: StringId,
+    pub rel_path: String,
     /// The calendar date of the build that first saw this path. Injected, never
     /// the wall clock (§7.2, tests/no_wall_clock.rs).
     pub first_seen: NaiveDate,
@@ -176,11 +178,11 @@ pub struct PathEntry {
 /// is not a byte-identical copy, and make rungs 3–5 unreachable (the reason
 /// `src/vault/identity.rs:20-29` gives for skipping it today).
 pub enum MatchKey {
-    DeclaredId(StringId),
+    DeclaredId(String),
     ContentHash(Blake3Hash),
-    TitleDate { title: StringId, date: NaiveDate },
-    TitleVersion { title: StringId, version: StringId },
-    Title(StringId),
+    TitleDate { title: String, date: NaiveDate },
+    TitleVersion { title: String, version: String },
+    Title(String),
 }
 
 /// Why a `DocId` has the value it has, and every **match** key it can answer to.
@@ -208,16 +210,16 @@ entry of its `path_history`; a path is never stored twice.
 pub struct TombstoneMeta {
     pub id: DocId,
     /// The title at that moment, so `lineage` and `ids` can name it.
-    pub title: StringId,
+    pub title: String,
     /// The date at that moment.
     pub date: Option<NaiveDate>,
     /// The valid-time start at that moment (`effective_from ?? date`).
     /// A tombstoned successor still closes its predecessor's window (§3.6).
     pub valid_from: Option<NaiveDate>,
     /// The owning scope at that moment, so the scope rule still applies (§6.12).
-    pub scope: StringId,
+    pub scope: String,
     /// The retrieval tags at that moment, for the same reason.
-    pub shared_with: Vec<StringId>,
+    pub shared_with: Vec<String>,
 }
 ```
 
@@ -228,8 +230,8 @@ reported as retired after it returns (case 1.15).
 `path_history` is the only source of paths. The alias map is derived at load time:
 
 ```rust
-// src/vault/identity.rs, pure.
-pub fn alias_map(path_history: &BTreeMap<DocId, Vec<PathEntry>>) -> BTreeMap<String, DocId>;
+// src/vault/identity.rs, pure. P2 adds it, because P2 is its first reader.
+pub fn alias_map(path_history: &BTreeMap<DocId, Vec<PathEntry>>) -> BTreeMap<&str, DocId>;
 ```
 
 Two sources of one fact is the defect this avoids: the alias map is never stored.
@@ -393,7 +395,7 @@ whose match key it carries. Nothing is written to the vault.
    and date. The guard makes step 3 skip that key and continue down the ladder, so two
    documents can never share one id.
 4. **Record.** Write `identity[DocId] = { tier, keys }` for every live document, refreshing
-   every `MatchKey` from the current metadata, and append a `PathEntry` to
+   every `MatchKey` from the current metadata (M5-25), and append a `PathEntry` to
    `path_history[DocId]` with `first_seen` and `last_seen` set to `today` for a new path, or
    `last_seen` updated for a known path. Claiming a tombstoned `DocId` clears its tombstone
    flag, so a document that returns resurrects its identity. An `IdentityRecord` for a
@@ -434,9 +436,9 @@ prints one row with `retired: true` and the last known title.
 | # | action | expected |
 |---|---|---|
 | 1.1 | index; edit the body of `notes/flow-mapping.md`; index | same `DocId`; `identity` key unchanged; one `PathEntry` |
-| 1.2 | index; change `title:` in `decisions/2025-02-01-cache-revisited.md`; index | same `DocId`; `tier` stays `title_date`; the stored `title_date` key still names the old title |
+| 1.2 | index; change `title:` in `decisions/2025-02-01-cache-revisited.md`; index | same `DocId`; `tier` stays `title_date`; the stored keys are refreshed to the new title, so a later move still matches (M5-25) |
 | 1.3 | move `notes/flow-mapping.md` to `notes/flow.md` unchanged; index | same `DocId`; `tier` = `content_hash`; two `PathEntry`s, the first not a tombstone |
-| 1.4 | move `decisions/2024-11-02-postgres-cache.md` to `decisions/postgres.md`, edit its body only; index | same `DocId`; `tier` = `title_date`; the alias map maps the old path to the same id |
+| 1.4 | move `decisions/2024-11-02-postgres-cache.md` to `decisions/postgres.md`, edit its body only; index | same `DocId`; `tier` = `title_date`; `path_history` holds both paths, oldest first (the alias map is P2's) |
 | 1.5 | move a document and change both title and date; index | new `DocId`; the old id is a tombstone; one `Hint` (P6) |
 | 1.6 | copy a document byte-identically to a second path; index | two `DocId`s; the copy falls through to `rel_path`; `duplicate_identity` note on the key |
 | 1.7 | delete `.janus/`; index | ids identical to case 1.3's *unmoved* set; the moved document may churn |
@@ -448,7 +450,7 @@ prints one row with `retired: true` and the last known title.
 | 1.13 | move `A` to `B`, then create a new file at `A` with a different title and date, in one build | two distinct `DocId`s; the new file inherits `A`'s id by step 1; `A`'s title+date key derives that same id, the guard skips it, and `A` takes `blake3(title)` |
 | 1.13b | same, but the new file repeats `A`'s title and date | two distinct `DocId`s; the new file inherits `A`'s id; `A`'s title+date key is now ambiguous, so `A` falls to `rel_path`; `doctor` reports one `duplicate_identity` |
 | 1.14 | move a document with an unchanged body, then move it again after a body edit | the id survives both moves: the first matches by `content_hash`, the second by `title_date` |
-| 1.15 | move a document away, index, move it back to its first path, index | the same `DocId`; the tombstone flag is cleared |
+| 1.15 | remove a document, index, restore it at its first path, index | the same `DocId`; the tombstone flag is cleared. A move cannot test this: it tombstones nothing (R-7), because the id follows the document (M5-26) |
 
 ### 3.2 The alias map and link resolution (P2)
 
@@ -899,6 +901,10 @@ in the corpus, instead of by `1.0`.
 | M5-21 | A derived `DocId` is rejected when steps 1–2 already claimed it, and the resolver continues to the next key whose derived id is unclaimed | A move plus a new file at the old path is one build. Path continuity wins (§6.4), so the new file takes the id and the moved document must not borrow it. Two documents under one id is the worst failure this milestone can produce. Case 1.13 is the guard's own test. |
 | M5-22 | A retired document keeps a `TombstoneMeta` row with its title, date, `valid_from`, scope and `shared_with`; its path comes from `path_history` | Without it, a deleted successor cannot close its predecessor's window and the predecessor returns from history. The row is small and rebuildable, and it also gives `lineage` a title. |
 | M5-23 | `DocMeta.content_hash` is the authority for a live document; the `MatchKey::ContentHash` in its record is a view refreshed in step 4. For a retired document the record's copy is the only one | The etag cannot move (D18) and the move key must survive the document, so one value has two jobs and one owner per state. |
+| M5-24 | The three new tables store text, not `StringId` | `alias_map` must return paths as text, and a pool handle would make every reader of the tables depend on the interned pool. The tables are cache-sized, not chunk-sized, so the duplication is small and it removes one coupling. |
+| M5-25 | `tier` is the rung that carried or matched the id; the record's keys are refreshed on every build | §3.1 step 4 refreshes the keys, so a later move matches the title the document has now. A path-stable document keeps its tier (case 1.2); a move reports the matching rung (case 1.3), which is what makes the content-hash rung visible. |
+| M5-26 | Case 1.15 tests a removal, not a move | A move tombstones nothing (R-7): the id follows the document to its new path. Only a document that leaves the corpus retires, so only a removal can exercise the cleared flag. |
+| M5-27 | Scope qualifies every match key, including rungs 1 and 2 | A scope change is a re-key, not a move (§6.12 rule 5), so the id is not reported as `inherited`, and P6 does not report it as a confirmed move. The declared-id and content-hash id *values* are unaffected: only the candidate set is narrowed. §6.4's "keys 1–2 are not namespaced" describes the encoding, not the match. |
 
 ## 5. Phases
 
@@ -946,8 +952,12 @@ close a window at a retired successor. P6 uses `path_history` and `identity`.
 
 **Accept.** Cases 1.1–1.15, plus `cargo test --all-targets` green, no golden moved.
 
-**Split seam.** Writer (resolve, path history, tombstones, build plumbing) versus readers
-(`scan`, `janus ids`). Split if the logic count passes 480.
+**Split seam.** As delivered, the seam sits between the **resolver** and everything that
+calls it: the writer plumbing alone measured 880 logic lines, over the 600 ceiling, because
+`src/vault/identity.rs` is a rewrite rather than an addition. P1 shipped as two stacked
+PRs — the tables and `identity::resolve` with its unit tests (PR 1), then the basis
+threading, the build, the readers and `janus ids` (PR 2). Both are measured against their
+own base. The rejected seam — writer versus readers — put 880 lines in one PR.
 
 ### Phase 2 — Edges in the generation
 
@@ -1228,6 +1238,9 @@ These amendments ship in the phase that owns them. Each is in the same PR as the
     with its title, date, `valid_from`, scope and `shared_with`, that its path stays in
     `path_history`, and that the row still closes its predecessor's window and still renders
     in `lineage`. (P1.)
+14. **§6.4 namespacing.** Add that the `corpus_id ‖ scope` namespace enters the *encoding*
+    of rungs 3–5, and that scope still qualifies the candidate set for every rung, rungs 1
+    and 2 included. A scope change is a re-key, not a move (M5-27). (P1.)
 
 ## 10. Handoff to M6
 
@@ -1246,7 +1259,24 @@ Each phase appends a log here when it merges: what deviated, why, and the size n
 
 ### Phase 1 — identity continuity and the path history
 
-_(empty)_
+Delivered in two stacked changes at the resolver seam: the three tables and
+`identity::resolve` with its unit tests, then the basis threading, the build, the
+readers and `janus ids`. Both are gated and within budget.
+
+- **The seam moved.** The writer as one unit measured 880 logic lines. The 600
+  ceiling cannot hold a rewrite of `src/vault/identity.rs` plus its plumbing, so
+  the split is resolver versus callers. See §5.
+- **`format_version` 4.** The snapshot carries the three tables, so an older
+  index is rebuilt once with the usual warning.
+- **Deviations.** M5-24 (text, not `StringId`), M5-25 (`tier` and the refreshed
+  keys), M5-26 (case 1.15 is a removal), M5-27 (scope qualifies every match key).
+  `alias_map` moves to P2, its first reader.
+- **A new reader entry point.** `store::validated_snapshot` loads the published
+  generation under `Policy::Refuse`, so `scan`, `chunks` and `ids` resolve
+  against it without a lock, a build or a write.
+- **Evidence.** The main fixture goldens did not move. `--rebuild` after an
+  in-place edit keeps the id; a byte-identical move reports `content_hash` and
+  keeps the old path in `previous_path`.
 
 ### Phase 2 — edges in the generation
 

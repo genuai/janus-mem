@@ -29,8 +29,14 @@ use janus_mem::index::store::{
 use janus_mem::index::vectors::{VECTORS_FILE, Vectors};
 use janus_mem::vault::{self, WalkOptions, identity, resolve};
 
+use chrono::NaiveDate;
 /// A pinned build time, so no manifest in this file depends on the clock.
 const BUILT_AT: &str = "2025-04-01T00:00:00Z";
+
+/// A pinned build date: nothing in a test may depend on the clock.
+fn today() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+}
 
 // ─────────────────────────────── the vault ────────────────────────────────
 
@@ -79,9 +85,17 @@ fn plan_with(root: &Path, embedder: Option<&dyn Embedder>) -> BuildPlan {
     let config = config(root);
     let walk = vault::walk(root, &config, WalkOptions::default()).expect("walk the vault");
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, &config);
-    identity::derive_identity(&mut documents, &config);
-    build::plan(&config, &documents, None, embedder, &build::no_progress)
-        .expect("the fixture documents build")
+    identity::derive_identity(&mut documents, None, &config);
+    build::plan(
+        &config,
+        &mut documents,
+        None,
+        None,
+        today(),
+        embedder,
+        &build::no_progress,
+    )
+    .expect("the fixture documents build")
 }
 
 fn publish(root: &Path, plan: &BuildPlan) -> store::Manifest {
@@ -104,7 +118,7 @@ fn publish_hooked(root: &Path, plan: &BuildPlan, hook: &mut dyn FnMut(Stage)) ->
 }
 
 fn load(root: &Path, config: &Config) -> Load {
-    store::load(&LoadOptions::new(root, config, BUILT_AT)).expect("load a validated generation")
+    store::load(&LoadOptions::new(root, config, today())).expect("load a validated generation")
 }
 
 // ─────────────────────────────── the reader ───────────────────────────────
@@ -282,7 +296,7 @@ fn a_held_lock_times_out_without_writing() {
     let before = dir_snapshot(&dir);
     let held = Lock::acquire(&dir, Duration::from_secs(10)).expect("hold the writer lock");
     let config = config(&root);
-    let mut options = LoadOptions::new(&root, &config, BUILT_AT);
+    let mut options = LoadOptions::new(&root, &config, today());
     options.lock_timeout = Duration::from_millis(10);
     let error = store::load(&options).expect_err("a held lock must time out");
 
@@ -333,7 +347,7 @@ fn an_interrupted_publish_is_recovered_by_a_rebuild_and_refused_without_one() {
 
     // `--no-rebuild`: refuse, name the index, write nothing at all.
     let before = dir_snapshot(&dir);
-    let mut refuse = LoadOptions::new(&root, &config, BUILT_AT);
+    let mut refuse = LoadOptions::new(&root, &config, today());
     refuse.policy = Policy::Refuse;
     let error = store::load(&refuse).expect_err("refusal must be an error");
     assert!(
@@ -532,7 +546,7 @@ fn load_with(
     embedder: Option<&dyn Embedder>,
 ) -> Result<Load, JanusError> {
     let config = config(root);
-    let mut options = LoadOptions::new(root, &config, BUILT_AT);
+    let mut options = LoadOptions::new(root, &config, today());
     options.want_vectors = want_vectors;
     options.embedder = embedder;
     store::load(&options)
@@ -719,7 +733,7 @@ fn a_new_vectors_old_index_pair_rebuilds_only_for_a_reader_that_wants_vectors() 
 
     // `--no-rebuild` on the wanting path refuses and names the payload.
     let config = config(&root);
-    let mut refuse = LoadOptions::new(&root, &config, BUILT_AT);
+    let mut refuse = LoadOptions::new(&root, &config, today());
     refuse.want_vectors = true;
     refuse.embedder = Some(&embedder);
     refuse.policy = Policy::Refuse;
@@ -774,7 +788,7 @@ fn a_new_index_old_manifest_pair_rebuilds_in_both_read_modes() {
 
     let config = config(&root);
     for want in [false, true] {
-        let mut options = LoadOptions::new(&root, &config, BUILT_AT);
+        let mut options = LoadOptions::new(&root, &config, today());
         options.want_vectors = want;
         options.embedder = Some(&embedder);
         options.policy = Policy::Refuse;
@@ -894,7 +908,7 @@ fn a_payload_whose_manifest_shape_disagrees_rebuilds() {
 
 // M4D P2 row 3: a read may not rebuild a format change, so the old rebuild
 // path is gone. The rebuild to the current version lives in `tests/cli_index.rs`,
-// `janus_index_rebuilds_a_format_version_2_manifest_to_version_3`.
+// `janus_index_rebuilds_a_format_version_2_manifest_to_the_current_version`.
 #[test]
 fn a_format_version_2_manifest_refuses_a_read_with_a_full_build_reason() {
     let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
@@ -991,7 +1005,7 @@ fn a_vectors_less_generation_refuses_to_build_from_a_read() {
     let before = dir_snapshot(&dir);
     let embedder = embedder();
     let config = config(&root);
-    let mut refuse = LoadOptions::new(&root, &config, BUILT_AT);
+    let mut refuse = LoadOptions::new(&root, &config, today());
     refuse.embedder = Some(&embedder);
     refuse.policy = Policy::Refuse;
     let error = store::load(&refuse).expect_err("row 5 must refuse without a rebuild");
@@ -1037,7 +1051,7 @@ fn a_degraded_publish_drops_the_payload_and_the_next_lexical_read_loads() {
     assert!(load.manifest.embedder.is_none());
 
     let config = config(&root);
-    let mut refuse = LoadOptions::new(&root, &config, BUILT_AT);
+    let mut refuse = LoadOptions::new(&root, &config, today());
     refuse.policy = Policy::Refuse;
     let load = store::load(&refuse).expect("a vectors-less generation is not stale for us");
     assert!(!load.rebuilt);

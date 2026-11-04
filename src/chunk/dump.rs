@@ -17,9 +17,11 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::clock::Clock;
 use crate::config::Config;
 use crate::document::{DocNote, Document, NoteDto};
 use crate::error::JanusError;
+use crate::index::store;
 use crate::vault::resolve::{self, ReadSkip};
 use crate::vault::{self, WalkOptions, identity};
 
@@ -55,12 +57,20 @@ pub struct Options {
 ///
 /// Propagates corpus, config, walk and path failures. A file that cannot be read
 /// is *not* an error: it is reported as a read skip and the report continues.
-pub fn run(root: &Path, config: &Config, options: Options) -> Result<(), JanusError> {
+pub fn run(
+    root: &Path,
+    config: &Config,
+    clock: &dyn Clock,
+    options: Options,
+) -> Result<(), JanusError> {
     let walk = vault::walk(root, config, WalkOptions::default())?;
     let (mut documents, read_skips) = resolve::resolve_all(&walk.files, config);
     // Identity is a corpus-wide decision, so it runs before any selection: a
     // chunk id must not depend on which paths the caller happened to name (D24).
-    identity::derive_identity(&mut documents, config);
+    // The `id` a `--json` row carries comes from the validated generation when
+    // one exists, so it agrees with `search` (R-15).
+    let basis = store::validated_snapshot(root, config, clock.today());
+    identity::derive_identity(&mut documents, basis.as_ref(), config);
 
     let selected = select(root, &documents, &options.paths)?;
     let chunked: Vec<ChunkedDoc<'_>> = selected

@@ -266,7 +266,7 @@ Two mechanisms, in this order:
 
 Match keys, in order. The first key that yields exactly one unmatched candidate wins; two or more candidates is ambiguous and falls through to the next key. Never merge.
 
-Match keys 3–5 are namespaced: `corpus_id ‖ scope ‖ title ‖ date`, where `scope` defaults to `global` (§6.12). Keys 1–2 are already globally unique and are not namespaced. Consequences:
+Match keys 3–5 are namespaced: `corpus_id ‖ scope ‖ title ‖ date`, where `scope` defaults to `global` (§6.12). Keys 1–2 are already globally unique and are not namespaced in their encoding. The namespace qualifies the *candidate set* for every key, keys 1–2 included: a candidate in another scope is never a match, so a scope change is a re-key and not a move. Consequences:
 
 - Identical documents in different corpora cannot collide.
 - `Q4 plan` in `org:acme` and `Q4 plan` in `org:beta` cannot collide.
@@ -297,6 +297,10 @@ Other properties:
 - Existing ids from other systems (Obsidian/Zettelkasten timestamps, UUIDs, cuid2, basic-memory ids) are used verbatim at key 1 once their key name is in `[frontmatter] id`. Values are opaque and never rewritten.
 - A user who wants maximum stability can add an `id`; janus-mem never does it on their behalf. `janus ids` shows the resolved ID, which key matched, and which document it inherited from.
 - **Sidecar-loss caveat.** `.janus/` caches identity decisions. Rebuilding after deleting it re-derives IDs from current state, which is identical for unmoved documents but may differ for a document that moved while the sidecar was absent. Path-first link resolution keeps the impact bounded. This is the price of zero-write identity; it is not a hidden failure mode.
+
+**The previous generation is the identity cache (M5).** Carry-forward reads the last published generation: it holds each id's path history and match keys. A missing or corrupt generation is not an error. The ids are then re-derived with one warning on stderr, and an unmoved document derives the same id because the derivation is a pure function of its metadata. `janus index --rebuild` keeps the cache, because a rebuild re-tokenizes and never re-identifies. A document that moves while the cache is absent may churn its id. That is the documented price of a rebuildable cache.
+
+Two ladders, deliberately different. The **match** ladder (declared id, content hash, title+date, title+version, title) decides whether a document that arrived at a new path continues a document that left one. The **derivation** ladder (declared id, title+date, title+version, title, `rel_path`) decides the id of a document that matched nothing. `content_hash` is a match key only: as a derivation it would win for every document that is not a byte-identical copy, so keys 3–5 would never fire. A derived id that carry-forward or matching already claimed is rejected and the next key is tried, so two documents can never share one id.
 
 Consequence for moves (§6.9): an agent that renames `2024-11-02-postgres.md` and edits its body keeps both title and date, so key 3 preserves identity with no file changes and no confirmation. If the date was never there but `doc_version` was, key 4 does the same. If both changed, the document is treated as new and gets a continuation hint.
 
@@ -855,26 +859,46 @@ Dependency policy: every dependency needs a one-line justification in `Cargo.tom
 └── lock              # advisory lock for index/write critical sections
 ```
 
+The layout is two files, not one `Index` value. `manifest.json` is a JSON
+document a person can read; `index.bin` is bincode and is the only file that
+carries the corpus:
+
 ```rust
-pub struct Index {
+pub struct Manifest {                  // .janus/manifest.json
     pub format_version: u16,           // bump on layout change ⇒ rebuild
-    pub schema_version: u16,           // frontmatter schema this index understands
-    pub embedder: Option<EmbedderId>,  // model, dim, normalization, quantization
-    pub built_at: DateTime<Utc>,
-    pub corpus_id: CorpusId,           // declared, stable, never path-derived
-    pub corpus_role: CorpusRole,       // Primary | Archived
-    pub built_root: PathBuf,           // canonical root the index was built from; diagnostic only
-    pub vault_root: PathBuf,
-    pub strings: StringPool,           // interned rel_paths, titles, headings, tags
-    pub docs: Vec<DocumentMeta>,       // ~120 B each, string-pool handles
-    pub chunks: Vec<ChunkMeta>,        // id, doc_id, byte span, heading handles
-    pub edges: Vec<Edge>,              // v1: only EdgeKind::Supersedes; generic (§8.9)
-    pub path_history: BTreeMap<DocId, Vec<PathEntry>>,
-    pub vectors: VectorSection,        // offset, len, dim, dtype into vectors.f32
-    pub vectors_sha: Option<Blake3>,   // checksum of vectors.f32; None without vectors
+    pub tokenizer: TokenizerFingerprint,
+    pub chunker: ChunkingFingerprint,
+    pub corpus_id: String,             // declared, stable, never path-derived
+    pub built_root: String,            // canonical root; diagnostic only
+    pub built_at: String,              // injected date, no clock below main.rs
+    pub docs: usize,
+    pub chunks: usize,
+    pub strings: usize,
+    pub index_sha: String,             // blake3 of index.bin
+    pub index_len: u64,
+    pub embedder: Option<EmbedderId>,
+    pub vectors_sha: Option<String>,   // checksum of vectors.f32; None without vectors
     pub vectors_len: Option<u64>,      // byte length; must equal chunks × dim × 4
+    pub corpus_sig: Option<String>,    // digest of the walk this was built from
+}
+
+pub struct Snapshot {                  // .janus/index.bin
+    pub format_version: u16,
+    pub corpus_id: String,
+    pub tokenizer: TokenizerFingerprint,
+    pub strings: StringPool,           // interned terms and metadata; pool handles
+    pub docs: Vec<DocMeta>,            // one row per document, in snapshot order
+    pub chunks: Vec<ChunkMeta>,        // id, doc position, byte span, heading handles
+    pub terms: Vec<TermMeta>,          // df and posting range, by term id
+    pub postings: Vec<Posting>,        // flat, grouped by term and ascending by chunk
+    pub avgdl: f64,
+    pub path_history: BTreeMap<DocId, Vec<PathEntry>>,   // M5
+    pub identity: BTreeMap<DocId, IdentityRecord>,       // M5
+    pub tombstones: Vec<TombstoneMeta>,                  // M5
 }
 ```
+
+`edges: Vec<Edge>` arrives in M5 P2, which bumps `format_version` to 5.
 
 Two rules make this cheap:
 

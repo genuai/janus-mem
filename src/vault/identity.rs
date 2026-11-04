@@ -213,13 +213,24 @@ pub fn resolve(
     }
 }
 
-/// Assigns every document its [`DocId`] with no basis, and keeps no table.
+/// Steps 1–3 of §3.1, without the tables: what a reader needs to print an id.
 ///
-/// This is §3.1 steps 1–3 with nothing to match against: the branch a reader
-/// takes when no generation validates, and the answer for a document that never
-/// moved. A document's id is then a pure function of its own metadata.
-pub fn derive_identity(documents: &mut [Document], config: &Config) {
-    assign(documents, None, &BTreeMap::new(), config);
+/// `basis` is the generation a read validated, or `None` when none did. With no
+/// basis this is the stateless branch, and a document's id is a pure function of
+/// its own metadata.
+pub fn derive_identity(documents: &mut [Document], basis: Option<&Snapshot>, config: &Config) {
+    let (basis, identity) = usable_basis(basis, config);
+    assign(documents, basis, &identity, config);
+}
+
+/// One rendered line per reachable match rung of a live document (§3.1).
+#[must_use]
+pub fn key_report(document: &Document, config: &Config) -> Vec<String> {
+    MATCH_LADDER
+        .iter()
+        .filter(|tier| typed_key(**tier, document).is_some())
+        .map(|tier| describe_key(*tier, document, config))
+        .collect()
 }
 
 /// The basis when it describes this corpus, and the records it holds. Every
@@ -696,7 +707,7 @@ mod tests {
     fn derived(entries: &[(&str, &str)]) -> Vec<Document> {
         let config = config();
         let mut documents = resolved(entries, &config);
-        derive_identity(&mut documents, &config);
+        derive_identity(&mut documents, None, &config);
         documents
     }
 
@@ -1128,7 +1139,7 @@ mod tests {
             IdentityTier::RelPath,
             "3b placeholder"
         );
-        derive_identity(&mut documents, &config);
+        derive_identity(&mut documents, None, &config);
         assert_eq!(documents[0].id_source, IdentityTier::DeclaredId);
     }
 
@@ -1192,8 +1203,8 @@ mod tests {
             &config,
         );
 
-        derive_identity(&mut acme, &config);
-        derive_identity(&mut beta, &config);
+        derive_identity(&mut acme, None, &config);
+        derive_identity(&mut beta, None, &config);
 
         assert_ne!(acme[0].id, beta[0].id);
     }
@@ -1203,7 +1214,7 @@ mod tests {
         let config = config();
         let mut documents: Vec<Document> = Vec::new();
 
-        derive_identity(&mut documents, &config);
+        derive_identity(&mut documents, None, &config);
 
         assert!(documents.is_empty());
     }

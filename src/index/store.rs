@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use chrono::NaiveDate;
 use fs4::TryLockError;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -1190,8 +1191,10 @@ pub struct LoadOptions<'a> {
     pub root: &'a Path,
     /// The resolved config: corpus id, chunking, and the index location.
     pub config: &'a Config,
-    /// Injected build time for a manifest this call writes (I-3).
-    pub built_at: &'a str,
+    /// Injected "today" for a manifest and an identity record this call writes
+    /// (I-3, M5 §3.1). The manifest's `built_at` is derived from it, so the two
+    /// can never disagree.
+    pub today: NaiveDate,
     /// How long a recovering reader waits for the writer lock (S-7).
     pub lock_timeout: Duration,
     /// Whether a read may rebuild (S-8).
@@ -1214,11 +1217,11 @@ impl<'a> LoadOptions<'a> {
     /// The defaults: [`LOCK_TIMEOUT`], [`Policy::Rebuild`], and a lexical-only
     /// read with no embedder.
     #[must_use]
-    pub fn new(root: &'a Path, config: &'a Config, built_at: &'a str) -> Self {
+    pub fn new(root: &'a Path, config: &'a Config, today: NaiveDate) -> Self {
         Self {
             root,
             config,
-            built_at,
+            today,
             lock_timeout: LOCK_TIMEOUT,
             policy: Policy::Rebuild,
             want_vectors: false,
@@ -1233,7 +1236,7 @@ impl fmt::Debug for LoadOptions<'_> {
         f.debug_struct("LoadOptions")
             .field("root", &self.root)
             .field("config", &self.config)
-            .field("built_at", &self.built_at)
+            .field("today", &self.today)
             .field("lock_timeout", &self.lock_timeout)
             .field("policy", &self.policy)
             .field("want_vectors", &self.want_vectors)
@@ -1342,13 +1345,15 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
     }
 
     let walk = vault::walk(options.root, options.config, WalkOptions::default())?;
+    let basis = previous_snapshot(&dir);
     let outcome = build_until_stable(
         &dir,
         options.root,
         options.config,
         options.embedder,
-        options.built_at,
+        options.today,
         walk,
+        basis.as_ref(),
         &BTreeSet::new(),
         false,
         options.sink,
@@ -1415,13 +1420,17 @@ pub fn build_until_stable(
     root: &Path,
     config: &Config,
     embedder: Option<&dyn Embedder>,
-    built_at: &str,
+    today: NaiveDate,
     first_walk: vault::WalkResult,
+    basis: Option<&Snapshot>,
     forced: &BTreeSet<DocId>,
     rebuild: bool,
     sink: Option<build::EmbedSink<'_>>,
     lock: &Lock,
 ) -> Result<BuildOutcome, JanusError> {
+    // The manifest stores a timestamp, so the one injected date is rendered
+    // here, once, instead of arriving twice and drifting (§7.2).
+    let built_at = format!("{today}T00:00:00Z");
     let mut walk = first_walk;
     let mut passes = 0;
     // A caller with no printer reports nothing, in one place.
@@ -1429,7 +1438,9 @@ pub fn build_until_stable(
     loop {
         passes += 1;
         let signature = refresh::Signature::of(&walk.files);
-        let plan = refresh::plan_from_walk(config, &walk, dir, embedder, forced, rebuild, sink)?;
+        let plan = refresh::plan_from_walk(
+            config, &walk, dir, embedder, basis, today, forced, rebuild, sink,
+        )?;
         let digest = signature.digest();
         let publication = Publication {
             dir,
@@ -1438,7 +1449,7 @@ pub fn build_until_stable(
             chunker: plan.chunker,
             vectors: plan.vectors.as_ref(),
             vectors_dropped: plan.vectors_dropped,
-            built_at,
+            built_at: &built_at,
             corpus_sig: Some(&digest),
         };
         let manifest = publish_locked(&publication, &mut |_| {}, lock)?;
@@ -1457,6 +1468,40 @@ pub fn build_until_stable(
         }
         walk = next;
     }
+}
+
+/// The previous generation as an identity basis (M5 §3.1).
+///
+/// This reads and decodes `index.bin` and never opens `vectors.f32`: an identity
+/// basis needs no row, and hashing a payload to answer a question about paths
+/// would be work for nothing (R-6b). A missing file is `None` silently. A file
+/// that does not decode is `None` with one warning, because the ids are then
+/// re-derived and the user must know why (§3.1, case 1.9).
+#[must_use]
+pub fn previous_snapshot(dir: &Path) -> Option<Snapshot> {
+    let bytes = fs::read(dir.join(INDEX_FILE)).ok()?;
+    match Snapshot::from_bytes(&bytes) {
+        Ok(snapshot) => Some(snapshot),
+        Err(_) => {
+            eprintln!("identity: no previous generation; ids re-derived");
+            None
+        }
+    }
+}
+
+/// The last published generation, when it still validates for this process.
+///
+/// A read that only needs identity uses this. It takes no lock, starts no
+/// build, refreshes nothing and writes nothing: `search` owns the refresh policy
+/// and these reports must stay reads (§3.1, M5 DoD 9).
+#[must_use]
+pub fn validated_snapshot(root: &Path, config: &Config, today: NaiveDate) -> Option<Snapshot> {
+    load(&LoadOptions {
+        policy: Policy::Refuse,
+        ..LoadOptions::new(root, config, today)
+    })
+    .ok()
+    .map(|load| load.snapshot)
 }
 
 /// The previous snapshot and its validated rows, if both are usable (§3.4).

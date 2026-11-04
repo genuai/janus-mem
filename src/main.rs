@@ -14,7 +14,7 @@ use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
-use janus_mem::{chunk, index, scan, search, vault};
+use janus_mem::{chunk, ids, index, scan, search, vault};
 use tracing_subscriber::EnvFilter;
 
 /// The directories a model may be read from, highest precedence first (V-25).
@@ -128,7 +128,22 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             tracing::info!(vault = %root.display(), "corpus resolved");
 
             let config = Config::load(&root)?;
-            scan::run(&root, &config, scan::Options { json, verbose })
+            scan::run(
+                &root,
+                &config,
+                &SystemClock,
+                scan::Options { json, verbose },
+            )
+        }
+
+        // Identity is a read like `scan`: it answers from the last published
+        // generation and never builds one (M5 §3.1).
+        Command::Ids { paths, json } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let config = Config::load(&root)?;
+            ids::run(&root, &config, &SystemClock, ids::Options { json, paths })
         }
 
         // Chunking is a read command too: it shares the discovery, resolution and
@@ -146,6 +161,7 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             chunk::dump::run(
                 &root,
                 &config,
+                &SystemClock,
                 chunk::dump::Options {
                     json,
                     text,

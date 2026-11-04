@@ -43,6 +43,11 @@ use janus_mem::index::store::{LoadOptions, load};
 use janus_mem::search::{self, Options};
 use janus_mem::tokenize::Tokenizer;
 
+/// A pinned build date: nothing in a test may depend on the clock.
+fn today() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+}
+
 /// The acceptance query: five terms, with `q4` alone in the title.
 const QUERY: &str = "what is our q4 okrs";
 
@@ -163,7 +168,7 @@ fn ranked(root: &Path, query: &str) -> Vec<String> {
 /// The lexical index a previous query built, for the arithmetic.
 fn built_index(root: &Path) -> LexicalIndex {
     let config = Config::load(root).expect("load config");
-    let load_options = LoadOptions::new(root, &config, "2025-04-01T00:00:00Z");
+    let load_options = LoadOptions::new(root, &config, today());
     let loaded = load(&load_options).expect("the corpus indexes");
     loaded
         .snapshot

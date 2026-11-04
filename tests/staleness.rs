@@ -21,8 +21,14 @@ use janus_mem::index::refresh::{self, Signature, Witness};
 use janus_mem::index::store::{self, LoadOptions, Lock, MANIFEST_FILE, Publication};
 use janus_mem::vault::{self, DiscoveredFile, WalkOptions};
 
+use chrono::NaiveDate;
 /// A pinned build time, so no manifest depends on the clock.
 const BUILT_AT: &str = "2025-04-01T00:00:00Z";
+
+/// A pinned build date: nothing in a test may depend on the clock.
+fn today() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+}
 
 // ─────────────────────────────── the vault ────────────────────────────────
 
@@ -80,6 +86,8 @@ fn index(root: &Path) -> store::Manifest {
         &walk,
         &dir,
         None,
+        None,
+        today(),
         &BTreeSet::new(),
         false,
         &build::no_progress,
@@ -397,7 +405,7 @@ fn read_on(root: &Path) -> refresh::ReadOutcome {
     let dir = index_dir(root);
     refresh::on_read(
         &dir,
-        &LoadOptions::new(root, &config, BUILT_AT),
+        &LoadOptions::new(root, &config, today()),
         walk(root),
         Refresh::Auto,
     )
@@ -451,8 +459,9 @@ fn build(root: &Path, embedder: &dyn Embedder, walk: vault::WalkResult) -> store
         root,
         &config,
         Some(embedder),
-        BUILT_AT,
+        today(),
         walk,
+        None,
         &BTreeSet::new(),
         false,
         None,
@@ -540,7 +549,7 @@ fn a_corpus_that_never_stops_moving_stops_after_three_passes() {
 fn a_read_triggered_build_records_the_digest_too() {
     let vault = temp_vault(&[("a.md", "alpha text")]);
     let root = vault.path();
-    let load = store::load(&LoadOptions::new(root, &config(root), BUILT_AT)).expect("a build");
+    let load = store::load(&LoadOptions::new(root, &config(root), today())).expect("a build");
 
     assert!(load.rebuilt, "the first read builds");
     assert_eq!(
@@ -567,7 +576,7 @@ fn a_read_triggered_build_keeps_a_document_written_during_it() {
 
     let load = store::load(&LoadOptions {
         embedder: Some(&embedder),
-        ..LoadOptions::new(root, &config(root), BUILT_AT)
+        ..LoadOptions::new(root, &config(root), today())
     })
     .expect("load");
 

@@ -18,6 +18,11 @@ use janus_mem::search::{self, Options};
 use janus_mem::tokenize::Tokenizer;
 use serde_json::Value;
 
+/// A pinned build date: nothing in a test may depend on the clock.
+fn today() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+}
+
 /// Options with every optional filter off, so a test names only what it needs.
 fn options(query: &str) -> Options {
     Options {
@@ -363,7 +368,7 @@ fn report_hybrid_cost_and_semantic_shape() {
         .count();
 
     // Chunk-level admission, from the same generation the query read.
-    let mut load_options = LoadOptions::new(vault.path(), &config, "2025-04-01T00:00:00Z");
+    let mut load_options = LoadOptions::new(vault.path(), &config, today());
     load_options.policy = Policy::Refuse;
     load_options.want_vectors = true;
     load_options.embedder = Some(&embedder);
