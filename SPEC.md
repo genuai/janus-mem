@@ -1300,8 +1300,8 @@ Measured on an M-series MacBook, release build, vault of 20k docs / ~200k chunks
 |---|---|---|
 | Cold index (embeddings on) | ≤ 60 s | dominated by ONNX inference |
 | Cold index (lexical only) | ≤ 5 s | |
-| Incremental reindex, 1 changed document (2 119 documents) | 141 ms | best of 5 on a synthetic 2 119-document corpus, release build; a no-change run on the same corpus costs 141 ms, so one edit is inside the noise. The author's vault is not measured |
-| Incremental reindex, nothing changed (2 119 documents) | 2.6 s | walk, parse, reuse every token and row; measured in M4 |
+| Incremental reindex, 1 changed document (2 119 synthetic one-paragraph documents) | 141 ms | best of 5, release build; one edit is inside the run-to-run noise. The author's vault is not measured |
+| Incremental reindex, nothing changed (2 119 documents, real corpus) | 2.6 s | walk, parse, reuse every token and row; measured in M4 |
 | Corpus witness (one walk of 2 119 files) | 8.5 ms | walk plus a blake3 digest of ~85 KB; measured in M4D |
 | Warm query, index loaded | p50 ≤ 100 ms, p95 ≤ 250 ms | **Aspirational** p50 ≤ 10 ms; do not optimize before M6, and never at the cost of correctness |
 | Cold query (index load included) | p95 ≤ 500 ms | mmap or fast bincode load |
