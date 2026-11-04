@@ -31,6 +31,21 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// When a long build prints its progress (M4D §3.6).
+///
+/// `auto` asks the terminal, once, at the edge. Nothing below `main` reads the
+/// terminal, so a captured stderr — a test, CI, a pipe — is silent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum Progress {
+    /// Print only when stderr is a terminal.
+    #[default]
+    Auto,
+    /// Print even when stderr is a file or a pipe.
+    Always,
+    /// Print nothing.
+    Never,
+}
+
 /// The operations `janus` currently supports.
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -85,6 +100,10 @@ pub enum Command {
         #[arg(long)]
         json: bool,
 
+        /// Report embedding progress: auto, always or never
+        #[arg(long, value_name = "WHEN", value_enum, default_value = "auto")]
+        progress: Progress,
+
         /// Re-tokenize these documents only; the index still covers the corpus
         #[arg(value_name = "PATH")]
         paths: Vec<PathBuf>,
@@ -136,6 +155,10 @@ pub enum Command {
         #[arg(long)]
         no_embeddings: bool,
 
+        /// Report embedding progress: auto, always or never
+        #[arg(long, value_name = "WHEN", value_enum, default_value = "auto")]
+        progress: Progress,
+
         /// Emit one JSON object on stdout instead of the table
         #[arg(long)]
         json: bool,
@@ -170,6 +193,10 @@ pub enum Command {
         /// List lexically without resolving or loading an embedding model
         #[arg(long)]
         no_embeddings: bool,
+
+        /// Report embedding progress: auto, always or never
+        #[arg(long, value_name = "WHEN", value_enum, default_value = "auto")]
+        progress: Progress,
 
         /// Emit one JSON object on stdout instead of the table
         #[arg(long)]

@@ -26,6 +26,16 @@ use super::{
     TermMeta,
 };
 
+/// One callback, the seam the progress printer and the tests use (§3.6).
+///
+/// It fires once per chunk that goes through [`Embedder::embed`]. `done` is
+/// cumulative over this build and `total` is how many texts this build embeds,
+/// so a caller can compute a step without knowing the batch size.
+pub type EmbedSink<'a> = &'a dyn Fn(u64, u64);
+
+/// A sink that reports nothing: a dry run and a quiet caller pass this.
+pub fn no_progress(_done: u64, _total: u64) {}
+
 /// What one build did, for the phase-6 receipt and the §3.4 tests.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BuildStats {
@@ -157,8 +167,9 @@ pub fn plan(
     docs: &[Document],
     previous: Option<&Previous>,
     embedder: Option<&dyn Embedder>,
+    sink: EmbedSink<'_>,
 ) -> Result<BuildPlan, Corrupt> {
-    plan_forced(config, docs, previous, &BTreeSet::new(), embedder)
+    plan_forced(config, docs, previous, &BTreeSet::new(), embedder, sink)
 }
 
 /// [`plan`] with a set of documents whose tokens must be recomputed anyway.
@@ -175,8 +186,9 @@ pub fn plan_forced(
     previous: Option<&Previous>,
     force: &BTreeSet<DocId>,
     embedder: Option<&dyn Embedder>,
+    sink: EmbedSink<'_>,
 ) -> Result<BuildPlan, Corrupt> {
-    plan_inner(config, docs, previous, force, embedder, true)
+    plan_inner(config, docs, previous, force, embedder, true, sink)
 }
 
 /// [`plan_forced`] without calling the embedder: the `--dry-run` shape.
@@ -194,8 +206,9 @@ pub fn plan_forced_dry_run(
     previous: Option<&Previous>,
     force: &BTreeSet<DocId>,
     embedder: Option<&dyn Embedder>,
+    sink: EmbedSink<'_>,
 ) -> Result<BuildPlan, Corrupt> {
-    plan_inner(config, docs, previous, force, embedder, false)
+    plan_inner(config, docs, previous, force, embedder, false, sink)
 }
 
 fn plan_inner(
@@ -205,6 +218,7 @@ fn plan_inner(
     force: &BTreeSet<DocId>,
     embedder: Option<&dyn Embedder>,
     embed: bool,
+    sink: EmbedSink<'_>,
 ) -> Result<BuildPlan, Corrupt> {
     let tokenizer = Tokenizer::new();
     let tokenizer_fp = tokenizer.fingerprint();
@@ -474,6 +488,7 @@ fn plan_inner(
                     embedder,
                     &embed_texts,
                     config.embedding.batch_size,
+                    sink,
                 )?)
             } else {
                 None
@@ -600,12 +615,14 @@ fn embed_all(
     embedder: &dyn Embedder,
     texts: &[String],
     batch_size: usize,
+    sink: EmbedSink<'_>,
 ) -> Result<VectorSet, Corrupt> {
     let id = embedder.id();
     let dim = id.dim as usize;
     let mut flat: Vec<f32> = Vec::with_capacity(texts.len().saturating_mul(dim));
     let step = batch_size.max(1);
-
+    let total = u64::try_from(texts.len()).unwrap_or(u64::MAX);
+    let mut done = 0u64;
     for (batch, slice) in texts.chunks(step).enumerate() {
         let refs: Vec<&str> = slice.iter().map(String::as_str).collect();
         let rows = embedder
@@ -636,6 +653,10 @@ fn embed_all(
             }
             let _ = normalize(&mut row);
             flat.extend_from_slice(&row);
+            done = done.saturating_add(1);
+            // Once per chunk, after the row is accepted: a broken row fails the
+            // build before it can be reported as progress.
+            sink(done, total);
         }
     }
 
@@ -865,7 +886,8 @@ mod tests {
 
     /// A plan built with no embedder: the token-side cases do not embed.
     fn built(docs: &[Document], previous: Option<&Previous>) -> BuildPlan {
-        plan(&config(), docs, previous, None).expect("a build without an embedder cannot fail")
+        plan(&config(), docs, previous, None, &no_progress)
+            .expect("a build without an embedder cannot fail")
     }
 
     fn embedder(dim: u32) -> HashEmbedder {
@@ -878,7 +900,8 @@ mod tests {
         previous: Option<&Previous>,
         embedder: &dyn crate::index::embed::Embedder,
     ) -> BuildPlan {
-        plan(&config(), docs, previous, Some(embedder)).expect("the hash double never fails")
+        plan(&config(), docs, previous, Some(embedder), &no_progress)
+            .expect("the hash double never fails")
     }
 
     /// The previous generation a follow-up build would read from disk.
@@ -1292,6 +1315,7 @@ mod tests {
             Some(&previous),
             &BTreeSet::new(),
             Some(&counting),
+            &no_progress,
         )
         .expect("a dry run is only a plan");
 
@@ -1307,6 +1331,7 @@ mod tests {
             Some(&previous),
             &BTreeSet::new(),
             Some(&counting),
+            &no_progress,
         )
         .expect("the hash double never fails");
         assert_eq!(counting.calls(), 1, "one batch holds the one changed chunk");
@@ -1369,8 +1394,8 @@ mod tests {
             document("a.md", "Alpha", "alpha cache body"),
             document("b.md", "Beta", "# Heading\n\nbeta store body"),
         ];
-        let computed =
-            plan(&config(), &docs, None, Some(&embedder)).expect("the double cannot fail");
+        let computed = plan(&config(), &docs, None, Some(&embedder), &no_progress)
+            .expect("the double cannot fail");
         let chunks = computed.snapshot.chunks.len();
         assert_eq!(chunks, 2, "one chunk per document at this chunk size");
         assert_eq!(computed.stats.embedded_chunks, chunks);

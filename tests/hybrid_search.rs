@@ -33,6 +33,7 @@ fn options(query: &str) -> Options {
         no_rebuild: false,
         no_embeddings: false,
         embedding_reason: None,
+        progress: false,
         json: false,
     }
 }

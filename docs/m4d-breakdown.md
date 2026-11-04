@@ -358,16 +358,17 @@ embedded 8192/27234 chunks (30%)  ~12 min left
   run that reuses every row embeds nothing, fires the sink zero times, and prints no summary.
 - **At most one line per 5 % of that total.** `step = done × 20 / total`; print when `step` changes
   and `step >= 1`. At most 20 lines.
-- **The estimate** uses the observed rate and the elapsed time in the printer, which lives at the
-  edge (`src/index/cmd.rs` for the command, `src/search/mod.rs` for a read). It is rounded to a whole
-  minute. No test asserts it (D-8).
+- **The estimate** uses the observed rate and the elapsed time in the printer, which is one module,
+  `src/progress.rs` (D-26). Both callers build it: `index::cmd` for the command and `search::prepare`
+  for a read. It is rounded to a whole minute. No test asserts it (D-8).
 - **The summary** is one line: `embedded N chunks`. It prints under the same gate.
-- **Both writers report.** `janus index` passes the sink to `plan_forced`. A read passes it through
-  `LoadOptions` to `store::load`, so the first build on a new vault is not silent for 18 minutes.
+- **Both writers report.** `janus index` passes the sink to `plan_forced`, through
+  `build_until_stable`. A read passes it through `LoadOptions` to `store::load`, so the first build
+  on a new vault is not silent for 18 minutes.
 
 **The seam is the library, not the printer.** `EmbedSink` is threaded into `embed_all`
-(`src/index/build.rs:588`), the only caller of `Embedder::embed`, and it fires once per embedded
-chunk. Tests use a counting embedder and assert the values, never the text.
+(`src/index/build.rs`, `embed_all`), the only caller of `Embedder::embed`, and it fires once per
+embedded chunk. Tests use a counting embedder and assert the values, never the text.
 
 ### 3.7 What must not change
 
@@ -412,6 +413,8 @@ chunk. Tests use a counting embedder and assert the values, never the text.
 | D-23 | How a read tells a first build from a repair | **The manifest's presence before the load.** `on_read` stats `manifest.json` first: absent means `refresh: no index yet`, present means `refresh: index repaired`. `store::load` keeps one `Stale` reason and gains no new field | `refresh.rs` |
 | D-24 | Does a moved root print a line under `--no-rebuild` | **Yes.** A repair the caller declined is a skipped refresh, so it prints `refresh: skipped, --no-rebuild` (§3.5). It writes nothing, and the generation still answers | `refresh.rs` |
 | D-25 | What a manifest repair republishes | **The current plan.** It runs `build_until_stable` with the read's walk, so one pass writes the current root and the current digest through the one writer loop (§3.2). Republishing without planning would need a second write path | `refresh.rs` |
+| D-26 | Where the printer lives | **One module, `src/progress.rs`.** §3.6 first named the two callers as the home; one shared `Printer` is what keeps `janus index` and a read from drifting apart. It prints one newline-terminated line per 5 % step and never rewrites a line, so a log file keeps every step | `progress.rs` |
+| D-27 | How a caller says it has nothing to report | **A no-op sink, `build::no_progress`.** `plan`, `plan_forced`, `plan_forced_dry_run` and `plan_from_walk` take a plain `EmbedSink`; `LoadOptions` and `build_until_stable` take an `Option` and substitute the no-op. The gate stays a `bool` in the printer, so no library path asks the terminal | `build.rs`, `store.rs` |
 
 ## 5. Phases
 
@@ -563,25 +566,26 @@ read.
 **Goal:** a long build says what it is doing, whether `janus index` or a read started it.
 
 **Files:** `src/index/build.rs`, `src/index/store.rs` (the sink through `LoadOptions`),
-`src/index/cmd.rs`, `src/search/mod.rs`, `src/search/facts.rs`, `src/cli.rs` (the flag),
-`src/main.rs` (the gate), `tests/progress.rs` (new).
+`src/index/refresh.rs` (`plan_from_walk` carries the sink), `src/index/cmd.rs`, `src/search/mod.rs`,
+`src/search/facts.rs`, `src/cli.rs` (the flag), `src/main.rs` (the gate), `src/progress.rs` (the
+printer, new), `src/lib.rs` (the module), `tests/progress.rs` (new).
 
 **Build (~200 logic lines):**
 
-1. `EmbedSink` threaded through `plan`, `plan_forced`, `plan_forced_dry_run` and `plan_inner` into
-   `embed_all`. A dry run passes a no-op.
+1. `EmbedSink` threaded through `plan`, `plan_forced`, `plan_forced_dry_run`, `plan_from_walk` and
+   `plan_inner` into `embed_all`. A dry run passes a no-op.
 2. The sink fires once per embedded chunk with `(done, total)`, where `total` is the number of texts
    this build will embed.
 3. The sink also reaches `LoadOptions` and `store::load`, so a read-triggered build reports.
 4. `--progress <auto|always|never>` on `janus index`, `search` and `facts`. `main.rs` resolves
    `auto` once and passes a `bool`.
-5. The printer: one line per 5 % step, the rate from the elapsed time, the estimate in whole
-   minutes. The summary line is `embedded N chunks`. Both obey the gate.
+5. The printer, in `src/progress.rs` (D-26): one line per 5 % step, the rate from the elapsed time,
+   the estimate in whole minutes. The summary line is `embedded N chunks`. Both obey the gate.
 
 **Tests (~220 lines):**
 
 - A counting embedder over the 1 533-chunk fixture reports `done` strictly increasing, the last
-  value equal to `total`, and at most 20 boundaries.
+  value equal to `total`, one report per embedded chunk, and at most 20 boundaries.
 - The same build with the gate off prints nothing.
 - `--progress=always` prints, and every line starts with `embedded `.
 - A build that embeds nothing fires the sink zero times and prints no summary.
@@ -770,4 +774,33 @@ Two decisions are agreed and belong to the temporal milestone, not to M4D:
 
 ## 13. Implementation log — Phase 3
 
-_Nothing recorded yet._
+- **The sink is one callback in `build.rs`.** `EmbedSink` fires inside `embed_all`,
+  after a row is validated and normalised, so a broken row fails the build
+  before it can be reported as progress. `done` counts chunks, `total` is the
+  number of texts this build embeds, and a build that reuses every row calls
+  nothing.
+- **`no_progress` is the quiet sink.** `plan`, `plan_forced`, `plan_forced_dry_run`
+  and `plan_from_walk` take a plain `EmbedSink`, because every caller can pass a
+  function item. `LoadOptions` and `build_until_stable` take an `Option` and
+  substitute the no-op in one place (D-27).
+- **The printer is one module** (D-26). `index::cmd` and `search::prepare` each
+  build a `Printer` and hand its `report` to the build as the sink. The gate is a
+  `bool` in the printer; nothing below `main.rs` asks the terminal.
+- **The fixtures confirm the numbers.** Over the 1 533-chunk fixture with
+  `--progress=always`, a cold build prints **20 progress lines** and **one
+  summary**, `embedded 1533 chunks`. The first line reads
+  `embedded 77/1533 chunks (5%)  ~0 min left`. A captured stderr prints nothing.
+- **The last chunk prints two lines.** Its step is 20, so the 100 % step line
+  prints, and then the summary. Both are under the same gate, and the cap of 20
+  progress lines still holds.
+- **Deviations.** §3.6 first named `cmd.rs` and `search/mod.rs` as the printer's
+  home; the printer is one module instead, and §3.6 is amended. §5 P3's file list
+  gains `src/progress.rs`, `src/lib.rs` and `src/index/refresh.rs`, because
+  `plan_from_walk` is the call between the two writers and the sink must reach
+  it.
+- **Not in this phase.** No change to the `refresh:` lines, `on_read`, `Check`,
+  the refusal set, `Signature`, `Witness`, the writer loop's algorithm, scoring,
+  the payload, the chunker or `format_version`. No new crate, no feature flag.
+- **Size.** 241 logic lines and 287 test lines, 528 in total, measured with
+  `scripts/pr-size.sh` against `origin/main` at `3096001`. The 400-line split
+  seam was not used.

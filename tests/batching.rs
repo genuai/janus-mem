@@ -113,6 +113,7 @@ fn plan(root: &Path, batch_size: usize, embedder: &dyn Embedder) -> BuildPlan {
         &documents(root),
         None,
         Some(embedder),
+        &build::no_progress,
     )
     .expect("the test vault builds")
 }

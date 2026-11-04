@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use janus_mem::config::{Config, Refresh, resolve_index_dir};
 use janus_mem::index::Snapshot;
+use janus_mem::index::build;
 use janus_mem::index::embed::{EmbedError, Embedder, EmbedderId, HashEmbedder};
 use janus_mem::index::refresh::{self, Signature, Witness};
 use janus_mem::index::store::{self, LoadOptions, Lock, MANIFEST_FILE, Publication};
@@ -74,8 +75,16 @@ fn index(root: &Path) -> store::Manifest {
     let config = config(root);
     let dir = index_dir(root);
     let walk = walk(root);
-    let plan = refresh::plan_from_walk(&config, &walk, &dir, None, &BTreeSet::new(), false)
-        .expect("plan the vault");
+    let plan = refresh::plan_from_walk(
+        &config,
+        &walk,
+        &dir,
+        None,
+        &BTreeSet::new(),
+        false,
+        &build::no_progress,
+    )
+    .expect("plan the vault");
     let digest = Signature::of(&walk.files).digest();
     store::publish(&Publication {
         dir: &dir,
@@ -446,6 +455,7 @@ fn build(root: &Path, embedder: &dyn Embedder, walk: vault::WalkResult) -> store
         walk,
         &BTreeSet::new(),
         false,
+        None,
         &lock,
     )
     .expect("build until stable")
