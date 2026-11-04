@@ -65,6 +65,7 @@ fn options(query: &str) -> Options {
         tags: Vec::new(),
         decay_half_life: None,
         include_superseded: false,
+        as_of: None,
         no_rebuild: false,
         no_embeddings: true,
         embedding_reason: None,

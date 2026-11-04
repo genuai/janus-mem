@@ -83,6 +83,7 @@ fn options(query: &str, intent: &str) -> Options {
         tags: Vec::new(),
         decay_half_life: None,
         include_superseded: false,
+        as_of: None,
         no_rebuild: false,
         no_embeddings: false,
         embedding_reason: None,

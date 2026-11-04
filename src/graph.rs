@@ -120,6 +120,9 @@ impl Graph {
         endpoints: impl IntoIterator<Item = Endpoint>,
         allow_disjoint: bool,
     ) -> Self {
+        #[cfg(test)]
+        note_build();
+
         let mut facts: BTreeMap<DocId, Endpoint> = BTreeMap::new();
         let mut nodes: BTreeMap<DocId, Node> = BTreeMap::new();
         for endpoint in endpoints {
@@ -544,6 +547,30 @@ fn text(snapshot: &Snapshot, id: crate::index::StringId) -> String {
 
 fn texts(snapshot: &Snapshot, ids: &[crate::index::StringId]) -> Vec<String> {
     ids.iter().map(|id| text(snapshot, *id)).collect()
+}
+
+// Graphs built on this thread, for the one test that proves a query builds its
+// window map once. Thread-local so a parallel unit test cannot inflate it.
+#[cfg(test)]
+thread_local! {
+    static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Resets this thread's build count.
+#[cfg(test)]
+pub(crate) fn reset_build_count() {
+    BUILDS.with(|count| count.set(0));
+}
+
+/// The number of graphs this thread has built since the last reset.
+#[cfg(test)]
+pub(crate) fn build_count() -> usize {
+    BUILDS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn note_build() {
+    BUILDS.with(|count| count.set(count.get() + 1));
 }
 
 #[cfg(test)]

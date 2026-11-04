@@ -1229,3 +1229,467 @@ fn facts_keeps_the_fact_list_when_a_fact_type_exists() {
         "{report}"
     );
 }
+
+// ──────────────────── validity windows, status and `--as-of` (M5 P3) ────────
+//
+// The graph fixture's dates are all ≤ 2022, so every expectation below is
+// hand-derived from the frontmatter and none depends on the day the test runs.
+
+/// The graph fixture with an index: these cases read metadata only.
+fn graph_ready() -> tempfile::TempDir {
+    let vault = common::graph_vault();
+    index(vault.path());
+    vault
+}
+
+/// One document's JSON hit, when the report returned it.
+fn hit<'a>(report: &'a Value, rel_path: &str) -> Option<&'a Value> {
+    report["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .find(|hit| hit["rel_path"] == rel_path)
+}
+
+fn notes(report: &Value) -> Vec<String> {
+    report["notes"]
+        .as_array()
+        .expect("notes")
+        .iter()
+        .map(|note| note.as_str().expect("note text").to_owned())
+        .collect()
+}
+
+#[test]
+fn case_7_1_a_document_declared_active_but_superseded_is_absent_from_current() {
+    // A temp vault isolates the status gate: the successor has no date at all,
+    // so it closes no window (§3.6) and today is inside A's window. Only the
+    // derived status can keep A out of `current`, so this fails on `main`.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"lies\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("old.md"),
+        "---\ntitle: Old cache\nstatus: active\ndate: 2020-01-01\nsuperseded_by: new.md\n---\n\ncache rule\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("new.md"),
+        "---\ntitle: New cache\nstatus: active\n---\n\nthe replacement, undated\n",
+    )
+    .unwrap();
+    index(dir.path());
+
+    let current = search_json(dir.path(), &["cache", "--intent", "current"]);
+    assert_eq!(result_paths(&current), ["new.md"], "{current}");
+    let lines = notes(&current);
+    assert!(
+        lines
+            .iter()
+            .any(|note| note.starts_with("1 document(s) hidden by the status gate")),
+        "{current}"
+    );
+    assert!(
+        !lines.iter().any(|note| note.contains("validity window")),
+        "the window must not be the reason: {current}"
+    );
+
+    let history = search_json(dir.path(), &["cache", "--intent", "history"]);
+    let lying = hit(&history, "old.md").expect("history returns it");
+    assert_eq!(lying["status"], "active", "the declared status is reported");
+    assert_eq!(lying["effective_status"], "superseded", "{lying}");
+
+    // The committed fixture carries the same lie; its window is invalid, so
+    // the status gate is what keeps it out of `current` there too.
+    let vault = graph_ready();
+    let report = search_json(
+        vault.path(),
+        &["wins", "--intent", "history", "--no-embeddings"],
+    );
+    let lies = hit(&report, "bad/status-lies.md").expect("history returns it");
+    assert_eq!(lies["effective_status"], "superseded", "{lies}");
+}
+
+#[test]
+fn case_7_2_quiet_expiry_is_superseded_with_no_successor() {
+    // `bad/quiet-expiry.md` declares `superseded` and nothing replaces it.
+    let vault = graph_ready();
+    let history = search_json(
+        vault.path(),
+        &["supersession", "--intent", "history", "--no-embeddings"],
+    );
+    let quiet = hit(&history, "bad/quiet-expiry.md").expect("history returns it");
+    assert_eq!(quiet["effective_status"], "superseded", "{quiet}");
+    assert_eq!(quiet["valid_to"], Value::Null, "{quiet}");
+}
+
+#[test]
+fn case_7_3_expiry_is_a_window_property() {
+    // `bad/expired.md`: active, `effective_to: 2020-01-01`, so it is outside
+    // its window and absent from `current`, and it is present in `history`.
+    let vault = graph_ready();
+    let current = search_json(
+        vault.path(),
+        &["outside window", "--intent", "current", "--no-embeddings"],
+    );
+    assert!(result_paths(&current).is_empty(), "{current}");
+
+    let history = search_json(
+        vault.path(),
+        &["outside window", "--intent", "history", "--no-embeddings"],
+    );
+    let expired = hit(&history, "bad/expired.md").expect("history returns it");
+    assert_eq!(
+        expired["effective_status"], "active",
+        "no expired status exists"
+    );
+    assert_eq!(expired["valid_from"], "2021-03-01", "{expired}");
+    assert_eq!(expired["valid_to"], "2020-01-01", "{expired}");
+}
+
+#[test]
+fn case_7_4_include_superseded_admits_what_the_status_gate_hid() {
+    // The flag admits `status-lies.md`, whose window is invalid, so it also
+    // proves that the flag cancels the window gate (M5-9).
+    let vault = graph_ready();
+    let flagged = search_json(
+        vault.path(),
+        &["wins", "--intent", "current", "--include-superseded"],
+    );
+    assert_eq!(result_paths(&flagged), ["bad/status-lies.md"], "{flagged}");
+}
+
+#[test]
+fn case_7_5_the_chain_returns_only_its_last_link() {
+    // A–D are declared superseded, so the status gate hides them. E is active
+    // and its window has no end.
+    let vault = graph_ready();
+    let current = search_json(
+        vault.path(),
+        &["chain", "--intent", "current", "--no-embeddings"],
+    );
+    assert_eq!(
+        result_paths(&current),
+        ["chain/2022-01-01-cache-returns.md"],
+        "{current}"
+    );
+}
+
+#[test]
+fn case_7_6_no_successor_and_no_end_is_current() {
+    // The same claim one document at a time: E reports an open window and an
+    // active effective status, and the report carries no window note.
+    let vault = graph_ready();
+    let current = search_json(
+        vault.path(),
+        &["chain", "--intent", "current", "--no-embeddings"],
+    );
+    let last = hit(&current, "chain/2022-01-01-cache-returns.md").expect("E");
+    assert_eq!(last["effective_status"], "active", "{last}");
+    assert_eq!(last["valid_from"], "2022-01-01", "{last}");
+    assert_eq!(last["valid_to"], Value::Null, "{last}");
+    // Ten documents of the fixture are excluded by their status (A–D, quiet
+    // expiry, the status lie, the deprecated one, the global claim it replaces,
+    // the shared-old pair and the one-sided link) and two are excluded by their
+    // window (`bad/expired.md` and `bad/invalid-window.md`).
+    assert_eq!(
+        notes(&current),
+        [
+            "10 document(s) hidden by the status gate; use --intent history or --include-superseded",
+            "2 document(s) hidden by the validity window; use --include-superseded or --intent history to see them",
+        ],
+        "{current}"
+    );
+}
+
+#[test]
+fn case_7_7_a_global_document_keeps_its_status_for_a_scope_that_does_not_match() {
+    // A pair where the replaced document is declared active: `current` admits
+    // G for `org:beta` because the successor does not match that scope, and
+    // drops it for `org:acme`, where the successor does match.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"scopes\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("global-claim.md"),
+        "---\ntitle: Global claim\nstatus: active\ndate: 2020-02-01\n---\n\ncache claim\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("acme-claim.md"),
+        "---\ntitle: Acme claim\nstatus: active\ndate: 2020-03-01\nscope: org:acme\nsupersedes: global-claim.md\n---\n\ncache claim\n",
+    )
+    .unwrap();
+    index(dir.path());
+
+    let beta = search_json(dir.path(), &["cache", "--scope", "org:beta"]);
+    assert_eq!(result_paths(&beta), ["global-claim.md"], "{beta}");
+
+    let acme = search_json(dir.path(), &["cache", "--scope", "org:acme"]);
+    assert_eq!(result_paths(&acme), ["acme-claim.md"], "{acme}");
+}
+
+#[test]
+fn case_7_8_an_undated_document_stays_in_current() {
+    // §6.10 rule 9 and R-4: a missing `valid_from` passes the window gate, so
+    // the fixture's one undated document still answers its eval query.
+    let vault = fixture_vault();
+    index(vault.path());
+    let report = search_json(
+        vault.path(),
+        &["undated note declared id identity", "--intent", "current"],
+    );
+    assert_eq!(result_paths(&report)[0], "notes/undated.md", "{report}");
+    assert_eq!(report["results"][0]["valid_from"], Value::Null);
+}
+
+#[test]
+fn case_7_9_include_superseded_does_not_admit_deprecated() {
+    let vault = graph_ready();
+    let flagged = search_json(
+        vault.path(),
+        &[
+            "deprecated",
+            "--intent",
+            "current",
+            "--include-superseded",
+            "--no-embeddings",
+        ],
+    );
+    assert!(result_paths(&flagged).is_empty(), "{flagged}");
+
+    let history = search_json(
+        vault.path(),
+        &["deprecated", "--intent", "history", "--no-embeddings"],
+    );
+    assert_eq!(result_paths(&history), ["bad/deprecated.md"], "{history}");
+}
+
+#[test]
+fn case_8_1_as_of_2020_03_01_returns_the_first_link() {
+    // A's window is [2020-01-01, 2020-07-01): B starts on 2020-07-01.
+    let vault = graph_ready();
+    let report = search_json(
+        vault.path(),
+        &["chain", "--as-of", "2020-03-01", "--no-embeddings"],
+    );
+    assert_eq!(
+        result_paths(&report),
+        ["chain/2020-01-01-adopt-postgres.md"],
+        "{report}"
+    );
+    assert_eq!(report["results"][0]["valid_to"], "2020-07-01", "{report}");
+    assert_eq!(report["as_of"], "2020-03-01", "{report}");
+}
+
+#[test]
+fn case_8_2_as_of_2025_01_01_returns_the_last_link() {
+    // Only E has a window that reaches 2025: the query term `chain` also keeps
+    // the near-identical pair out, and neither is linked to the chain.
+    let vault = graph_ready();
+    let report = search_json(
+        vault.path(),
+        &["chain", "--as-of", "2025-01-01", "--no-embeddings"],
+    );
+    assert_eq!(
+        result_paths(&report),
+        ["chain/2022-01-01-cache-returns.md"],
+        "{report}"
+    );
+    assert_eq!(report["results"][0]["valid_to"], Value::Null, "{report}");
+    assert_ne!(
+        result_paths(&report),
+        result_paths(&search_json(
+            vault.path(),
+            &["chain", "--as-of", "2020-03-01"]
+        )),
+        "the two dates must answer with different documents"
+    );
+}
+
+#[test]
+fn case_8_3_the_same_query_without_the_flag_returns_the_last_link() {
+    let vault = graph_ready();
+    let report = search_json(
+        vault.path(),
+        &["chain", "--intent", "current", "--no-embeddings"],
+    );
+    assert_eq!(
+        result_paths(&report),
+        ["chain/2022-01-01-cache-returns.md"],
+        "{report}"
+    );
+    assert!(report.get("as_of").is_none(), "{report}");
+}
+
+#[test]
+fn case_8_4_a_year_expands_to_its_first_day() {
+    // `2021` becomes 2021-01-01, which is C's first day and D's predecessor's
+    // last day plus one: C's window is [2021-01-01, 2021-07-01).
+    let vault = graph_ready();
+    let report = search_json(
+        vault.path(),
+        &["chain", "--as-of", "2021", "--no-embeddings"],
+    );
+    assert_eq!(report["as_of"], "2021-01-01", "{report}");
+    assert_eq!(
+        result_paths(&report),
+        ["chain/2021-01-01-cache-in-front.md"],
+        "{report}"
+    );
+    assert_eq!(report["results"][0]["valid_to"], "2021-07-01", "{report}");
+}
+
+#[test]
+fn case_8_5_as_of_admits_a_draft_and_does_not_decay() {
+    // The draft is dated 2019-05-01, so it is inside its window at 2020-03-01
+    // even though `current` would score it at 0.7 and decay it.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"draft\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("draft.md"),
+        "---\ntitle: Cache draft\nstatus: draft\ndate: 2019-05-01\n---\n\ncache draft\n",
+    )
+    .unwrap();
+    index(dir.path());
+
+    let report = search_json(dir.path(), &["cache", "--as-of", "2020-03-01"]);
+    let draft = hit(&report, "draft.md").expect("the draft is returned");
+    assert_eq!(draft["status"], "draft", "{report}");
+    assert_eq!(draft["effective_status"], "draft", "{report}");
+    assert_eq!(draft["scores"]["decay"], 1.0, "{report}");
+    assert_eq!(draft["scores"]["status_factor"], 1.0, "{report}");
+}
+
+#[test]
+fn case_8_6_a_document_with_no_window_is_counted_and_excluded() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"undated\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("undated.md"),
+        "---\ntitle: Cache undated\n---\n\ncache with no date\n",
+    )
+    .unwrap();
+    index(dir.path());
+
+    let report = search_json(dir.path(), &["cache", "--as-of", "2019-01-01"]);
+    assert!(result_paths(&report).is_empty(), "{report}");
+    assert_eq!(
+        notes(&report),
+        ["1 result(s) have no validity window"],
+        "{report}"
+    );
+}
+
+#[test]
+fn case_8_7_an_unparseable_as_of_is_a_usage_error() {
+    let vault = graph_ready();
+    let output = run(vault.path(), &["search", "cache", "--as-of", "2025-13-40"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("2025-13-40"), "{stderr}");
+}
+
+#[test]
+fn case_8_8_as_of_wins_over_intent_with_one_note() {
+    // `history` would return A and B (both match `chain` and no window gate
+    // applies), so the window alone is what makes this one result.
+    let vault = graph_ready();
+    let report = search_json(
+        vault.path(),
+        &[
+            "chain",
+            "--as-of",
+            "2020-03-01",
+            "--intent",
+            "history",
+            "--no-embeddings",
+        ],
+    );
+    assert_eq!(
+        result_paths(&report),
+        ["chain/2020-01-01-adopt-postgres.md"],
+        "{report}"
+    );
+    assert!(
+        notes(&report).contains(&"as-of 2020-03-01 overrides intent history".to_owned()),
+        "{report}"
+    );
+    assert!(report.get("intent").is_none(), "{report}");
+    assert_eq!(report["as_of"], "2020-03-01", "{report}");
+}
+
+#[test]
+fn case_8_9_as_of_respects_the_scope_rule_on_the_global_pair() {
+    // G is global and replaced by H of `org:acme` on 2020-03-01. For
+    // `org:acme` the window ends there; for `org:beta` it stays open. Both
+    // dates below are inside either window, and 2020-02-15 is before H starts.
+    let vault = graph_ready();
+    let acme = search_json(
+        vault.path(),
+        &[
+            "global",
+            "--as-of",
+            "2020-02-15",
+            "--scope",
+            "org:acme",
+            "--no-embeddings",
+        ],
+    );
+    let for_acme = hit(&acme, "scopes/global-claim.md").expect("G for acme");
+    assert_eq!(for_acme["valid_to"], "2020-03-01", "{acme}");
+
+    let beta = search_json(
+        vault.path(),
+        &[
+            "global",
+            "--as-of",
+            "2020-02-15",
+            "--scope",
+            "org:beta",
+            "--no-embeddings",
+        ],
+    );
+    let for_beta = hit(&beta, "scopes/global-claim.md").expect("G for beta");
+    assert_eq!(for_beta["valid_to"], Value::Null, "{beta}");
+}
+
+#[test]
+fn case_8_10_an_as_of_report_names_the_parameter_and_not_an_intent() {
+    let vault = graph_ready();
+    let report = search_json(
+        vault.path(),
+        &[
+            "chain",
+            "--as-of",
+            "2020-03-01",
+            "--intent",
+            "exhaustive",
+            "--no-embeddings",
+        ],
+    );
+    assert_eq!(report["api"], 1, "{report}");
+    assert!(
+        report.get("intent").is_none(),
+        "no intent is reported: {report}"
+    );
+    assert_eq!(report["as_of"], "2020-03-01", "{report}");
+    assert!(
+        notes(&report).contains(&"as-of 2020-03-01 overrides intent exhaustive".to_owned()),
+        "{report}"
+    );
+}

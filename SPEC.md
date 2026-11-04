@@ -647,11 +647,11 @@ These subtleties are easy to get wrong and cheap to pin down:
 | `evolution` | off | all | Feed `lineage`; ordered oldest→newest |
 | `exhaustive` | off | all, including `unknown` | Debug/audit |
 
-`--as-of DATE` is a **parameter, not an intent**, and it overrides the intent's semantics: it switches to valid-time filtering (§6.10), turns decay off, and stops gating on status. `--as-of` always implies history ordering.
+`--as-of DATE` is a **parameter, not an intent**, and it overrides the intent's semantics: it switches to valid-time filtering (§6.10), turns decay off, and stops gating on status. `--as-of` always implies history ordering. When both `--as-of` and `--intent` are given, `--as-of` wins and the response carries one note naming the overridden intent; that is not a usage error, because the MCP `search` call accepts both parameters and a legal call shape must exist. The expanded date (`YYYY-MM` and `YYYY` become the first day of the period) is echoed as `as_of`.
 
 CLI flags can override parameters individually: `--decay-half-life 30`, `--include-superseded`, `--types decision,spec`, `--corpus all`.
 
-`--include-superseded` is an override of the `current` gate, not a second status penalty: it adds declared-`superseded` documents to `current` at status factor **1.0** with decay unchanged, does not admit `deprecated`, and is a no-op (not an error) under the other intents, which already include it. It never reaches `authoritative_facts`.
+`--include-superseded` is an override of the `current` gate, not a second status penalty: it uses the `include_superseded` row, which adds declared-`superseded` documents to `current` at status factor **1.0** with decay unchanged and does not admit `deprecated`. On `current` it also cancels the validity window: a flag that shows an old document and then drops it for being old is useless. Under the other intents it is a no-op (not an error), because those rows already include it. It never reaches `authoritative_facts`.
 
 `--decay-half-life` overrides the half-life *parameter* only. It never removes a type's `timeless` exemption, so a caller cannot silently start ageing a timeless principle by passing a number.
 
@@ -1118,7 +1118,7 @@ Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash,
 | `get_authoritative_facts` | `query?`, `tags?`, `types?`, `scope?`, `limit?` | Active decisions/specs/principles only |
 | `read_document` | `path`, `max_chars?`, `chunk_id?` | Frontmatter as JSON + body (or a specific chunk's span) |
 
-`authoritative_facts` uses its own **active-only inclusion rule** — canonical type in {`decision`, `spec`, `principle`} and declared status `active`, no decay, status factor 1.0 — and not the `current` intent's gate, which admits `draft` (0.7×) and `unknown` (1.0×). A weight is not an inclusion rule.
+`authoritative_facts` uses its own **active-only inclusion rule** — canonical type in {`decision`, `spec`, `principle`}, effective status `active`, inside its validity window, no decay, status factor 1.0 — and not the `current` intent's gate, which admits `draft` (0.7×) and `unknown` (1.0×). A weight is not an inclusion rule. Declared status alone is not enough: a document declared `active` but replaced by a link must not return as an authoritative fact.
 
 MCP reads inherit the index refresh and the refusal. They expose no `--no-rebuild`, so a cold mismatch is answered with `index needs a full build: run janus index`, which names the command the agent must run. A changed corpus refreshes under the same non-blocking lock, and a busy writer is a skip, never an error, so a read tool cannot fail because another process is building.
 

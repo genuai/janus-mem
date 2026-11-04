@@ -12,7 +12,7 @@
 //! snapshot has no body, so the guarantee is structural. Diagnostics go to
 //! stderr (§8.2).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub mod facts;
 use std::io::{self, Write as _};
@@ -26,7 +26,7 @@ use crate::clock::Clock;
 use crate::config::{self, Config, TypeSpec};
 use crate::document::{DateSource, Status};
 use crate::error::JanusError;
-use crate::graph::EffectiveStatus;
+use crate::graph::{EffectiveStatus, Graph, Window};
 use crate::id::{ChunkId, DocId};
 use crate::index::embed::Embedder;
 use crate::index::refresh;
@@ -35,7 +35,7 @@ use crate::index::vectors::{Vectors, dot};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
 use crate::progress::Printer;
 use crate::scan::API_VERSION;
-use crate::score::{self, Breakdown, Intent, ScopeFilter, ScoreDoc, ScoreInput};
+use crate::score::{self, Breakdown, Intent, IntentPolicy, ScopeFilter, ScoreDoc, ScoreInput};
 use crate::tokenize::{Tokenizer, Tokens};
 use crate::vault::resolve::strip_leading_date;
 use crate::vault::{self, WalkOptions};
@@ -64,6 +64,8 @@ pub struct Options {
     pub decay_half_life: Option<f64>,
     /// Adds declared-`superseded` to `current`, at factor 1.0 (§3.2, S-19).
     pub include_superseded: bool,
+    /// `--as-of`: the valid-time date, already parsed and expanded (§3.8).
+    pub as_of: Option<NaiveDate>,
     /// Refuse instead of rebuilding; a read stays a read (S-8).
     pub no_rebuild: bool,
     /// Run lexically without resolving or loading a model (V-14).
@@ -104,7 +106,9 @@ pub fn run(
         json: options.json,
         started,
         query: Some(&options.query),
-        intent: Some(outcome.intent),
+        intent: outcome.reported_intent(),
+        as_of: outcome.as_of,
+        filter: &outcome.filter,
         limit: options.limit,
         alpha: outcome.alpha,
         degraded: outcome.degraded,
@@ -127,8 +131,12 @@ pub struct Outcome {
     pub alpha: f64,
     /// Why this query is not fully hybrid; empty when nothing is degraded.
     pub degraded: Vec<String>,
-    /// The resolved query intent.
+    /// The query intent the caller named.
     pub intent: Intent,
+    /// The valid-time date this outcome answered for, when `--as-of` was given.
+    pub as_of: Option<NaiveDate>,
+    /// The eligibility gate this outcome was computed with, maps included.
+    pub(crate) filter: Filter,
     /// Title tokenizations this query performed: one per selected document
     /// (M4C §3.1). An empty query still tokenizes each title once.
     pub title_tokenizations: usize,
@@ -136,6 +144,14 @@ pub struct Outcome {
     pub stale: bool,
     /// The generation this outcome was computed from.
     pub snapshot: Snapshot,
+}
+
+impl Outcome {
+    /// The intent the envelope reports. `--as-of` is a parameter, not an
+    /// intent, so it reports none (§3.8).
+    fn reported_intent(&self) -> Option<Intent> {
+        self.as_of.is_none().then_some(self.intent)
+    }
 }
 
 /// Ranks documents without rendering them (§3.1, §3.2).
@@ -155,6 +171,14 @@ pub fn query(
 ) -> Result<Outcome, JanusError> {
     let intent = parse_intent(options.intent.as_deref())?;
     require_scope(options.scope_only, &options.scopes)?;
+    // `--as-of` selects the valid-time window and nothing else, so it scores
+    // with the `history` row: no decay, and every status at factor 1.0. The
+    // gate below is what turns the status off, not this row (§3.8, M5-34).
+    let scoring_intent = if options.as_of.is_some() {
+        Intent::History
+    } else {
+        intent
+    };
 
     // `--no-embeddings` is a statement about the query: do not resolve, load or
     // call a model at all (V-14, §3.6 row 4).
@@ -199,14 +223,21 @@ pub fn query(
     );
 
     let rows = doc_rows(&prepared.snapshot, config);
-    let filter = Filter::new(
-        config,
-        &options.types,
-        &options.tags,
-        &options.scopes,
-        options.scope_only,
+    let scopes = ScopeFilter::new(&options.scopes, options.scope_only);
+    // One graph and one pair of maps per query, never per row: the gate must
+    // not walk the successors again for every document (P3 scope 10).
+    let graph = Graph::for_snapshot(&prepared.snapshot, config);
+    let gate = Gate::search(
+        &graph,
+        &scopes,
+        intent,
+        options.include_superseded,
+        options.as_of,
+        clock.today(),
     );
-    let (selected, map) = select(&rows, |row| filter.matches(row));
+    let filter = Filter::new(config, &options.types, &options.tags, scopes, gate);
+    let selection = select(&rows, &filter);
+    let (selected, map) = (selection.selected, selection.map);
     let docs: Vec<ScoreDoc<'_>> = selected
         .iter()
         .map(|index| rows[*index].score_doc())
@@ -223,10 +254,8 @@ pub fn query(
     let indexed = indexed_terms(&prepared.index, &query_terms);
     let (title_boosts, title_tokenizations) =
         title_boosts(&tokenizer, &indexed, &titles, config.scoring.title_boost);
-    let policy = score::policy(intent, options.include_superseded);
     let mut ordinals = vec![0_u32; docs.len()];
     let mut occurrences: Vec<Vec<(ChunkId, u32, usize)>> = vec![Vec::new(); docs.len()];
-    let mut hidden = BTreeSet::new();
     let (mut chunk_to_doc, mut chunk_ids, mut breakdowns) = (Vec::new(), Vec::new(), Vec::new());
 
     for (index, chunk) in prepared.snapshot.chunks.iter().enumerate() {
@@ -244,8 +273,8 @@ pub fn query(
                 doc,
                 lexical: crate::index::squash(raw, reference),
                 semantic: semantics.get(index).copied().unwrap_or(0.0),
-                intent,
-                effective_status: EffectiveStatus::from(doc.status),
+                intent: scoring_intent,
+                effective_status: filter.effective_status(doc.id),
                 alpha,
                 title_boost: title_boosts.get(*doc_index).copied().unwrap_or(1.0),
                 half_life_days: options.decay_half_life,
@@ -253,11 +282,6 @@ pub fn query(
             },
         );
         if breakdown.relevance <= 0.0 {
-            continue;
-        }
-        if !policy.includes(doc.status) {
-            // §3.2's gate is an inclusion rule: count it, do not score it zero.
-            hidden.insert(*doc_index);
             continue;
         }
         let ordinal = ordinals[*doc_index];
@@ -292,15 +316,42 @@ pub fn query(
     }
 
     let mut notes = Vec::new();
-    if !hidden.is_empty() {
+    if selection.hidden_status > 0 {
         let hint = if intent == Intent::Current {
             "use --intent history or --include-superseded"
         } else {
             "use --intent exhaustive"
         };
         notes.push(format!(
-            "{} result(s) hidden by intent {}; {hint}",
-            hidden.len(),
+            "{} document(s) hidden by the status gate; {hint}",
+            selection.hidden_status
+        ));
+    }
+    if selection.hidden_window > 0 {
+        // `--include-superseded` cancels only the window gate (M5-9), so it is
+        // a real escape hatch here even though it does not widen `history`.
+        notes.push(format!(
+            "{} document(s) hidden by the validity window; use --include-superseded or --intent history to see them",
+            selection.hidden_window
+        ));
+    }
+    if selection.no_validity > 0 {
+        // `--as-of` alone: a document with no window is excluded, and the count
+        // says why. An out-of-window document is simply not in the answer, so
+        // it gets no line: the window is the query, not a gate over it.
+        notes.push(format!(
+            "{} result(s) have no validity window",
+            selection.no_validity
+        ));
+    }
+    if let Some(as_of) = options.as_of
+        && options
+            .intent
+            .as_deref()
+            .is_some_and(|raw| !raw.trim().is_empty())
+    {
+        notes.push(format!(
+            "as-of {as_of} overrides intent {}",
             intent_name(intent)
         ));
     }
@@ -322,6 +373,8 @@ pub fn query(
         alpha,
         degraded,
         intent,
+        as_of: options.as_of,
+        filter,
         title_tokenizations,
         stale: prepared.stale,
         snapshot: prepared.snapshot,
@@ -572,6 +625,37 @@ pub(crate) fn parse_intent(raw: Option<&str>) -> Result<Intent, JanusError> {
     }
 }
 
+/// Resolves `--as-of` to a calendar date (§3.8).
+///
+/// Accepts `YYYY-MM-DD`, `YYYY-MM` and `YYYY`. A short form expands to the first
+/// day of its period, and the caller echoes the expanded value as `as_of`. An
+/// unparseable value is a usage error that names it.
+///
+/// # Errors
+///
+/// [`JanusError::Usage`] when the value is not one of the three forms or names
+/// a date the calendar does not have.
+pub fn parse_as_of(raw: &str) -> Result<NaiveDate, JanusError> {
+    let value = raw.trim();
+    let field = |text: &str| text.parse::<u32>().ok();
+    let ymd = |year: u32, month: u32, day: u32| {
+        NaiveDate::from_ymd_opt(i32::try_from(year).ok()?, month, day)
+    };
+    let fields: Vec<&str> = value.split('-').collect();
+    let parsed = match fields.as_slice() {
+        [year] => field(year).and_then(|year| ymd(year, 1, 1)),
+        [year, month] => field(year).and_then(|year| field(month).and_then(|m| ymd(year, m, 1))),
+        [year, month, day] => field(year)
+            .and_then(|year| field(month).and_then(|m| field(day).and_then(|d| ymd(year, m, d)))),
+        _ => None,
+    };
+    parsed.ok_or_else(|| {
+        usage(format!(
+            "unparseable --as-of value {value:?}; expected YYYY-MM-DD, YYYY-MM or YYYY"
+        ))
+    })
+}
+
 /// `--scope-only` without a scope has nothing to narrow to (§9 gap 10).
 pub(crate) fn require_scope(scope_only: bool, scopes: &[String]) -> Result<(), JanusError> {
     if scope_only && scopes.is_empty() {
@@ -669,11 +753,115 @@ fn strings(pool: &StringPool, ids: &[StringId]) -> Vec<String> {
     ids.iter().map(|id| text(pool, *id)).collect()
 }
 
-/// Type, tag and scope filters: eligibility, never a weight (§3.1 step 3).
+/// The status half of eligibility (§3.7, §3.8).
+pub(crate) enum StatusGate {
+    /// A §3.2 table row; a status the row does not list is excluded.
+    Row(&'static IntentPolicy),
+    /// `facts`: effective status `active` and a canonical fact type (§9.2).
+    Fact,
+    /// `--as-of`: no status gate, because today's standing is not `T`'s.
+    Off,
+}
+
+/// The time half of eligibility (§3.6, §3.7, §3.8).
+pub(crate) enum TimeGate {
+    /// `history`, `evolution`, `exhaustive`: no window gate.
+    Off,
+    /// `current`: the window must contain `today`.
+    Today(NaiveDate),
+    /// `--as-of`: the window must contain `date`; no window means excluded.
+    AsOf(NaiveDate),
+}
+
+/// One query's status and time gate, with both per-document maps precomputed.
+///
+/// This is the only place a window or an effective status is resolved for a
+/// query. The maps are built here, once, before the row loop (P3 scope 10).
+pub(crate) struct Gate {
+    status: StatusGate,
+    time: TimeGate,
+    windows: BTreeMap<DocId, Window>,
+    statuses: BTreeMap<DocId, EffectiveStatus>,
+}
+
+impl Gate {
+    fn new(status: StatusGate, time: TimeGate, graph: &Graph, scopes: &ScopeFilter) -> Self {
+        Self {
+            status,
+            time,
+            windows: graph.windows(scopes),
+            statuses: graph.effective_statuses(scopes),
+        }
+    }
+
+    /// The gate for a `search` query (§3.7, §3.8).
+    fn search(
+        graph: &Graph,
+        scopes: &ScopeFilter,
+        intent: Intent,
+        include_superseded: bool,
+        as_of: Option<NaiveDate>,
+        today: NaiveDate,
+    ) -> Self {
+        let (status, time) = if let Some(date) = as_of {
+            (StatusGate::Off, TimeGate::AsOf(date))
+        } else if intent == Intent::Current {
+            // M5-9: the override row widens the statuses, and it cancels only
+            // the window gate. A flag that shows an old document and then drops
+            // it for being old is useless.
+            let time = if include_superseded {
+                TimeGate::Off
+            } else {
+                TimeGate::Today(today)
+            };
+            (
+                StatusGate::Row(score::policy(intent, include_superseded)),
+                time,
+            )
+        } else {
+            (StatusGate::Row(score::policy(intent, false)), TimeGate::Off)
+        };
+        Self::new(status, time, graph, scopes)
+    }
+
+    /// The gate for `facts`: effective `active`, inside the window (§3.7).
+    fn facts(graph: &Graph, scopes: &ScopeFilter, today: NaiveDate) -> Self {
+        Self::new(StatusGate::Fact, TimeGate::Today(today), graph, scopes)
+    }
+
+    /// The gate for `facts`' fallback list, which uses `current`'s rule.
+    fn current(graph: &Graph, scopes: &ScopeFilter, today: NaiveDate) -> Self {
+        Self::new(
+            StatusGate::Row(score::policy(Intent::Current, false)),
+            TimeGate::Today(today),
+            graph,
+            scopes,
+        )
+    }
+}
+
+/// Why one row did or did not pass eligibility, so a command can count what
+/// each gate hid (§3.7, §3.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    /// The query admits this document.
+    Include,
+    /// The type, tag or scope filter dropped it. Never counted: the user asked.
+    Filtered,
+    /// An effective status the query excludes.
+    HiddenStatus,
+    /// A window that does not contain the query's date.
+    HiddenWindow,
+    /// `--as-of`: the document has no validity window at all.
+    NoValidity,
+}
+
+/// Type, tag, scope, status and time: eligibility, never a weight (§3.1 step 3).
 pub(crate) struct Filter {
     types: BTreeSet<String>,
     tags: BTreeSet<String>,
     scopes: ScopeFilter,
+    gate: Gate,
 }
 
 impl Filter {
@@ -683,8 +871,8 @@ impl Filter {
         config: &Config,
         types: &[String],
         tags: &[String],
-        scopes: &[String],
-        scope_only: bool,
+        scopes: ScopeFilter,
+        gate: Gate,
     ) -> Self {
         Self {
             types: types
@@ -692,18 +880,70 @@ impl Filter {
                 .map(|name| config.resolve_type(name).name.into_owned())
                 .collect(),
             tags: tags.iter().map(|tag| normalise_tag(tag)).collect(),
-            scopes: ScopeFilter::new(scopes, scope_only),
+            scopes,
+            gate,
         }
     }
 
-    pub(crate) fn matches(&self, row: &DocRow) -> bool {
+    /// The full eligibility rule for one row, with the reason it failed.
+    pub(crate) fn evaluate(&self, row: &DocRow) -> Verdict {
         let type_ok = self.types.is_empty() || self.types.contains(row.type_name.as_str());
         let tag_ok = self.tags.is_empty()
             || row
                 .tags
                 .iter()
                 .any(|tag| self.tags.contains(&normalise_tag(tag)));
-        type_ok && tag_ok && self.scopes.matches(&row.scope, &row.shared_with)
+        if !(type_ok && tag_ok && self.scopes.matches(&row.scope, &row.shared_with)) {
+            return Verdict::Filtered;
+        }
+
+        let status = self.effective_status(row.id);
+        let admitted = match self.gate.status {
+            StatusGate::Row(policy) => policy.includes(Status::from(status)),
+            StatusGate::Fact => score::is_fact(&row.score_doc(), status),
+            StatusGate::Off => true,
+        };
+        if !admitted {
+            return Verdict::HiddenStatus;
+        }
+
+        match self.gate.time {
+            TimeGate::Off => Verdict::Include,
+            TimeGate::Today(today) => {
+                if self.window(row.id).covers_today(today) {
+                    Verdict::Include
+                } else {
+                    Verdict::HiddenWindow
+                }
+            }
+            TimeGate::AsOf(date) => {
+                let window = self.window(row.id);
+                if window.valid_from.is_none() {
+                    Verdict::NoValidity
+                } else if window.contains(date) {
+                    Verdict::Include
+                } else {
+                    // The window is the query, so an out-of-window document is
+                    // filtered, not hidden: it gets no note (§3.8).
+                    Verdict::Filtered
+                }
+            }
+        }
+    }
+
+    /// The window resolved for this query (§3.6). An unknown id has no window.
+    pub(crate) fn window(&self, id: DocId) -> Window {
+        self.gate.windows.get(&id).copied().unwrap_or_default()
+    }
+
+    /// The effective status resolved for this query (§3.7). Every row is a live
+    /// endpoint of the graph, so the fallback is unreachable.
+    pub(crate) fn effective_status(&self, id: DocId) -> EffectiveStatus {
+        self.gate
+            .statuses
+            .get(&id)
+            .copied()
+            .unwrap_or(EffectiveStatus::Unknown)
     }
 }
 
@@ -711,20 +951,42 @@ fn normalise_tag(raw: &str) -> String {
     raw.trim().to_ascii_lowercase()
 }
 
-/// Applies `keep` to every row, returning the kept indices and a row-index map.
-pub(crate) fn select(
-    rows: &[DocRow],
-    keep: impl Fn(&DocRow) -> bool,
-) -> (Vec<usize>, Vec<Option<usize>>) {
-    let mut selected = Vec::new();
-    let mut map = vec![None; rows.len()];
+/// What one pass over the rows selected, and why the rest were dropped.
+pub(crate) struct Selection {
+    /// Indices into the rows that passed, in row order.
+    pub(crate) selected: Vec<usize>,
+    /// Row index to position in [`Selection::selected`].
+    pub(crate) map: Vec<Option<usize>>,
+    /// Documents an effective status excluded.
+    pub(crate) hidden_status: usize,
+    /// Documents whose window does not contain the query's date.
+    pub(crate) hidden_window: usize,
+    /// `--as-of`: documents with no validity window at all.
+    pub(crate) no_validity: usize,
+}
+
+/// Applies `filter` to every row, counting the reasons it dropped one.
+pub(crate) fn select(rows: &[DocRow], filter: &Filter) -> Selection {
+    let mut out = Selection {
+        selected: Vec::new(),
+        map: vec![None; rows.len()],
+        hidden_status: 0,
+        hidden_window: 0,
+        no_validity: 0,
+    };
     for (index, row) in rows.iter().enumerate() {
-        if keep(row) {
-            map[index] = Some(selected.len());
-            selected.push(index);
+        match filter.evaluate(row) {
+            Verdict::Include => {
+                out.map[index] = Some(out.selected.len());
+                out.selected.push(index);
+            }
+            Verdict::HiddenStatus => out.hidden_status += 1,
+            Verdict::HiddenWindow => out.hidden_window += 1,
+            Verdict::NoValidity => out.no_validity += 1,
+            Verdict::Filtered => {}
         }
     }
-    (selected, map)
+    out
 }
 
 // ───────────────────────────────── results ─────────────────────────────────
@@ -754,6 +1016,10 @@ pub(crate) struct Render<'a> {
     pub(crate) started: Instant,
     pub(crate) query: Option<&'a str>,
     pub(crate) intent: Option<Intent>,
+    /// The expanded `--as-of` date, when the query asked for one (§3.8).
+    pub(crate) as_of: Option<NaiveDate>,
+    /// The gate this answer passed; it holds the window and status maps.
+    pub(crate) filter: &'a Filter,
     pub(crate) limit: usize,
     pub(crate) alpha: f64,
     pub(crate) degraded: Vec<String>,
@@ -819,6 +1085,9 @@ struct Report<'a> {
     query: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     intent: Option<&'static str>,
+    /// The expanded valid-time date (§3.8). Additive: `api` stays 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    as_of: Option<String>,
     limit: usize,
     taken_ms: u64,
     alpha: f64,
@@ -837,6 +1106,7 @@ impl<'a> Report<'a> {
             corpus_id: &render.config.corpus_id,
             query: render.query,
             intent: render.intent.map(intent_name),
+            as_of: render.as_of.map(|date| date.to_string()),
             limit: render.limit,
             taken_ms: u64::try_from(render.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             alpha: render.alpha,
@@ -869,6 +1139,11 @@ struct HitDto<'a> {
     /// Where `date` came from (§6.3, B-6); `absent` means no date at all.
     date_source: &'static str,
     effective_from: Option<String>,
+    /// The window this query resolved for the document (§3.6).
+    valid_from: Option<String>,
+    valid_to: Option<String>,
+    /// The status a reader must use, next to the declared `status` (§3.7).
+    effective_status: &'static str,
     scope: &'a str,
     shared_with: &'a [String],
     tags: &'a [String],
@@ -885,6 +1160,7 @@ impl<'a> HitDto<'a> {
     fn new(render: &'a Render<'_>, rank: usize, hit: &Hit) -> Self {
         let row = &render.rows[render.selected[hit.doc_index]];
         let chunk = &render.snapshot.chunks[hit.chunk_index];
+        let window = render.filter.window(row.id);
         Self {
             rank,
             id: row.id.to_hex(),
@@ -896,6 +1172,9 @@ impl<'a> HitDto<'a> {
             date: row.date.map(|date| date.to_string()),
             date_source: row.date_source.as_str(),
             effective_from: row.effective_from.map(|date| date.to_string()),
+            valid_from: window.valid_from.map(|date| date.to_string()),
+            valid_to: window.valid_to.map(|date| date.to_string()),
+            effective_status: render.filter.effective_status(row.id).as_str(),
             scope: &row.scope,
             shared_with: &row.shared_with,
             tags: &row.tags,
@@ -930,8 +1209,15 @@ fn intent_name(intent: Intent) -> &'static str {
 
 fn write_human(out: &mut impl io::Write, r: &Render<'_>, notes: &[String]) {
     let _ = writeln!(out, "corpus:  {}", r.root.display());
-    match (r.query, r.intent) {
-        (Some(query), Some(intent)) => {
+    match (r.query, r.intent, r.as_of) {
+        (Some(query), _, Some(as_of)) => {
+            let _ = writeln!(
+                out,
+                "query:   {query:?}  as-of = {as_of}  limit = {}",
+                r.limit
+            );
+        }
+        (Some(query), Some(intent), None) => {
             let _ = writeln!(
                 out,
                 "query:   {query:?}  intent = {}  limit = {}",
@@ -939,10 +1225,10 @@ fn write_human(out: &mut impl io::Write, r: &Render<'_>, notes: &[String]) {
                 r.limit
             );
         }
-        (Some(query), None) => {
+        (Some(query), None, None) => {
             let _ = writeln!(out, "query:   {query:?}  limit = {}", r.limit);
         }
-        (None, _) => {
+        (None, ..) => {
             let _ = writeln!(out, "facts:   active decisions, specs and principles");
         }
     }
@@ -1007,6 +1293,90 @@ fn write_human(out: &mut impl io::Write, r: &Render<'_>, notes: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::FixedClock;
+
+    /// Options for a unit-level query: lexical only, no rebuild, no JSON.
+    fn options(query: &str) -> Options {
+        Options {
+            query: query.to_owned(),
+            intent: None,
+            scopes: Vec::new(),
+            scope_only: false,
+            limit: 10,
+            types: Vec::new(),
+            tags: Vec::new(),
+            decay_half_life: None,
+            include_superseded: false,
+            as_of: None,
+            no_rebuild: false,
+            no_embeddings: true,
+            embedding_reason: None,
+            progress: false,
+            json: false,
+        }
+    }
+
+    #[test]
+    fn the_window_map_is_built_once_for_the_whole_query() {
+        // Four documents on one query. A window built per row would build the
+        // graph four times; the map is built once, before the row loop, so the
+        // count is 1 (P3 scope 10).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config::from_toml(
+            "index_dir = \".janus\"\ncorpus_id = \"gate\"\n",
+            Path::new("<test>"),
+        )
+        .expect("config");
+        for index in 1..=4 {
+            let text =
+                format!("---\ntitle: Cache {index}\ndate: 2021-0{index}-01\n---\n\ncache cache\n");
+            std::fs::write(dir.path().join(format!("doc-{index}.md")), text).expect("write");
+        }
+        let today = NaiveDate::from_ymd_opt(2025, 4, 1).expect("date");
+
+        crate::graph::reset_build_count();
+        let outcome = query(
+            dir.path(),
+            &config,
+            &FixedClock(today),
+            None,
+            &options("cache"),
+        )
+        .expect("query");
+
+        assert_eq!(outcome.rows.len(), 4, "every document is a row");
+        assert_eq!(crate::graph::build_count(), 1, "one graph per query");
+    }
+
+    #[test]
+    fn as_of_accepts_three_forms_and_expands_a_short_one() {
+        for (raw, expected) in [
+            ("2020-03-01", (2020, 3, 1)),
+            ("2021-07", (2021, 7, 1)),
+            ("2021", (2021, 1, 1)),
+            (" 2022-02-03 ", (2022, 2, 3)),
+        ] {
+            let date = parse_as_of(raw).expect("accepted form");
+            assert_eq!(
+                date,
+                NaiveDate::from_ymd_opt(expected.0, expected.1, expected.2).expect("date"),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unparseable_as_of_is_a_usage_error_that_names_the_value() {
+        for raw in ["2025-13-40", "not-a-date", "", "2020-03-01-05"] {
+            let error = parse_as_of(raw).expect_err("rejected form");
+            let text = error.to_string();
+            assert!(text.contains(raw.trim()), "{raw:?}: {text}");
+            assert!(
+                matches!(error, JanusError::Usage { .. }),
+                "{raw:?}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn a_missing_query_vector_scores_every_chunk_zero() {
