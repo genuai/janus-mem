@@ -22,12 +22,11 @@ use serde::Serialize;
 
 use crate::clock::Clock;
 use crate::config::{self, Config};
-use crate::document::Document;
 use crate::error::JanusError;
 use crate::id::DocId;
 use crate::index::build::{self, BuildPlan};
 use crate::index::embed::Embedder;
-use crate::index::store::{self, INDEX_FILE, Publication};
+use crate::index::store::{self, INDEX_FILE};
 use crate::scan::API_VERSION;
 use crate::vault::{self, WalkOptions, identity, resolve};
 
@@ -63,35 +62,39 @@ pub fn run(
 ) -> Result<(), JanusError> {
     let started = Instant::now();
     let walk = vault::walk(root, config, WalkOptions::default())?;
-    let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
-    identity::derive_identity(&mut documents, config);
-
-    let forced = forced_documents(root, &documents, &options.paths)?;
+    let forced = forced_documents(root, config, &walk, &options.paths)?;
     let dir = config::resolve_index_dir(root, &config.index_dir);
-    let previous = if options.rebuild {
-        None
-    } else {
-        store::previous_generation(&dir)
-    };
-    let plan = if options.dry_run {
-        build::plan_forced_dry_run(config, &documents, previous.as_ref(), &forced, embedder)?
-    } else {
-        build::plan_forced(config, &documents, previous.as_ref(), &forced, embedder)?
-    };
+    let built_at = format!("{}T00:00:00Z", clock.today());
 
-    let written = if options.dry_run {
-        None
+    // A dry run plans and writes nothing; it takes no lock, because a lock is
+    // held to publish (§3.7, D-9).
+    let (plan, written, passes) = if options.dry_run {
+        let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
+        identity::derive_identity(&mut documents, config);
+        let previous = if options.rebuild {
+            None
+        } else {
+            store::previous_generation(&dir)
+        };
+        let plan =
+            build::plan_forced_dry_run(config, &documents, previous.as_ref(), &forced, embedder)?;
+        (plan, None, 0)
     } else {
-        let built_at = format!("{}T00:00:00Z", clock.today());
-        Some(store::publish(&Publication {
-            dir: &dir,
+        // The command owns the lock and passes it, so the write loop publishes
+        // under one lock and never tries to take it twice (§3.2, D-14).
+        let lock = store::Lock::acquire(&dir, store::LOCK_TIMEOUT)?;
+        let outcome = store::build_until_stable(
+            &dir,
             root,
-            snapshot: &plan.snapshot,
-            chunker: plan.chunker,
-            vectors: plan.vectors.as_ref(),
-            vectors_dropped: plan.vectors_dropped,
-            built_at: &built_at,
-        })?)
+            config,
+            embedder,
+            &built_at,
+            walk,
+            &forced,
+            options.rebuild,
+            &lock,
+        )?;
+        (outcome.plan, Some(outcome.manifest), outcome.passes)
     };
 
     for warning in &config.warnings {
@@ -116,6 +119,7 @@ pub fn run(
             embedded: plan.stats.embedded_chunks,
             reused_vectors: plan.stats.reused_vector_chunks,
             vectors_bytes: plan.vectors_bytes(),
+            passes,
             taken_ms,
             index_sha: written.as_ref().map(|manifest| manifest.index_sha.clone()),
         };
@@ -141,12 +145,19 @@ pub fn run(
 ///
 /// Both readings of a relative path are tried — against the corpus root and
 /// against the working directory — and a path that names no document in the
-/// corpus is an error naming it, never a silent no-op.
+/// corpus is an error naming it, never a silent no-op. With no path there is
+/// nothing to resolve: the write loop resolves the walk itself.
 fn forced_documents(
     root: &Path,
-    documents: &[Document],
+    config: &Config,
+    walk: &vault::WalkResult,
     paths: &[PathBuf],
 ) -> Result<BTreeSet<DocId>, JanusError> {
+    if paths.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
+    identity::derive_identity(&mut documents, config);
     let mut forced = BTreeSet::new();
     for given in paths {
         let mut found = false;
@@ -154,7 +165,7 @@ fn forced_documents(
             let Ok(resolved) = vault::confine(root, &candidate) else {
                 continue;
             };
-            for document in documents {
+            for document in &documents {
                 if document.path == resolved {
                     forced.insert(document.id);
                     found = true;
@@ -204,6 +215,9 @@ struct Receipt {
     reused_vectors: usize,
     /// The byte length `vectors.f32` has (or would have).
     vectors_bytes: Option<u64>,
+    /// How many build passes ran: one on a quiet corpus, more when a document
+    /// changed while the build ran (§3.2). Zero on `--dry-run`.
+    passes: u32,
     taken_ms: u64,
     /// The published generation id; absent on `--dry-run`.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -96,6 +96,7 @@ fn publish_hooked(root: &Path, plan: &BuildPlan, hook: &mut dyn FnMut(Stage)) ->
         vectors: plan.vectors.as_ref(),
         vectors_dropped: plan.vectors_dropped,
         built_at: BUILT_AT,
+        corpus_sig: None,
     };
     store::publish_with_hook(&publication, hook).expect("publish")
 }

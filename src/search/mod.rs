@@ -13,6 +13,7 @@
 //! stderr (§8.2).
 
 use std::collections::BTreeSet;
+use std::fs;
 
 pub mod facts;
 use std::io::{self, Write as _};
@@ -28,6 +29,7 @@ use crate::document::{DateSource, Status};
 use crate::error::JanusError;
 use crate::id::{ChunkId, DocId};
 use crate::index::embed::Embedder;
+use crate::index::refresh::{self, Witness};
 use crate::index::store::{self, LoadOptions, Policy};
 use crate::index::vectors::{Vectors, dot};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
@@ -35,6 +37,7 @@ use crate::scan::API_VERSION;
 use crate::score::{self, Breakdown, Intent, ScopeFilter, ScoreDoc, ScoreInput};
 use crate::tokenize::{Tokenizer, Tokens};
 use crate::vault::resolve::strip_leading_date;
+use crate::vault::{self, WalkOptions};
 
 /// The `--limit` default: ten documents (§3.1, S-16).
 pub const DEFAULT_LIMIT: usize = 10;
@@ -102,6 +105,7 @@ pub fn run(
         alpha: outcome.alpha,
         degraded: outcome.degraded,
         notes: outcome.notes,
+        stale: outcome.stale,
     })
 }
 
@@ -124,6 +128,8 @@ pub struct Outcome {
     /// Title tokenizations this query performed: one per selected document
     /// (M4C §3.1). An empty query still tokenizes each title once.
     pub title_tokenizations: usize,
+    /// True when the corpus changed after the index was built (M4D §3.1).
+    pub stale: bool,
     /// The generation this outcome was computed from.
     pub snapshot: Snapshot,
 }
@@ -311,6 +317,7 @@ pub fn query(
         degraded,
         intent,
         title_tokenizations,
+        stale: prepared.stale,
         snapshot: prepared.snapshot,
     })
 }
@@ -322,6 +329,8 @@ pub(crate) struct Prepared {
     pub(crate) snapshot: Snapshot,
     pub(crate) index: LexicalIndex,
     pub(crate) vectors: Option<Vectors>,
+    /// True when the corpus changed after the generation was built (M4D §3.1).
+    pub(crate) stale: bool,
 }
 
 /// Loads a validated generation and prints the one stale line when a read built
@@ -369,12 +378,36 @@ pub(crate) fn prepare(
     if let (true, Some(cause)) = (load.rebuilt, &load.stale) {
         eprintln!("stale: {cause}");
     }
+    // The witness: one walk, compared with the digest the manifest stores. This
+    // phase only reports it; a read still refreshes nothing (§3.5, D-2).
+    let witness = corpus_witness(root, config, &dir, &load.manifest)?;
     let index = load.snapshot.to_index()?;
     Ok(Prepared {
         snapshot: load.snapshot,
         index,
         vectors: load.vectors,
+        stale: witness.stale,
     })
+}
+
+/// Computes the witness for a loaded generation (M4D §3.1).
+///
+/// The walk is the price of an exact answer: an mtime comparison cannot see a
+/// deletion or a rename, and the digest can. A read pays this walk once; the
+/// refresh phase reuses it for its own plan.
+fn corpus_witness(
+    root: &Path,
+    config: &Config,
+    dir: &Path,
+    manifest: &store::Manifest,
+) -> Result<Witness, JanusError> {
+    let walk = vault::walk(root, config, WalkOptions::default())?;
+    // A stat failure leaves the witness without the one fact the fallback needs;
+    // a read that cannot prove a change reports a fresh corpus.
+    let index_mtime = fs::metadata(dir.join(store::INDEX_FILE))
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    Ok(refresh::Witness::of(&walk.files, manifest, index_mtime))
 }
 
 /// Builds the `degraded` list from the flag, the resolved embedder and its reason.
@@ -727,6 +760,8 @@ pub(crate) struct Render<'a> {
     pub(crate) alpha: f64,
     pub(crate) degraded: Vec<String>,
     pub(crate) notes: Vec<String>,
+    /// True when the corpus changed after the index was built (M4D §3.1).
+    pub(crate) stale: bool,
 }
 
 /// Renders the hits in the command's selected mode.
@@ -770,6 +805,13 @@ fn undated_note(undated: usize) -> String {
     format!("{undated} result(s) have no date and do not decay")
 }
 
+/// The `index` block of the JSON report: what the answer came from (M4D §3.1).
+#[derive(Serialize)]
+struct IndexDto {
+    /// True when the corpus changed after the index was built.
+    stale: bool,
+}
+
 #[derive(Serialize)]
 struct Report<'a> {
     api: u32,
@@ -784,6 +826,8 @@ struct Report<'a> {
     alpha: f64,
     degraded: &'a [String],
     notes: &'a [String],
+    /// The index this answer came from (M4D §3.1). Additive: `api` stays 1.
+    index: IndexDto,
     results: Vec<HitDto<'a>>,
 }
 
@@ -800,6 +844,9 @@ impl<'a> Report<'a> {
             alpha: render.alpha,
             degraded: &render.degraded,
             notes,
+            index: IndexDto {
+                stale: render.stale,
+            },
             results: render
                 .hits
                 .iter()

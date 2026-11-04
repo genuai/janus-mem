@@ -9,6 +9,9 @@ expression: snapshot_json(&text)
   "degraded": [
     "--no-embeddings: lexical only"
   ],
+  "index": {
+    "stale": false
+  },
   "intent": "history",
   "limit": 3,
   "notes": [

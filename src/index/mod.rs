@@ -31,6 +31,7 @@ pub mod build;
 pub mod cmd;
 pub mod embed;
 mod lexical;
+pub mod refresh;
 pub mod store;
 pub mod vectors;
 

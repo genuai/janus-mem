@@ -132,6 +132,16 @@ const MAX_ALIAS_HOPS: usize = 16;
 
 // ───────────────────────────── resolved config ─────────────────────────────
 
+/// What a read does when the corpus changed after the build (M4D §3.3, D-4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Refresh {
+    /// Refresh the index when the corpus changed. The default.
+    #[default]
+    Auto,
+    /// Never refresh because the corpus changed. A command must do it.
+    Manual,
+}
+
 /// A fully resolved corpus config. Cheap to read, expensive to build — build
 /// once per process (§8.4).
 #[derive(Debug, Clone)]
@@ -140,6 +150,8 @@ pub struct Config {
     pub corpus_id: String,
     /// Index location, relative to the corpus root unless absolute.
     pub index_dir: PathBuf,
+    /// What a read does when the corpus changed after the build (M4D §3.3).
+    pub refresh: Refresh,
     /// Fallbacks applied when frontmatter declares nothing (§6.3).
     pub defaults: Defaults,
     /// Decay parameters (§6.6).
@@ -403,6 +415,7 @@ impl Config {
 
         let path_hints = build_path_hints(raw.paths, &mut warnings);
         let excludes = build_excludes(raw.index.exclude.as_deref().unwrap_or(&[]), &mut warnings);
+        let refresh = resolve_refresh(raw.index.refresh.as_deref(), &mut warnings);
 
         // Alpha is a scoring preference, not a hard boundary: a bad value is a
         // warning and a clamp, never a refusal to start. NaN has no meaningful
@@ -437,6 +450,7 @@ impl Config {
         Self {
             corpus_id,
             index_dir,
+            refresh,
             defaults,
             decay,
             chunking: ChunkingConfig {
@@ -803,6 +817,12 @@ pub enum ConfigWarning {
         /// The configured value.
         value: f64,
     },
+    /// `[index] refresh` was neither `auto` nor `manual`; the resolved config
+    /// uses `auto`.
+    UnknownRefresh {
+        /// The configured value.
+        value: String,
+    },
 }
 
 impl fmt::Display for ConfigWarning {
@@ -838,6 +858,10 @@ impl fmt::Display for ConfigWarning {
             Self::TitleBoostOutOfRange { value } => write!(
                 f,
                 "`scoring.title_boost` is {value}; expected a number in [0, 1]"
+            ),
+            Self::UnknownRefresh { value } => write!(
+                f,
+                "`index.refresh` is `{value}`; expected `auto` or `manual`, so `auto` is used"
             ),
         }
     }
@@ -932,6 +956,7 @@ struct RawDecay {
 #[serde(default)]
 struct RawIndex {
     exclude: Option<Vec<String>>,
+    refresh: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1097,6 +1122,23 @@ fn validate_corpus_id(value: &str, warnings: &mut Vec<ConfigWarning>) {
         warnings.push(ConfigWarning::InvalidCorpusId {
             value: value.to_owned(),
         });
+    }
+}
+
+/// Resolves `[index] refresh`, warning on a value it does not know (D-4).
+///
+/// An unknown value is a typo, not a reason to refuse to start: warn once and
+/// keep the default, which refreshes.
+fn resolve_refresh(value: Option<&str>, warnings: &mut Vec<ConfigWarning>) -> Refresh {
+    match value {
+        None | Some("auto") => Refresh::Auto,
+        Some("manual") => Refresh::Manual,
+        Some(other) => {
+            warnings.push(ConfigWarning::UnknownRefresh {
+                value: other.to_owned(),
+            });
+            Refresh::Auto
+        }
     }
 }
 
@@ -1398,6 +1440,37 @@ mod tests {
         assert_eq!(config.aliases(Field::Id).len(), 5);
         assert_eq!(config.decay.half_life_for("finding"), 365.0);
         assert_eq!(config.decay.half_life_for("note"), 180.0);
+    }
+
+    // ─────────────────────────── refresh policy ──────────────────────────
+
+    #[test]
+    fn the_refresh_key_defaults_to_auto() {
+        let config = parse("index_dir = \".janus\"\n");
+
+        assert_eq!(config.refresh, Refresh::Auto);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn refresh_manual_is_parsed() {
+        let config = parse("index_dir = \".janus\"\n\n[index]\nrefresh = \"manual\"\n");
+
+        assert_eq!(config.refresh, Refresh::Manual);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn an_unknown_refresh_value_warns_and_uses_auto() {
+        let config = parse("index_dir = \".janus\"\n\n[index]\nrefresh = \"sometimes\"\n");
+
+        assert_eq!(config.refresh, Refresh::Auto);
+        assert_eq!(
+            config.warnings,
+            vec![ConfigWarning::UnknownRefresh {
+                value: "sometimes".to_owned()
+            }]
+        );
     }
 
     #[test]

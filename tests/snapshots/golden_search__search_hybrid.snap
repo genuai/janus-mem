@@ -7,6 +7,9 @@ expression: snapshot_json(&text)
   "api": 1,
   "corpus_id": "fixtures",
   "degraded": [],
+  "index": {
+    "stale": false
+  },
   "intent": "history",
   "limit": 3,
   "notes": [

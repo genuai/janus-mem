@@ -9,6 +9,9 @@ expression: strip_title_boost(snapshot_json(&unboosted))
   "degraded": [
     "--no-embeddings: lexical only"
   ],
+  "index": {
+    "stale": false
+  },
   "intent": "history",
   "limit": 3,
   "notes": [
