@@ -401,6 +401,10 @@ chunk. Tests use a counting embedder and assert the values, never the text.
 | D-12 | How many lines a read prints | At most one, and `refresh:` is the only word | `search/mod.rs` |
 | D-13 | The writer's lost-update window | Re-walk after publish; rebuild while the signature differs; stop after 3 passes | `store.rs` |
 | D-14 | Where the lock lives in the writer loop | The caller acquires it; `build_until_stable` takes `&Lock` and publishes with `publish_locked` | `store.rs`, `cmd.rs` |
+| D-15 | What `passes` reports on `--dry-run` | **`0`.** No pass ran: a dry run plans once and writes nothing. A receipt that claimed one pass would describe a build that did not happen | `cmd.rs` |
+| D-16 | Who prints the incomplete line | **`build_until_stable` itself.** Both writers reach this one function, and a caller-side flag would let one of them forget the line | `store.rs` |
+| D-17 | Already-resolved documents in the writer | **Resolved only when they are needed.** `PATHS` resolves the walk to find the `DocId`s it forces; a plain write resolves once, inside the loop. A second resolve of the same walk would read every file twice | `cmd.rs`, `refresh.rs` |
+| D-18 | Does P1 split at the 450-line seam | **No.** P1 lands at 559 logic lines and 686 test lines: under the 600 ceiling. The seam would put the digest in one PR and the writer that stores it in the next, so the first PR would have no behaviour a test can see | — |
 
 ## 5. Phases
 
@@ -668,7 +672,33 @@ Two decisions are agreed and belong to the temporal milestone, not to M4D:
 
 ## 11. Implementation log — Phase 1
 
-_Nothing recorded yet._
+- **The signature is a pure function.** `refresh::Signature` sorts the walked
+  `(rel_path, size, mtime)` and encodes it as length-prefixed fields, so a path
+  cannot shift a field boundary. The mtime encodes as `(tag, secs, nanos)`: a
+  pre-epoch time carries its own tag and its distance from the epoch, so it never
+  panics and never collapses into a post-epoch value of the same magnitude. No
+  `as_secs()`-only encoding: it would hide a change inside one second.
+- **The witness reports one boolean.** `Witness::of` compares the digest the
+  manifest stores, or falls back to `max mtime > mtime(index.bin)` when the
+  manifest has no digest. `Witness { changed }` from §5 was dropped: a boolean
+  answer is all a caller uses, and §2 says as much.
+- **The writer closes its own window.** `store::build_until_stable` plans from the
+  walk the caller made, publishes the digest of that walk, re-walks, and repeats
+  while the digest differs, bounded at `MAX_PASSES = 3`. `janus index` and a
+  read-triggered rebuild both use it, and both hold one lock for every pass.
+- **The command owns the lock.** `cmd::run` acquires it and passes `&Lock`, so
+  `publish_locked` never tries to take it twice. `--dry-run` takes no lock.
+- **`prepare` walks once for the witness and prints nothing.** The walk is the
+  price of an exact answer; P2 reuses it for the refresh.
+- **Deviations.** `build_until_stable` keeps the nine named arguments and carries
+  `#[allow(clippy::too_many_arguments)]`, with a comment saying why, as
+  `build::reusable` already does. `first_walk` is taken by value, so the loop owns
+  the walk and `WalkResult` needs no `Clone`.
+- **Not in this phase.** No refresh on read, no `refresh:` line, no `try_acquire`,
+  no `Check`/`Mismatch`, no progress sink or flag, no `Expected::check` change, no
+  payload or `format_version` change, no new dependency.
+- **Size.** 559 logic lines and 686 test lines. The 450-line split seam was not
+  used, for the reason in D-18.
 
 ## 12. Implementation log — Phase 2
 

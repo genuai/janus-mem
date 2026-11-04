@@ -178,6 +178,7 @@ pub fn run(
         alpha: 0.0,
         degraded,
         notes,
+        stale: prepared.stale,
     })
 }
 

@@ -30,6 +30,10 @@ fn index_publishes_a_generation_and_reports_the_receipt() {
     assert!(report["retokenized"].as_u64().unwrap() > 0, "{report}");
     assert_eq!(report["dry_run"], false);
     assert!(report["index_sha"].is_string(), "{report}");
+    assert_eq!(
+        report["passes"], 1,
+        "a quiet corpus takes one pass: {report}"
+    );
 
     assert!(vault.path().join(".janus/index.bin").exists());
     assert!(vault.path().join(".janus/manifest.json").exists());
@@ -44,6 +48,7 @@ fn a_second_index_reuses_every_document() {
     assert_eq!(report["rebuilt"], 0, "{report}");
     assert_eq!(report["retokenized"], 0, "{report}");
     assert_eq!(report["reused"], report["docs"], "{report}");
+    assert_eq!(report["passes"], 1, "nothing changed: {report}");
 }
 
 #[test]
@@ -64,6 +69,7 @@ fn dry_run_writes_nothing() {
 
     assert_eq!(report["dry_run"], true);
     assert!(report.get("index_sha").is_none(), "{report}");
+    assert_eq!(report["passes"], 0, "a dry run writes nothing: {report}");
     assert!(report["retokenized"].as_u64().unwrap() > 0, "{report}");
     assert!(!vault.path().join(".janus").exists());
 }

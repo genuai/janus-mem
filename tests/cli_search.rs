@@ -172,6 +172,62 @@ fn a_stale_index_rebuilds_with_exactly_one_stderr_line() {
 }
 
 #[test]
+fn search_json_reports_a_fresh_index_with_no_stderr_line() {
+    let vault = fixture_vault();
+    index(vault.path());
+
+    let output = run(vault.path(), &["search", "cache", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(report["api"], 1, "the key is additive");
+    assert_eq!(report["index"]["stale"], false, "{report}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "",
+        "this phase adds no line"
+    );
+}
+
+#[test]
+fn an_edited_document_makes_search_json_report_stale() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let path = vault.path().join("notes/yaml-comments.md");
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str("\nan edit made after the build\n");
+    fs::write(&path, text).unwrap();
+
+    let output = run(vault.path(), &["search", "cache", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert_eq!(report["index"]["stale"], true, "{report}");
+    assert!(!stderr.contains("refresh:"), "{stderr}");
+    assert!(!stderr.contains("stale:"), "{stderr}");
+
+    // `janus index` writes the digest for the edited corpus.
+    index(vault.path());
+    let report = search_json(vault.path(), &["cache"]);
+    assert_eq!(report["index"]["stale"], false, "{report}");
+}
+
+#[test]
+fn an_edited_document_makes_facts_json_report_stale() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let path = vault.path().join("notes/yaml-comments.md");
+    let mut text = fs::read_to_string(&path).unwrap();
+    text.push_str("\nan edit made after the build\n");
+    fs::write(&path, text).unwrap();
+
+    let report = common::facts_json(vault.path(), &[]);
+
+    assert_eq!(report["index"]["stale"], true, "{report}");
+}
+
+#[test]
 fn search_without_an_index_builds_one() {
     let vault = fixture_vault();
     let report = search_json(vault.path(), &["cache"]);

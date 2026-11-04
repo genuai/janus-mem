@@ -4,6 +4,7 @@
 //! publication: `.janus/lock` for the whole write (S-7), a unique temp file per
 //! writer, `index.bin` renamed before `manifest.json` (S-17).
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
@@ -18,11 +19,13 @@ use tempfile::NamedTempFile;
 
 use crate::config::{self, Config};
 use crate::error::JanusError;
+use crate::id::DocId;
 use crate::tokenize::{Stemmer, Tokenizer, TokenizerFingerprint};
-use crate::vault::{self, WalkOptions, identity, resolve};
+use crate::vault::{self, WalkOptions};
 
 use super::build::{self, BuildPlan, BuildStats};
 use super::embed::{Embedder, EmbedderId};
+use super::refresh;
 use super::vectors::{VECTORS_FILE, Vectors};
 use super::{ChunkMeta, ChunkingFingerprint, DocMeta, FORMAT_VERSION, LexicalIndex, Snapshot};
 
@@ -100,6 +103,14 @@ pub struct Manifest {
     pub vectors_sha: Option<String>,
     /// Byte length of `vectors.f32`, checked against `chunks × dim × 4`.
     pub vectors_len: Option<u64>,
+    /// blake3 of the corpus signature this generation was built from (M4D §3.1).
+    ///
+    /// `None` on a manifest written before M4D, or by a binary that predates
+    /// it. A read then falls back to the mtime rule. The field is additive: the
+    /// manifest has no `deny_unknown_fields`, so an older binary ignores it, and
+    /// `format_version` does not move (§8.3).
+    #[serde(default)]
+    pub corpus_sig: Option<String>,
 }
 
 /// The hashes and lengths of the payload files one publication wrote (§3.1).
@@ -191,6 +202,11 @@ impl VectorSet {
 
 impl Manifest {
     /// Assembles the manifest for an already-encoded snapshot (I-3).
+    ///
+    /// `corpus_sig` is the digest of the walk that produced the snapshot
+    /// (M4D §3.1). A writer always has one, so the field is a parameter rather
+    /// than a value patched in afterwards: there is no moment when a manifest
+    /// exists without it.
     #[must_use]
     pub fn new(
         root: &Path,
@@ -198,6 +214,7 @@ impl Manifest {
         chunker: ChunkingFingerprint,
         payloads: Payloads,
         built_at: &str,
+        corpus_sig: Option<&str>,
     ) -> Self {
         let (embedder, vectors_sha, vectors_len) = match payloads.vectors {
             Some(artifact) => (Some(artifact.id), Some(artifact.sha), Some(artifact.len)),
@@ -221,6 +238,7 @@ impl Manifest {
             embedder,
             vectors_sha,
             vectors_len,
+            corpus_sig: corpus_sig.map(str::to_owned),
         }
     }
 }
@@ -516,6 +534,10 @@ pub struct Publication<'a> {
     pub vectors_dropped: Option<usize>,
     /// Injected build time; no library path invents one (I-3).
     pub built_at: &'a str,
+    /// The digest of the walk this plan was built from (§3.1). `None` leaves the
+    /// manifest without one, which makes the next read fall back to the mtime
+    /// rule.
+    pub corpus_sig: Option<&'a str>,
 }
 
 /// Publishes one generation under the writer lock, manifest last (S-7, S-17).
@@ -600,6 +622,7 @@ fn publish_locked(
             vectors,
         },
         publication.built_at,
+        publication.corpus_sig,
     );
     let manifest_path = dir.join(MANIFEST_FILE);
     let json = serde_json::to_vec_pretty(&manifest).map_err(|error| {
@@ -1118,52 +1141,116 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
         ));
     }
 
-    let plan = rebuild_plan(options.root, options.config, &dir, options.embedder)?;
-    let publication = Publication {
-        dir: &dir,
-        root: options.root,
-        snapshot: &plan.snapshot,
-        chunker: plan.chunker,
-        vectors: plan.vectors.as_ref(),
-        vectors_dropped: plan.vectors_dropped,
-        built_at: options.built_at,
-    };
-    let manifest = publish_locked(&publication, &mut |_| {}, &lock)?;
+    let walk = vault::walk(options.root, options.config, WalkOptions::default())?;
+    let outcome = build_until_stable(
+        &dir,
+        options.root,
+        options.config,
+        options.embedder,
+        options.built_at,
+        walk,
+        &BTreeSet::new(),
+        false,
+        &lock,
+    )?;
     // A read that did not want vectors does not receive them, even though the
     // rebuild it triggered may have written them.
     let vectors = if options.want_vectors {
-        plan.vectors.as_ref().map(|set| set.rows().clone())
+        outcome.plan.vectors.as_ref().map(|set| set.rows().clone())
     } else {
         None
     };
+    let stats = outcome.plan.stats;
     Ok(Load {
-        snapshot: plan.snapshot,
-        manifest,
+        snapshot: outcome.plan.snapshot,
+        manifest: outcome.manifest,
         vectors,
         rebuilt: true,
-        stats: plan.stats,
+        stats,
         stale: (!last.is_empty()).then_some(last),
     })
 }
 
-/// Computes the next snapshot from the vault, reusing tokens and rows where
-/// §3.4 allows.
-fn rebuild_plan(
+/// How many passes one build may take before it reports an incomplete refresh
+/// (§3.2). A corpus under a continuous writer cannot converge, and one line is
+/// better than a promise the build cannot keep.
+pub const MAX_PASSES: u32 = 3;
+
+/// What the write loop produced, described by the pass that finished.
+#[derive(Debug)]
+pub struct BuildOutcome {
+    /// The last pass's plan: its snapshot and stats are what was published.
+    pub plan: BuildPlan,
+    /// The manifest the last pass published.
+    pub manifest: Manifest,
+    /// How many passes ran. One on a quiet corpus, more when it changed.
+    pub passes: u32,
+}
+
+/// Plans, publishes, re-walks, and repeats while the corpus keeps changing
+/// (§3.2, D-13, D-14).
+///
+/// The digest in the manifest describes the walk that produced the plan, so an
+/// edit made during the build would otherwise be invisible: the published digest
+/// would say the corpus is fresh while the file is missing from the index. The
+/// loop closes that window with no stored clock and no second payload version.
+///
+/// The caller holds `lock` and owns `first_walk`; this function publishes under
+/// that one lock for every pass. It prints the incomplete line itself, because
+/// both writers reach this one function.
+///
+/// # Errors
+///
+/// Any walk, resolve, plan, encode or publication failure. A failed pass
+/// publishes nothing, so the previous generation stays readable.
+// Every argument is one input the loop reads: the writers' two neighbours, the
+// walk, its digest inputs, and the lock the caller already holds. Grouping them
+// into a struct would make one call site read `request.request`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_until_stable(
+    dir: &Path,
     root: &Path,
     config: &Config,
-    dir: &Path,
     embedder: Option<&dyn Embedder>,
-) -> Result<BuildPlan, JanusError> {
-    let walk = vault::walk(root, config, WalkOptions::default())?;
-    let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
-    identity::derive_identity(&mut documents, config);
-    let previous = previous_generation(dir);
-    Ok(build::plan(
-        config,
-        &documents,
-        previous.as_ref(),
-        embedder,
-    )?)
+    built_at: &str,
+    first_walk: vault::WalkResult,
+    forced: &BTreeSet<DocId>,
+    rebuild: bool,
+    lock: &Lock,
+) -> Result<BuildOutcome, JanusError> {
+    let mut walk = first_walk;
+    let mut passes = 0;
+    loop {
+        passes += 1;
+        let signature = refresh::Signature::of(&walk.files);
+        let plan = refresh::plan_from_walk(config, &walk, dir, embedder, forced, rebuild)?;
+        let digest = signature.digest();
+        let publication = Publication {
+            dir,
+            root,
+            snapshot: &plan.snapshot,
+            chunker: plan.chunker,
+            vectors: plan.vectors.as_ref(),
+            vectors_dropped: plan.vectors_dropped,
+            built_at,
+            corpus_sig: Some(&digest),
+        };
+        let manifest = publish_locked(&publication, &mut |_| {}, lock)?;
+
+        let next = vault::walk(root, config, WalkOptions::default())?;
+        let stable = refresh::Signature::of(&next.files).digest() == digest;
+        if stable || passes >= MAX_PASSES {
+            if !stable {
+                eprintln!("refresh: incomplete, corpus changed during the build");
+            }
+            return Ok(BuildOutcome {
+                plan,
+                manifest,
+                passes,
+            });
+        }
+        walk = next;
+    }
 }
 
 /// The previous snapshot and its validated rows, if both are usable (§3.4).
@@ -1365,6 +1452,7 @@ mod tests {
             vectors: None,
             vectors_dropped: None,
             built_at: "2025-04-01T00:00:00Z",
+            corpus_sig: None,
         };
         let manifest = publish(&publication).expect("publish");
 

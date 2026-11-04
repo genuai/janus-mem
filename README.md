@@ -69,6 +69,13 @@ path, span, breadcrumb and full score breakdown (`lexical`, `relevance`,
 text. A read auto-builds a missing index and rebuilds a stale one, printing one
 `stale: <cause>` line to stderr.
 
+The index records a digest of the corpus it was built from (the sorted path, size
+and mtime of every file), so `--json` answers `index: {"stale": true}` when the
+corpus changed after the build. That check sees an added, removed, renamed or
+edited file. It does not see a content change that keeps the path, the size and
+the mtime (`cp -a`, a restore from a backup); `janus index --rebuild` is the way
+to recover one.
+
 `facts` lists only active decisions, specs and principles — not drafts, unknown,
 deprecated or superseded documents, which `search --intent current` may still show. A
 vault that declares none of those types gets one note that says so, and the newest
