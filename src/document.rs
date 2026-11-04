@@ -277,7 +277,8 @@ impl fmt::Display for Status {
 ///
 /// Reported by `janus ids` so a user can see *why* a document has the identity
 /// it has. Ordered strongest to weakest to match the ladder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IdentityTier {
     /// Rung 1: a declared `id` (or an alias of it).
     DeclaredId,

@@ -893,7 +893,7 @@ fn a_payload_whose_manifest_shape_disagrees_rebuilds() {
 }
 
 // M4D P2 row 3: a read may not rebuild a format change, so the old rebuild
-// path is gone. The version-3 rebuild lives in `tests/cli_index.rs` now, under
+// path is gone. The rebuild to the current version lives in `tests/cli_index.rs`,
 // `janus_index_rebuilds_a_format_version_2_manifest_to_version_3`.
 #[test]
 fn a_format_version_2_manifest_refuses_a_read_with_a_full_build_reason() {
@@ -910,10 +910,10 @@ fn a_format_version_2_manifest_refuses_a_read_with_a_full_build_reason() {
     let JanusError::IndexNeedsFullBuild { reason } = &error else {
         panic!("expected IndexNeedsFullBuild, got {error:?}");
     };
-    assert_eq!(reason, "format_version 2 != 3");
+    assert_eq!(reason, "format_version 2 != 4");
     assert_eq!(
         error.to_string(),
-        "index needs a full build: run janus index (format_version 2 != 3)"
+        "index needs a full build: run janus index (format_version 2 != 4)"
     );
     assert_eq!(error.exit_code(), 1);
     assert_eq!(dir_snapshot(&dir), before, "a refusal writes nothing");

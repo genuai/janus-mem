@@ -4,7 +4,7 @@
 //! publication: `.janus/lock` for the whole write (S-7), a unique temp file per
 //! writer, `index.bin` renamed before `manifest.json` (S-17).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
@@ -293,6 +293,11 @@ impl Snapshot {
             terms: index.terms().to_vec(),
             postings: index.postings().to_vec(),
             avgdl: index.avgdl(),
+            // The identity tables describe a corpus, not a postings list, so
+            // the build fills them once identity is resolved (§3.1 step 4).
+            path_history: BTreeMap::new(),
+            identity: BTreeMap::new(),
+            tombstones: Vec::new(),
         }
     }
 
@@ -1717,7 +1722,7 @@ mod tests {
         cases.push((
             patched,
             MismatchField::FormatVersion,
-            "format_version 4 != 3",
+            "format_version 5 != 4",
         ));
 
         let mut patched = manifest.clone();

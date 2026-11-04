@@ -214,7 +214,7 @@ fn index_writes_vectors_f32_that_match_the_manifest() {
 
     let bytes = fs::read(vault.path().join(".janus/vectors.f32")).expect("the payload exists");
     let chunks = report["chunks"].as_u64().expect("chunks");
-    assert_eq!(manifest["format_version"], 3);
+    assert_eq!(manifest["format_version"], 4);
     assert_eq!(manifest["embedder"]["name"], "hash-64");
     assert_eq!(manifest["embedder"]["dim"], 64);
     assert_eq!(manifest["vectors_len"], bytes.len() as u64);
@@ -408,7 +408,7 @@ fn a_format_version_2_manifest_is_refused_with_one_line_and_not_rebuilt() {
         lines[0].contains("index needs a full build: run janus index"),
         "{stderr:?}"
     );
-    assert!(lines[0].contains("format_version 2 != 3"), "{stderr:?}");
+    assert!(lines[0].contains("format_version 2 != 4"), "{stderr:?}");
     assert_eq!(
         dir_snapshot(&vault.path().join(".janus")),
         before,
@@ -428,7 +428,7 @@ fn a_format_version_2_manifest_is_refused_with_one_line_and_not_rebuilt() {
 // Moved out of `tests/publish.rs`: a read no longer rebuilds a cold mismatch,
 // so the command is the only place the new version can be observed.
 #[test]
-fn janus_index_rebuilds_a_format_version_2_manifest_to_version_3() {
+fn janus_index_rebuilds_a_format_version_2_manifest_to_the_current_version() {
     let vault = fixture_vault();
     index(vault.path());
     patch_manifest(vault.path(), |manifest| {
