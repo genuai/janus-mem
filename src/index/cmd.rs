@@ -141,6 +141,8 @@ pub fn run(
             embedded: plan.stats.embedded_chunks,
             reused_vectors: plan.stats.reused_vector_chunks,
             vectors_bytes: plan.vectors_bytes(),
+            edges: plan.snapshot.edges.len(),
+            dangling_links: plan.snapshot.dangling_links.len(),
             passes,
             taken_ms,
             index_sha: written.as_ref().map(|manifest| manifest.index_sha.clone()),
@@ -242,6 +244,10 @@ struct Receipt {
     reused_vectors: usize,
     /// The byte length `vectors.f32` has (or would have).
     vectors_bytes: Option<u64>,
+    /// Links that resolved to two document ids.
+    edges: usize,
+    /// Links that resolved to nothing.
+    dangling_links: usize,
     /// How many build passes ran: one on a quiet corpus, more when a document
     /// changed while the build ran (§3.2). Zero on `--dry-run`.
     passes: u32,

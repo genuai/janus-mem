@@ -924,10 +924,10 @@ fn a_format_version_2_manifest_refuses_a_read_with_a_full_build_reason() {
     let JanusError::IndexNeedsFullBuild { reason } = &error else {
         panic!("expected IndexNeedsFullBuild, got {error:?}");
     };
-    assert_eq!(reason, "format_version 2 != 4");
+    assert_eq!(reason, "format_version 2 != 5");
     assert_eq!(
         error.to_string(),
-        "index needs a full build: run janus index (format_version 2 != 4)"
+        "index needs a full build: run janus index (format_version 2 != 5)"
     );
     assert_eq!(error.exit_code(), 1);
     assert_eq!(dir_snapshot(&dir), before, "a refusal writes nothing");

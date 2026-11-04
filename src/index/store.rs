@@ -299,6 +299,10 @@ impl Snapshot {
             path_history: BTreeMap::new(),
             identity: BTreeMap::new(),
             tombstones: Vec::new(),
+            // A snapshot built from a scan alone resolves no link; the build
+            // fills these from the tables above (§3.2).
+            edges: Vec::new(),
+            dangling_links: Vec::new(),
         }
     }
 
@@ -1594,6 +1598,7 @@ mod tests {
             date: None,
             date_source: crate::document::DateSource::None,
             effective_from: None,
+            effective_to: None,
             timeless: false,
             content_hash: Blake3Hash::of_bytes(b"body"),
             body_hash: Blake3Hash::of_bytes(b"body"),
@@ -1767,7 +1772,7 @@ mod tests {
         cases.push((
             patched,
             MismatchField::FormatVersion,
-            "format_version 5 != 4",
+            "format_version 6 != 5",
         ));
 
         let mut patched = manifest.clone();
@@ -1887,6 +1892,7 @@ mod tests {
                 date: None,
                 date_source: crate::document::DateSource::None,
                 effective_from: None,
+                effective_to: None,
                 timeless: false,
                 content_hash: Blake3Hash::of_bytes(b"body"),
                 body_hash: Blake3Hash::of_bytes(b"body"),

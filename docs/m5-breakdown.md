@@ -256,8 +256,9 @@ pub struct Edge {
 pub struct DanglingLink {
     /// The document that declared the link.
     pub from: DocId,
-    /// The text the frontmatter carried, for `doctor` to print.
-    pub target: StringId,
+    /// The text the frontmatter carried, for `doctor` to print. Text, not
+    /// `StringId`: it may name nothing in the corpus (M5-29).
+    pub target: String,
     /// Why the target did not resolve.
     pub reason: DanglingReason,
 }
@@ -905,6 +906,7 @@ in the corpus, instead of by `1.0`.
 | M5-25 | `tier` is the rung that carried or matched the id; the record's keys are refreshed on every build | §3.1 step 4 refreshes the keys, so a later move matches the title the document has now. A path-stable document keeps its tier (case 1.2); a move reports the matching rung (case 1.3), which is what makes the content-hash rung visible. |
 | M5-26 | Case 1.15 tests a removal, not a move | A move tombstones nothing (R-7): the id follows the document to its new path. Only a document that leaves the corpus retires, so only a removal can exercise the cleared flag. |
 | M5-27 | Scope qualifies every match key, including rungs 1 and 2 | A scope change is a re-key, not a move (§6.12 rule 5), so the id is not reported as `inherited`, and P6 does not report it as a confirmed move. The declared-id and content-hash id *values* are unaffected: only the candidate set is narrowed. §6.4's "keys 1–2 are not namespaced" describes the encoding, not the match. |
+| M5-29 | `DanglingLink.target` stores text, not `StringId` | The value may name nothing in the corpus, so there is no pool handle to give it, and `doctor` prints the user's own words. Same reason as M5-24. |
 
 ## 5. Phases
 
@@ -961,8 +963,9 @@ own base. The rejected seam — writer versus readers — put 880 lines in one P
 
 ### Phase 2 — Edges in the generation
 
-**Files.** `src/index/mod.rs`, `src/index/build.rs`, `src/graph.rs` (new), `src/config.rs`,
-`src/search/mod.rs` (`DocRow` link fields), `tests/fixtures/graph-vault/**`, `tests/common`.
+**Files.** `src/index/mod.rs`, `src/index/build.rs`, `src/link.rs` (new),
+`src/vault/identity.rs` (`alias_map`), `src/graph.rs` (new), `src/config.rs`,
+`tests/fixtures/graph-vault/**`, `tests/common`, `tests/edges.rs`, `tests/graph.rs`.
 
 **Build.** `Snapshot` gains `edges` and `dangling_links`; `DocMeta` gains `effective_to`;
 `FORMAT_VERSION = 5`. A new `link::resolve` walks declared values through the alias map,
@@ -1280,7 +1283,30 @@ readers and `janus ids`. Both are gated and within budget.
 
 ### Phase 2 — edges in the generation
 
-_(empty)_
+Delivered in two stacked changes at the split seam of §5: this one resolves
+links and publishes the edges, and the next adds the query-time graph. Each is
+measured against `main` and each is inside its ceiling.
+
+- **The seam was used.** The phase as one change measured 733 logic lines and
+  847 test lines — over both ceilings — so it was split into build side and
+  query side exactly as §5 names. The estimate in §8 (~450/~500) was too low
+  for a fixture with this many cases.
+- **`format_version` is 5** in this change: the snapshot carries `edges` and
+  `dangling_links`, and `DocMeta` carries `effective_to`.
+- **Deviations.** M5-29 (a dangling target is text). `src/search/mod.rs` needed
+  no change: the graph reads the snapshot's own rows, so `DocRow` gained no
+  field.
+- **The fixture is committed.** `tests/fixtures/graph-vault/` holds the 5-link
+  chain, three scope pairs, eight `bad/` documents and the near-identical pair
+  for P7. Its own config sets `corpus_id = "graph"` and `hash-64`, so a build
+  needs no model file. No date is later than 2022.
+- **Evidence.** On the main fixture the build publishes 3 edges and 1 dangling
+  row with `NotFound`. On the graph fixture it publishes 9 and 1. A move and a
+  deletion each keep the edge count, and a second build publishes the same
+  tables. The M1–M4 goldens did not move; the only test values that changed are
+  the two `format_version` literals, which the bump requires.
+- **Not included.** The graph, the cycle break, the scope rule and the four
+  `--json` counts are the follow-up change.
 
 ### Phase 3 — windows, effective status, and `--as-of`
 
