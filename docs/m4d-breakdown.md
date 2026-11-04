@@ -110,12 +110,9 @@ impl Signature {
     pub fn digest(&self) -> String;
 }
 
-/// The manifest's stored witness, and the read's answer.
+/// The read's answer: the corpus signature differs from the stored one.
 pub struct Witness {
-    /// True when the corpus signature differs from the stored one.
     pub stale: bool,
-    /// Files whose (size, mtime) differs, or that the index does not name.
-    pub changed: usize,
 }
 
 // src/index/build.rs — one callback, the seam the tests use.
@@ -170,7 +167,9 @@ stale     ⟺ digest(signature) ≠ manifest.corpus_sig
 - **The digest is canonical.** Encode each entry as its length-prefixed `/`-separated path, its size
   as `u64`, and its mtime as `(secs, nanos)` since the Unix epoch. Sort by path, then hash with
   blake3. A pre-epoch or unrepresentable time gets a distinct tag and never panics.
-- **The count is reported, not the list.** `N document(s) changed since the index was built`.
+- **The answer is one boolean, not a list or a count.** A digest cannot say *which* file changed,
+  and a second stored list would cost more than the walk it saves. The line says the corpus changed
+  and names the command that fixes a corpus it cannot see (`--rebuild`).
 - **The cost is one walk**: 8.5 ms over 2 119 files (best of 7, release, warm cache), plus a hash of
   about 85 KB. There is no budget line. P1's PR body records the number; no test asserts it.
 - **`corpus_sig` is additive, not a format change.** `Manifest` is JSON without
@@ -221,11 +220,11 @@ corrupt. It refuses only when a full build is the only cure.**
 | state | `search` / `facts`, `refresh = "auto"` | `--no-rebuild` |
 |---|---|---|
 | fresh | read; no lock, no line | read |
-| corpus changed | **refresh, then read**. `refresh: N document(s) changed` | refuse; write nothing |
+| corpus changed | **refresh, then read**. `refresh: corpus changed` | refuse; write nothing |
 | index absent | **build once, then read**. `refresh: no index yet` | `no index yet: run janus index` (exit 1) |
 | pair corrupt, retries exhausted | **rebuild once, then read**. `refresh: index repaired` | refuse; write nothing (exit 1) |
 | `format_version`, `tokenizer`, `chunker`, `corpus_id` or `embedder` mismatch | **refuse**: `index needs a full build: run janus index` (exit 1) | refuse (`IndexUnstable`, exit 1; unchanged) |
-| `built_root` mismatch | **load the generation, refresh, then read**. `refresh: N document(s) changed` | read (unchanged) |
+| `built_root` mismatch | **load the generation, refresh, then read**. `refresh: corpus changed` | read (unchanged) |
 
 **Which mismatches refuse.** A refusal is correct only when an incremental build cannot cure the
 state. `Expected::check` (`src/index/store.rs:758`) compares six fields. Five of them change the
@@ -294,7 +293,7 @@ because the corpus changed", not "do not work".
 
 | line | when |
 |---|---|
-| `refresh: N document(s) changed` | a corpus refresh published a generation |
+| `refresh: corpus changed` | a corpus refresh published a generation |
 | `refresh: no index yet` | the first build |
 | `refresh: index repaired` | a rejected pair was rebuilt |
 | `refresh: skipped, index busy` | another writer holds the lock (§3.4) |
@@ -307,8 +306,8 @@ Rules:
 - **At most one line per read.** A read that refreshes prints the `refresh:` line and nothing else.
   A read that adopts a valid generation prints nothing.
 - **`stale:` is retired** when P2 replaces `prepare`'s line. Until then it keeps its M3 meaning.
-- **P1 prints no line.** It reports the witness in `--json` as `index: { "stale": bool,
-  "changed": N }`, which is additive and keeps `api` at `1`. P2 adds the stderr line.
+- **P1 prints no line.** It reports the witness in `--json` as `index: { "stale": bool }`, which is
+  additive and keeps `api` at `1`. P2 adds the stderr line.
 - **stderr, never stdout.** stdout is the results stream (§8.5, §9.5).
 - **The line names no timing.** `janus index --json` already reports `taken_ms`. A duration on a read
   line is untestable and adds nothing.
@@ -403,11 +402,11 @@ JSON key changes.
 6. `[index] refresh = "auto" | "manual"`: parse, default `auto`, warn on an unknown value and use
    `auto`.
 7. `prepare` (`src/search/mod.rs:329`) computes the witness and reports it in `--json` as
-   `index: { "stale": bool, "changed": N }`. It prints no line in this phase.
+   `index: { "stale": bool }`. It prints no line in this phase.
 
 **Tests (~300 lines):**
 
-- A fresh vault is not stale. One edited document makes it stale, and the count is 1.
+- A fresh vault is not stale. One edited document makes it stale.
 - An added file, a removed file and a renamed file each make it stale. The rename keeps its mtime, so
   the digest must be the thing that sees it.
 - A file touched to an older time makes it stale, because mtime is part of the signature.
@@ -431,8 +430,8 @@ walk, not the end of the build. The caller acquires the lock and passes `&Lock`.
 comments in Simplified Technical English."
 
 **Accept:** gates green. The fixture is fresh after an index. An edit, an add, a remove and a rename
-each make it stale with the right count. An edit made during a build is in the index when the command
-returns. The witness duration over the fixture is in the PR body.
+each make it stale. An edit made during a build is in the index when the command returns. The witness
+duration over the fixture is in the PR body.
 
 ### Phase 2 — refresh on read
 
@@ -560,7 +559,7 @@ duration. Write comments in Simplified Technical English."
 ## 7. Definition of done
 
 1. Editing one document makes the next `search` see the edit, print exactly one
-   `refresh: 1 document(s) changed` line, and leave `.janus/index.bin` and `.janus/vectors.f32`
+   `refresh: corpus changed` line, and leave `.janus/index.bin` and `.janus/vectors.f32`
    byte-identical to a `--rebuild` copy of the same vault.
 2. A document added, removed or renamed makes the next `search` see it, with a `refresh:` line.
 3. A document edited *during* a build is in the index when the command returns.
