@@ -433,7 +433,26 @@ shifts nDCG by several points; the drop is reordering at ranks 2–10, not a los
 | P3-2 | The fixture's `speculative` type and `frozen` status stay unknown to the config | Declaring them in the fixture would tune the corpus to the metric. The real question is whether the author's vault ranks better, and that is measured on the vault |
 | P3-3 | No document-level aboutness change in M4C | The author's two commands decide that, not the fixture. Cause 2 stays open with its number |
 
+### Milestone acceptance on the author's corpus
+
+2 119 documents, real model, default settings, `--no-rebuild`. The target is the author's Q4 plan draft.
+
+| query | rank before M4C | rank after | score after |
+|---|---|---|---|
+| `q4-2026-plan-draft` | miss, below 5 | **1** | 1.0899 |
+| `what is our q4 okrs?` | miss, below 50 | **1** | 0.5948 |
+
+The second query's runner-up is 0.5503, so the margin is real and not a tie-break. In the first query
+the document was outside the top 50; it is now first, ahead of the OKR concepts note and the board
+synthesis for the same plan.
+
+The result set also changed in kind: before, it was documents that mention "q4" once; now it is the
+plan, its supporting notes, and the standing review that refers to it. That is the difference between
+matching a word and finding a document.
+
+**Cause 2 is closed.** Seventeen mentions across eighteen chunks did not need document-level
+aboutness once the title counted and the metadata stopped punishing the document (P3-3).
+
 ### What is not measured here
 
-The author's corpus: `search "what is our q4 okrs?"` and `search "q4-2026-plan-draft"`. Those two ranks
-are the milestone's acceptance, and they cannot be measured from the repository.
+Nothing. The two ranks above are the milestone's acceptance.
