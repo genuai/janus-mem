@@ -27,6 +27,7 @@ expression: snapshot_json(&text)
       "date": "2024-12-01",
       "date_source": "filename",
       "effective_from": null,
+      "effective_status": "superseded",
       "id": "d97e653f4a2dd60ea5d426b27d260e63",
       "ordinal": 0,
       "path": "<vault>/decisions/2024-12-01-redis-cache.md",
@@ -53,7 +54,9 @@ expression: snapshot_json(&text)
       "tags": [],
       "title": "Redis cache",
       "tokens": 9,
-      "type": "decision"
+      "type": "decision",
+      "valid_from": "2024-12-01",
+      "valid_to": "2024-11-02"
     },
     {
       "breadcrumb": [
@@ -63,6 +66,7 @@ expression: snapshot_json(&text)
       "date": "2025-02-01",
       "date_source": "filename",
       "effective_from": null,
+      "effective_status": "superseded",
       "id": "c64418894b25cfc133c800f916942b66",
       "ordinal": 0,
       "path": "<vault>/decisions/2025-02-01-cache-revisited.md",
@@ -89,7 +93,9 @@ expression: snapshot_json(&text)
       "tags": [],
       "title": "Cache revisited",
       "tokens": 15,
-      "type": "decision"
+      "type": "decision",
+      "valid_from": "2025-02-01",
+      "valid_to": null
     },
     {
       "breadcrumb": [
@@ -99,6 +105,7 @@ expression: snapshot_json(&text)
       "date": "2024-11-02",
       "date_source": "filename",
       "effective_from": null,
+      "effective_status": "superseded",
       "id": "2e85ad7f373d6a46959b68701c2fba40",
       "ordinal": 0,
       "path": "<vault>/decisions/2024-11-02-postgres-cache.md",
@@ -125,7 +132,9 @@ expression: snapshot_json(&text)
       "tags": [],
       "title": "Postgres cache",
       "tokens": 20,
-      "type": "decision"
+      "type": "decision",
+      "valid_from": "2024-11-02",
+      "valid_to": "2025-02-01"
     }
   ],
   "taken_ms": 0,

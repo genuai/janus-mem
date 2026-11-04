@@ -1,10 +1,12 @@
 //! `janus facts`: authoritative facts only (SPEC §9.2, §3.6, S-12).
 //!
 //! The predicate is an **inclusion rule**, not the `current` gate: a document is
-//! a fact when its canonical type is `decision`, `spec` or `principle` *and* its
-//! declared status is `active`. `current` admits `draft` (0.7×) and `unknown`
-//! (1.0×), so reusing it would surface draft specifications as authoritative
-//! facts; a weight is not an inclusion rule (§3.6).
+//! a fact when its canonical type is `decision`, `spec` or `principle`, its
+//! **effective** status is `active`, and its validity window contains today.
+//! `current` admits `draft` (0.7×) and `unknown` (1.0×), so reusing it would
+//! surface draft specifications as authoritative facts; a weight is not an
+//! inclusion rule (§3.6). The status is the derived one, so a document declared
+//! active but replaced by a link is not a fact (§9 correction 11, M5-11).
 //!
 //! No decay and no status factor: every included document has factor 1.0 and is
 //! ordered `type_authority` desc → `date` desc → `chunk_id` asc. With `--query`
@@ -30,13 +32,14 @@ use std::time::Instant;
 
 use crate::clock::Clock;
 use crate::config::Config;
+use crate::document::Status;
 use crate::error::JanusError;
-use crate::graph::EffectiveStatus;
+use crate::graph::Graph;
 use crate::index::embed::Embedder;
-use crate::score::{self, Intent, ScoreDoc, ScoreInput, ScoredDoc};
+use crate::score::{self, Intent, ScopeFilter, ScoreDoc, ScoreInput, ScoredDoc};
 
 // One loader, one filter, one renderer: only the predicate and the order differ.
-use super::{Filter, Hit, Render, prepare, query_scores, render, require_scope, select};
+use super::{Filter, Gate, Hit, Render, prepare, query_scores, render, require_scope, select};
 
 /// How the included documents are ranked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,30 +116,28 @@ pub fn run(
         degraded.push("facts: lexical only (V-15)".to_owned());
     }
     let rows = super::doc_rows(&prepared.snapshot, config);
-    let filter = Filter::new(
-        config,
-        &[],
-        &options.tags,
-        &options.scopes,
-        options.scope_only,
-    );
+    let scopes = ScopeFilter::new(&options.scopes, options.scope_only);
+    let graph = Graph::for_snapshot(&prepared.snapshot, config);
+    let today = clock.today();
     // The trigger is corpus-wide and is about types only: a vault whose one
     // `decision` is still a draft does declare a fact type, so it keeps the
     // fact list (and an empty result) rather than a fallback list.
     let fallback = !has_fact_types(&rows);
-    let (order, policy) = if fallback {
-        (Order::Newest, score::policy(Intent::Current, false))
+    let order = if fallback {
+        Order::Newest
     } else {
-        (Order::Authority, score::policy(Intent::History, false))
+        Order::Authority
     };
-    let (selected, map) = select(&rows, |row| {
-        let included = if fallback {
-            policy.includes(row.status)
-        } else {
-            score::is_fact(&row.score_doc(), EffectiveStatus::from(row.status))
-        };
-        included && filter.matches(row)
-    });
+    // Both lists apply the window gate. The fact list asks for the effective
+    // status; the fallback list uses `current`'s inclusion rule.
+    let gate = if fallback {
+        Gate::current(&graph, &scopes, today)
+    } else {
+        Gate::facts(&graph, &scopes, today)
+    };
+    let filter = Filter::new(config, &[], &options.tags, scopes, gate);
+    let selection = select(&rows, &filter);
+    let (selected, map) = (selection.selected, selection.map);
     let docs: Vec<ScoreDoc<'_>> = selected
         .iter()
         .map(|index| rows[*index].score_doc())
@@ -146,15 +147,16 @@ pub fn run(
         .query
         .as_deref()
         .map(|query| query_scores(&prepared.index, query));
-    let hits = rank(
+    let mut hits = rank(
         clock,
         &prepared.snapshot,
         &docs,
         &map,
         scores.as_ref(),
-        options.limit,
         order,
+        &filter,
     );
+    hits.truncate(options.limit);
 
     let mut notes = Vec::new();
     if fallback {
@@ -179,6 +181,8 @@ pub fn run(
         started,
         query: options.query.as_deref(),
         intent: None,
+        as_of: None,
+        filter: &filter,
         limit: options.limit,
         alpha: 0.0,
         degraded,
@@ -194,8 +198,8 @@ fn rank(
     docs: &[ScoreDoc<'_>],
     map: &[Option<usize>],
     scores: Option<&(Vec<f64>, f64)>,
-    limit: usize,
     order: Order,
+    filter: &Filter,
 ) -> Vec<Hit> {
     // `history` is the fact list's scoring row because it is exactly the §3.6
     // shape: no decay, every status at factor 1.0. Only `active` documents reach
@@ -206,7 +210,10 @@ fn rank(
         Order::Newest => Intent::Current,
     };
     let policy = score::policy(intent, false);
-    debug_assert!(docs.iter().all(|doc| policy.includes(doc.status)));
+    debug_assert!(
+        docs.iter()
+            .all(|doc| policy.includes(Status::from(filter.effective_status(doc.id))))
+    );
 
     let (raw, reference) = match scores {
         Some((raw, reference)) => (raw.as_slice(), *reference),
@@ -247,7 +254,7 @@ fn rank(
                     lexical,
                     semantic: 0.0,
                     intent,
-                    effective_status: EffectiveStatus::from(docs[doc_index].status),
+                    effective_status: filter.effective_status(docs[doc_index].id),
                     alpha: 0.0,
                     // A boost cannot change an authority-ordered list, so
                     // reporting one would only inflate `relevance` (§3.2).
@@ -266,7 +273,7 @@ fn rank(
         .collect();
 
     if order == Order::Newest {
-        return newest_first(&hits, snapshot, docs, limit);
+        return newest_first(&hits, snapshot, docs);
     }
 
     let chunk_ids: BTreeMap<usize, crate::id::ChunkId> = hits
@@ -283,7 +290,6 @@ fn rank(
             .then_with(|| left.id.cmp(&right.id))
             .then_with(|| left.rel_path.cmp(right.rel_path))
     });
-    hits.truncate(limit);
     hits
 }
 
@@ -296,7 +302,6 @@ fn newest_first(
     hits: &[Hit],
     snapshot: &crate::index::Snapshot,
     docs: &[ScoreDoc<'_>],
-    limit: usize,
 ) -> Vec<Hit> {
     let mut ordered: Vec<(ScoredDoc<'_>, Hit)> = hits
         .iter()
@@ -312,9 +317,7 @@ fn newest_first(
         .collect();
     ordered.sort_by(|a, b| score::cmp_documents(&a.0, &b.0));
 
-    let mut sorted: Vec<Hit> = ordered.into_iter().map(|(_, hit)| hit).collect();
-    sorted.truncate(limit);
-    sorted
+    ordered.into_iter().map(|(_, hit)| hit).collect()
 }
 
 /// Whether any document in the corpus has a type that `facts` calls a fact.
@@ -333,8 +336,8 @@ mod tests {
 
     #[test]
     fn the_facts_predicate_is_not_the_current_gate() {
-        // Table-driven over every status: only `active` is a fact, while the
-        // `current` gate admits draft/unknown besides it (§3.6).
+        // Table-driven over every effective status: only `active` is a fact,
+        // while the `current` gate admits draft/unknown besides it (§3.6).
         use crate::config::TypeSpec;
         use crate::document::Status;
         use crate::graph::EffectiveStatus;

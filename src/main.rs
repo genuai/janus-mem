@@ -227,6 +227,7 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             tags,
             decay_half_life,
             include_superseded,
+            as_of,
             no_rebuild,
             no_embeddings,
             progress,
@@ -235,6 +236,9 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             let root = vault::resolve_corpus(cli.vault)?;
             tracing::info!(vault = %root.display(), "corpus resolved");
 
+            // Parsed and expanded at the edge, so the answer already holds the
+            // first day of a short form and the echo cannot disagree (§3.8).
+            let as_of = as_of.as_deref().map(search::parse_as_of).transpose()?;
             let config = Config::load(&root)?;
             let progress = progress_enabled(progress);
             // A read passes the embedder so a rebuild it triggers still produces
@@ -256,6 +260,7 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                     tags,
                     decay_half_life,
                     include_superseded,
+                    as_of,
                     no_rebuild,
                     no_embeddings,
                     embedding_reason,

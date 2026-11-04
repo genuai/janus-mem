@@ -589,6 +589,10 @@ clamped by the successor. Chain derivation is the fallback, never the source (§
 `invalid` is not an error for a read. Such a document is absent from `as-of` queries and
 present in `history` and `exhaustive` (§6.10 rule 4).
 
+The window depends on the query scope set, so it is resolved for one query. `Graph::windows`
+builds the whole map, and the caller builds it **once**, before the row loop (M5-33). A window
+per row would walk the successors of every document on every query.
+
 **A dateless successor.** A successor that has no `effective_from` and no `date` closes no
 window. The predecessor is then still `Superseded` (§3.7), but its window stays open, so an
 `--as-of` query still returns it. That is the honest answer: the index holds no date to
@@ -638,6 +642,21 @@ its input does. Consequences:
 - `facts` uses `effective_status == active` and the window gate. A document declared active
   but superseded by a link must vanish from `facts`. This amends §9.2; see §9 correction 11.
 
+**Where the gate lives.** Eligibility, not scoring: `search::Filter` owns the status row, the
+time gate and both precomputed maps, and `Filter::evaluate` returns the reason it dropped a
+row. The note count is therefore over documents, not over results: a document the gate
+excludes is never scored, so "results" would be a claim the reader cannot check. One line
+each, only when non-zero:
+
+| line | when |
+|---|---|
+| `N document(s) hidden by the status gate; …` | `current` dropped a document by status |
+| `N document(s) hidden by the validity window; …` | today's window dropped it |
+| `N document(s) have no validity window` | `--as-of` alone, and it is the only note an `as-of` query adds |
+
+An `--as-of` query adds no window-hidden line: the window **is** the query, so a document
+outside it is not hidden, it is simply not the answer (M5-35).
+
 **Acceptance cases.**
 
 | # | input | expected |
@@ -648,7 +667,7 @@ its input does. Consequences:
 | 7.4 | `--include-superseded` | all of the above appear under `current` |
 | 7.5 | the chain, default query | only E |
 | 7.6 | a document with no successor and no `effective_to` | present in `current` |
-| 7.7 | `--scope org:beta` on case 6.7 | G is current and H is not returned |
+| 7.7 | `--scope org:beta` on a case 6.7 pair whose G is declared `active` | G is current and H is not returned. The fixture's G declares `superseded`, so it is out for `beta` too: the case needs a pair the status gate can admit (M5-36) |
 | 7.8 | `notes/undated.md` under `current` | present: a missing `valid_from` passes the window gate |
 | 7.9 | `--include-superseded` on `bad/deprecated.md` | absent: the flag does not admit `deprecated` |
 
@@ -657,8 +676,12 @@ its input does. Consequences:
 **Statement.** `--as-of` selects the valid-time window and nothing else.
 
 - Inclusion is `valid_from <= T < valid_to`. A document with no `valid_from` is excluded and
-  counted in `notes` as `N results have no validity window`.
-- Decay is `1.0`; a `--decay-half-life` value is accepted and inert.
+  counted in `notes` as `N document(s) have no validity window`.
+- Decay is `1.0`; a `--decay-half-life` value is accepted and inert. Both properties come
+  from one place: the query scores with the `history` row (no decay, every status at factor
+  1.0), and the gate turns status off separately (M5-34). The envelope reports
+  `intent: "history"` next to `as_of`, because that is the row that ranked the answer; the key is
+  never removed, so a caller that keys on `intent` keeps working.
 - The status gate is off. `effective_status` is still computed and reported for `T`'s scope
   set, so a reader sees the document's standing at `T` without losing it to that standing.
 - The scope filter still applies.
@@ -674,15 +697,15 @@ its input does. Consequences:
 | # | input | expected |
 |---|---|---|
 | 8.1 | `--as-of 2020-03-01` on the chain, query `cache` | exactly one result, path A, `valid_to: "2020-07-01"` |
-| 8.2 | `--as-of 2025-01-01` | exactly one result, path E, `valid_to: null` |
+| 8.2 | `--as-of 2025-01-01`, query `chain` | exactly one result, path E, `valid_to: null`. Query `cache` would also return the near-identical pair, which is in the window and matches (M5-36) |
 | 8.3 | same query, no flag | E only |
-| 8.4 | `--as-of 2021` | expands to `2021-01-01`; C only; JSON `as_of: "2021-01-01"` |
+| 8.4 | `--as-of 2021`, query `chain` | expands to `2021-01-01`; C only; JSON `as_of: "2021-01-01"` (M5-36) |
 | 8.5 | `--as-of 2020-03-01` with a 2019-dated `draft` document | the draft is returned; `decay: 1.0`; `status: "draft"` |
 | 8.6 | `--as-of 2019-01-01` | zero results, one note counting documents with no window |
 | 8.7 | `--as-of 2025-13-40` | exit 2, message names the value |
 | 8.8 | `--as-of 2020-03-01 --intent history` | one result, A; note names the override; behaviour is as-of's |
-| 8.10 | `--as-of 2020-03-01 --intent exhaustive --json` | `intent: "current"` is not reported; the envelope reports `as_of` and the override note |
-| 8.9 | `--as-of 2020-03-01 --scope org:acme` on case 6.7 | G returned for acme's own scope |
+| 8.10 | `--as-of 2020-03-01 --intent exhaustive --json` | `intent: "history"` is reported, the row that ranked; the envelope also reports `as_of` and the override note |
+| 8.9 | `--as-of 2020-02-15 --scope org:acme` on case 6.7 | G returned, `valid_to: "2020-03-01"`; for `--scope org:beta` the same date returns G with `valid_to: null`. 2020-03-01 itself is H's first day and G's last day plus one, so the boundary is exclusive (M5-36) |
 
 ### 3.9 `janus lineage` (P4)
 
@@ -940,6 +963,10 @@ in the corpus, instead of by `1.0`.
 | M5-30 | `NodeFacts` carries `declared_status` and `effective_to`, and `EffectiveStatus::of` returns `Option` | §3.6 and §3.7 name one call shape, `(facts, graph, scopes)`. Without the declared status the derivation has no else-branch, and without the declared end `Window::of` cannot honour an explicit `effective_to`. A retired endpoint has neither value, so the status rule answers `None` for it, which is what P4 renders (R4-1). |
 | M5-31 | The query scope set is `score::ScopeFilter`, and the window and status rules match a successor with `ScopeFilter::intersects`, never `matches` | One type owns both rules, but they are not the same predicate: `matches` also applies `--scope-only`, which narrows the *result* set (§6.12 rule 4). A successor that is global still supersedes what it replaced, even when the caller asked to see owned scopes only (§6.12 rule 7). `intersects` is the successor rule, and `matches` delegates to it when `--scope-only` is off. |
 | M5-32 | `rank_documents` drops a chunk whose scored `status_factor` is zero, not a chunk whose declared status the row excludes | The effective status is a per-query value that only the `ScoreInput` knows, and the breakdown is the only channel that carries the scored row. The declared status on `ScoreDoc` stays what it is: declared metadata, reported as `status`. |
+| M5-33 | The window map is built once per query by `Graph::windows`, and the gate lives in `search::Filter`; `ScoreInput` carries no `window_member` | §5 P3 named both `effective_status` and `window_member` on the score input, and §3.7 moves the gate into eligibility: the same field cannot be a gate the caller applies and an input the scorer reads. The map is built before the row loop, and a thread-local build counter pins the count at one (P3 scope 10). |
+| M5-34 | `--as-of` scores with the `history` row and reports that row as `intent` | Decay `1.0` and "no status gate" are exactly that row on both axes, so one row supplies both and `score` needs no special case. The envelope then describes how the results were ordered: `intent: "history"` next to `as_of`, never a removed key, and the override note names the intent it replaced. |
+| M5-35 | The hidden-count notes count documents, and an `--as-of` query emits only the `no_validity` count | The gate runs before scoring, so "results" would claim a relevance the code never computed. For `--as-of` the window is the query: an out-of-window document is not hidden by a gate, it is not the answer, and a second line would only repeat that. |
+| M5-36 | Three acceptance cases were recomputed against the committed fixtures: 7.7, 8.2 and 8.4 (query), and 8.9 (date) | 7.7 asked for a `superseded` document to be `current`; 8.2 and 8.4 used `cache`, which the near-identical pair also matches; 8.9 used 2020-03-01, which is the exclusive end of G's window. The rule under test is unchanged; only the input that can show it moved. |
 | M5-28 | `Graph::build` owns its endpoint facts, and `Graph::for_snapshot(snapshot, config)` is the only caller | Two callers need one graph: the `index --json` counts and every read. A borrowed `DocRow` would force each caller to hold rows of its own, and a snapshot-only builder is what keeps the counts and the answers equal. The disjoint flag is a rule parameter, so it is an argument, not a second function. |
 
 ## 5. Phases
@@ -1056,13 +1083,17 @@ except `janus index --json`, which gains fields.
 **Files.** `src/graph.rs`, `src/score.rs`, `src/search/mod.rs`, `src/search/facts.rs`,
 `src/cli.rs`, `src/main.rs`, `tests/cli_search.rs`.
 
-**Build.** `Window::of(doc, graph, scopes)` and `EffectiveStatus::of(doc, graph, scopes)`.
-`ScoreInput` gains `effective_status` and `window_member: bool`; `IntentPolicy` is consulted
-with `effective_status`. `search::Filter` gains `today` and the windows, because the gate
-moves from a per-document property to a per-query one: the window map is computed once per
-query, never once per row. `--as-of` is parsed in the adapter, expanded and echoed; it wins
-over `--intent` and says so in one note. `facts` switches to `effective_status` and the
-window gate. No `format_version` change: P3 persists nothing that P2 did not.
+**Build.** `Window::of(facts, graph, scopes)` and `EffectiveStatus::of(facts, graph, scopes)`.
+`ScoreInput` gains `effective_status`; `IntentPolicy` is consulted with it. `search::Filter`
+gains the status row, the time gate and both per-query maps, because the gate moves from a
+per-document property to a per-query one: each map is computed once per query, never once per
+row. `--as-of` is parsed in the adapter, expanded and echoed; it wins over `--intent` and says
+so in one note. `facts` switches to `effective_status` and the window gate. No
+`format_version` change: P3 persists nothing that P2 did not.
+
+The phase split at its named seam: the derivation shipped first, the gate and the flag
+second. `ScoreInput` does **not** gain `window_member`: the window gate lives in `Filter`, so
+an unread flag would be a lie (M5-33).
 
 **Tests.** Table-driven unit tests for window derivation (6.1–6.8) and status derivation
 (7.1–7.9). CLI tests for the flag (8.1–8.10). One test proves the superseded-by-link case is
@@ -1360,7 +1391,36 @@ ceilings.
 
 ### Phase 3 — windows, effective status, and `--as-of`
 
-_(empty)_
+Delivered in two stacked changes at the split seam of §5: the pure
+derivation, then the eligibility gate and the flag.
+
+- **The seam was used.** The phase as one change measured 722 logic and 854
+  test lines. Both half-changes are inside the 500/750 budget of §8.
+- **No `format_version` change.** P3 persists nothing new (M5-19, R-11).
+- **`NodeFacts` grew two fields.** `Window::of` and `EffectiveStatus::of` must
+  read the declared end and the declared status from the one endpoint, so the
+  struct sketch of §2.3 was amended (M5-30). A retired endpoint carries
+  neither, and `EffectiveStatus::of` answers `None` for it, which is what P4
+  renders (R4-1).
+- **`ScoreInput` dropped `window_member`.** The gate lives in `Filter` (M5-33).
+- **Review round 1.** A global successor now counts under `--scope-only`, because
+  `ScopeFilter::intersects` is the successor rule and `matches` is the result rule
+  (M5-31). An `as-of` envelope reports `intent: "history"` rather than dropping the
+  key, and the third note counts documents (M5-34, M5-35).
+- **Deviations.** M5-31, M5-32, M5-33, M5-34, M5-35, M5-36. SPEC §6.7 and
+  §6.10 rule 5 ship with part 1; §7.1 and §9.2 ship with part 2.
+- **Evidence.** On the graph fixture, `--as-of 2020-03-01` returns the first
+  link and `--as-of 2025-01-01` the last; `bad/status-lies.md` reports
+  `effective_status: superseded` and is absent from `current` and `facts`;
+  `bad/expired.md` is active and outside its window; the eval set keeps
+  `active top-1 = 1.00 (22/22)` including `notes/undated.md`.
+- **Three search goldens moved** and nothing else: `effective_status`,
+  `valid_from` and `valid_to` are the only added keys. The main fixture's
+  seeded cycle points at an older successor, so `redis` reports
+  `valid_to < valid_from`; `history` applies no window gate, so no result
+  moved.
+- **Not included.** `lineage`, `doctor`, `moves`, `suggest-links`, quarter
+  dates, the undated decay median, and any write to a vault file.
 
 ### Phase 4 — `janus lineage`
 

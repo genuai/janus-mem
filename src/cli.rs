@@ -158,6 +158,10 @@ pub enum Command {
         #[arg(long)]
         include_superseded: bool,
 
+        /// Select the valid-time window at this date: YYYY-MM-DD, YYYY-MM or YYYY
+        #[arg(long, value_name = "DATE")]
+        as_of: Option<String>,
+
         /// Refuse instead of building or rebuilding; a read stays a read
         #[arg(long)]
         no_rebuild: bool,
