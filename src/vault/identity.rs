@@ -191,7 +191,11 @@ pub fn resolve(
         if claimed.contains(id) {
             continue;
         }
-        if let Some(last) = entries.last_mut() {
+        // Only a real transition stamps the date. A path that stays retired
+        // keeps the day the document was last seen in it (§2.1).
+        if let Some(last) = entries.last_mut()
+            && !last.tombstone
+        {
             last.tombstone = true;
             last.last_seen = today;
         }
@@ -657,7 +661,12 @@ mod tests {
 
     /// A pinned build date: no identity table may depend on the clock.
     fn today() -> NaiveDate {
-        NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+        date(2026, 1, 1)
+    }
+
+    /// A calendar date, for the cases that need two builds on different days.
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
     }
 
     /// Writes each entry to a temp tree and resolves it, in order.
@@ -740,9 +749,18 @@ mod tests {
 
     /// One build: resolve a fresh scan of `entries` against `basis`.
     fn build(entries: &[(&str, &str)], basis: Option<&Snapshot>) -> (Vec<Document>, Resolution) {
+        build_on(today(), entries, basis)
+    }
+
+    /// The same build on a given day, so a test can see a date move.
+    fn build_on(
+        today: NaiveDate,
+        entries: &[(&str, &str)],
+        basis: Option<&Snapshot>,
+    ) -> (Vec<Document>, Resolution) {
         let config = config();
         let mut documents = resolved(entries, &config);
-        let resolution = resolve(&mut documents, basis, &config, today());
+        let resolution = resolve(&mut documents, basis, &config, today);
         (documents, resolution)
     }
 
@@ -750,6 +768,51 @@ mod tests {
     fn first_build(entries: &[(&str, &str)]) -> Snapshot {
         let (documents, resolution) = build(entries, None);
         basis_of(&documents, resolution, &config())
+    }
+
+    #[test]
+    fn a_retired_path_keeps_the_day_the_document_vanished() {
+        // `last_seen` is the build that last saw the path, and a retired path is
+        // never seen again. A build that only restamps the tombstone would make
+        // every retired document pass every `moves --since` (P6).
+        let text = "---\ntitle: Flow\ndate: 2026-01-01\n---\nbody\n";
+        let vanished = date(2026, 1, 2);
+        let (documents, tables) = build_on(date(2026, 1, 1), &[("notes/flow.md", text)], None);
+        let id = documents[0].id;
+        let basis = basis_of(&documents, tables, &config());
+        let (empty, gone) = build_on(vanished, &[], Some(&basis));
+        assert!(gone.path_history[&id].last().expect("an entry").tombstone);
+        let basis = basis_of(&empty, gone, &config());
+
+        let (_, again) = build_on(date(2026, 1, 9), &[], Some(&basis));
+
+        let last = again.path_history[&id].last().expect("an entry");
+        assert!(last.tombstone, "the document is still gone");
+        assert_eq!(
+            last.last_seen, vanished,
+            "the day it was last seen, not the latest build"
+        );
+    }
+
+    #[test]
+    fn a_scope_change_rekeys_even_a_declared_id() {
+        // M5-27: scope qualifies every match key, rungs 1 and 2 included, so a
+        // scope change is a re-key and not a move. The declared id derives the
+        // same value, and the id must not be reported as inherited.
+        let declared = "---\nid: 01JABC\ntitle: Plan\n---\nbody\n";
+        let basis = first_build(&[("a/plan.md", declared)]);
+        let scoped = "---\nid: 01JABC\ntitle: Plan\nscope: org:beta\n---\nbody\n";
+        let (documents, tables) = build(&[("b/plan.md", scoped)], Some(&basis));
+
+        assert_eq!(
+            documents[0].id,
+            DocId::from_match_key(b"declared_id\x0001JABC")
+        );
+        assert_eq!(documents[0].id_source, IdentityTier::DeclaredId);
+        assert!(
+            !tables.inherited.contains(&documents[0].id),
+            "a scope change is churn, not a move"
+        );
     }
 
     // ───────────────────────────── key encoding ─────────────────────────────
