@@ -1238,10 +1238,10 @@ These amendments ship in the phase that owns them. Each is in the same PR as the
     with its title, date, `valid_from`, scope and `shared_with`, that its path stays in
     `path_history`, and that the row still closes its predecessor's window and still renders
     in `lineage`. (P1.)
-
 14. **§6.4 namespacing.** Add that the `corpus_id ‖ scope` namespace enters the *encoding*
     of rungs 3–5, and that scope still qualifies the candidate set for every rung, rungs 1
     and 2 included. A scope change is a re-key, not a move (M5-27). (P1.)
+
 ## 10. Handoff to M6
 
 - `lineage`, `doctor`, `ids`, `moves` and `suggest-links` are core functions with DTOs in the
