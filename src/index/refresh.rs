@@ -17,15 +17,16 @@
 //! walk so one walk feeds both the plan and the digest.
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::Config;
+use crate::config::{Config, Refresh};
 use crate::error::JanusError;
 use crate::id::DocId;
 use crate::index::build::{self, BuildPlan};
 use crate::index::embed::Embedder;
-use crate::index::store;
+use crate::index::store::{self, Load, LoadOptions, Lock, Policy};
 use crate::vault::{DiscoveredFile, WalkResult, identity, resolve};
 
 /// Tag of an mtime at or after the Unix epoch (1970-01-01T00:00:00Z).
@@ -228,6 +229,253 @@ pub fn plan_from_walk(
     )?)
 }
 
+// ──────────────────────────── refresh on read ─────────────────────────────
+
+/// What a read decided about the index, in the words of §3.5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    /// The generation describes this corpus. Nothing is printed and nothing is
+    /// written.
+    Fresh,
+    /// A corpus refresh published a generation.
+    CorpusChanged,
+    /// The root moved, so the manifest was rewritten and the generation read.
+    ManifestRepaired,
+    /// The index was absent, so a read built it.
+    NoIndexYet,
+    /// No pair validated, so a read rebuilt it.
+    IndexRepaired,
+    /// Another writer holds the lock, so the read answered from disk.
+    SkippedBusy,
+    /// `[index] refresh = "manual"`.
+    SkippedManual,
+    /// The caller passed `--no-rebuild`.
+    SkippedNoRebuild,
+}
+
+impl Decision {
+    /// The one line this decision prints. At most one per read (§3.5, D-12).
+    #[must_use]
+    pub fn line(self) -> Option<&'static str> {
+        match self {
+            Self::Fresh => None,
+            Self::CorpusChanged => Some("refresh: corpus changed"),
+            Self::ManifestRepaired => Some("refresh: manifest repaired"),
+            Self::NoIndexYet => Some("refresh: no index yet"),
+            Self::IndexRepaired => Some("refresh: index repaired"),
+            Self::SkippedBusy => Some("refresh: skipped, index busy"),
+            Self::SkippedManual => Some("refresh: skipped, refresh = manual"),
+            Self::SkippedNoRebuild => Some("refresh: skipped, --no-rebuild"),
+        }
+    }
+}
+
+/// What a read got: the generation to answer from, the line to print, and
+/// whether that generation still describes an older corpus.
+pub struct ReadOutcome {
+    /// The generation this read answers from.
+    pub load: Load,
+    /// Why a build ran, or why one did not (§3.3, §3.5).
+    pub decision: Decision,
+    /// True when the answered generation is older than the corpus. Only a
+    /// declined refresh leaves this true.
+    pub stale: bool,
+}
+
+/// Loads a validated generation, then refreshes it when the corpus changed
+/// (§3.4 steps 1–7, D-10, D-11).
+///
+/// The order is the contract: the generation loads first, without a lock, so a
+/// read that can answer never waits for a writer. Only then is the walk
+/// compared with the manifest's digest. A busy lock is a skip, not an error.
+///
+/// `walk` is the walk the caller already made for the witness. It feeds
+/// [`store::build_until_stable`] when something must be built, so a stale read
+/// pays one walk for the witness and one more after the publish (§3.1).
+///
+/// # Errors
+///
+/// Exactly [`store::load`]'s, plus any walk, plan or publication failure.
+pub fn on_read(
+    dir: &Path,
+    options: &LoadOptions<'_>,
+    walk: WalkResult,
+    refresh: Refresh,
+) -> Result<ReadOutcome, JanusError> {
+    let digest = Signature::of(&walk.files).digest();
+    // Read before the load, so a rebuild can be told from a repair (§3.3 rows 3
+    // and 4). The load may create the directory; this check does not.
+    let first_build = !dir.join(store::MANIFEST_FILE).exists();
+    let load = store::load(options)?;
+
+    // Rows 3 and 4: a build already ran under the lock, so these are its bytes.
+    if load.rebuilt {
+        let decision = if first_build {
+            Decision::NoIndexYet
+        } else {
+            Decision::IndexRepaired
+        };
+        return Ok(ReadOutcome {
+            load,
+            decision,
+            stale: false,
+        });
+    }
+
+    // Row 6: the generation is usable, but the manifest names another root.
+    if load.refresh_request.is_some() {
+        let declined = decline(options, refresh, false);
+        if let Some(decision) = declined {
+            return Ok(ReadOutcome {
+                load,
+                decision,
+                stale: false,
+            });
+        }
+        let Some(lock) = Lock::try_acquire(dir)? else {
+            return Ok(ReadOutcome {
+                load,
+                decision: Decision::SkippedBusy,
+                stale: false,
+            });
+        };
+        // The repair republishes the current plan, so the new manifest carries
+        // this root and this digest (§3.4 step 4).
+        let load = rebuild(dir, options, walk, &lock)?;
+        return Ok(ReadOutcome {
+            load,
+            decision: Decision::ManifestRepaired,
+            stale: false,
+        });
+    }
+
+    // Step 2: the witness. One walk, one digest, one boolean.
+    let stale = Witness::of(&walk.files, &load.manifest, index_mtime(dir)).stale;
+    if !stale {
+        return Ok(ReadOutcome {
+            load,
+            decision: Decision::Fresh,
+            stale: false,
+        });
+    }
+    if let Some(decision) = decline(options, refresh, true) {
+        return Ok(ReadOutcome {
+            load,
+            decision,
+            stale: true,
+        });
+    }
+
+    // Steps 5 and 6: one non-blocking attempt. A read never waits and never
+    // fails on a lock, because another writer will publish what this one wants.
+    let Some(lock) = Lock::try_acquire(dir)? else {
+        return Ok(ReadOutcome {
+            load,
+            decision: Decision::SkippedBusy,
+            stale: true,
+        });
+    };
+    // Step 7: adopt only when the writer's manifest names the corpus this read
+    // walked. A writer whose plan predates the edit also validates, and
+    // adopting it would lose the edit (§3.4).
+    if let Some(fresh) = adopt_under_lock(options, &digest)? {
+        return Ok(ReadOutcome {
+            load: fresh,
+            decision: Decision::Fresh,
+            stale: false,
+        });
+    }
+    let load = rebuild(dir, options, walk, &lock)?;
+    Ok(ReadOutcome {
+        load,
+        decision: Decision::CorpusChanged,
+        stale: false,
+    })
+}
+
+/// Why this read may not write, or `None` when it may (§3.3, rows 2 and 6).
+fn decline(options: &LoadOptions<'_>, refresh: Refresh, corpus_changed: bool) -> Option<Decision> {
+    if options.policy == Policy::Refuse {
+        return Some(Decision::SkippedNoRebuild);
+    }
+    // `manual` disables the corpus-changed row only. A moved root is a repair,
+    // not a refresh of a changed corpus.
+    if corpus_changed && refresh == Refresh::Manual {
+        return Some(Decision::SkippedManual);
+    }
+    None
+}
+
+/// Re-reads the manifest under the lock and adopts it only when it describes
+/// the corpus this read walked (§3.4 step 7).
+///
+/// A failed read here is not an error: the caller builds instead, and that build
+/// reports the real failure if the disk is broken.
+fn adopt_under_lock(options: &LoadOptions<'_>, digest: &str) -> Result<Option<Load>, JanusError> {
+    // `Refuse` guarantees this never tries to take the lock we already hold.
+    let locked = LoadOptions {
+        policy: Policy::Refuse,
+        ..*options
+    };
+    let Ok(load) = store::load(&locked) else {
+        return Ok(None);
+    };
+    if load.refresh_request.is_some() {
+        return Ok(None);
+    }
+    Ok(adoptable(load.manifest.corpus_sig.as_deref(), digest).then_some(load))
+}
+
+/// True when a writer's manifest names the corpus this read walked (§3.4 step
+/// 7). A manifest without a digest predates M4D, so the two cannot be compared
+/// and the caller builds.
+fn adoptable(stored: Option<&str>, digest: &str) -> bool {
+    stored == Some(digest)
+}
+
+/// Builds a generation under a lock the caller holds, as a [`Load`].
+fn rebuild(
+    dir: &Path,
+    options: &LoadOptions<'_>,
+    walk: WalkResult,
+    lock: &Lock,
+) -> Result<Load, JanusError> {
+    let outcome = store::build_until_stable(
+        dir,
+        options.root,
+        options.config,
+        options.embedder,
+        options.built_at,
+        walk,
+        &BTreeSet::new(),
+        false,
+        lock,
+    )?;
+    // A read that did not want vectors does not receive them, even though the
+    // build it triggered may have written them (V-4).
+    let vectors = if options.want_vectors {
+        outcome.plan.vectors.as_ref().map(|set| set.rows().clone())
+    } else {
+        None
+    };
+    Ok(Load {
+        snapshot: outcome.plan.snapshot,
+        manifest: outcome.manifest,
+        vectors,
+        rebuilt: true,
+        stats: outcome.plan.stats,
+        stale: None,
+        refresh_request: None,
+    })
+}
+
+/// `mtime(index.bin)`, which only the pre-M4D fallback reads (§3.1).
+fn index_mtime(dir: &Path) -> Option<SystemTime> {
+    fs::metadata(dir.join(store::INDEX_FILE))
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +523,16 @@ mod tests {
         let short = Signature::of(&[file("a", 1, 0, 0), file("b", 1, 0, 0)]);
 
         assert_ne!(long.digest(), short.digest());
+    }
+
+    #[test]
+    fn adoption_needs_the_writers_digest_to_equal_the_one_this_read_computed() {
+        assert!(adoptable(Some("abc"), "abc"));
+        assert!(!adoptable(Some("abc"), "abcd"));
+        assert!(
+            !adoptable(None, "abc"),
+            "a pre-M4D manifest cannot be compared"
+        );
     }
 
     #[test]

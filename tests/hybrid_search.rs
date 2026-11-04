@@ -147,15 +147,18 @@ fn patch_manifest_corpus(root: &std::path::Path, corpus_id: &str) {
 }
 
 #[test]
-fn a_no_embeddings_rebuild_carries_unchanged_rows_and_drops_changed_ones() {
+fn a_no_embeddings_index_carries_unchanged_rows_and_drops_changed_ones() {
     let vault = fixture_vault();
     index(vault.path());
     let vectors = vault.path().join(".janus/vectors.f32");
     let before = fs::read(&vectors).expect("the fixture's hash model writes vectors");
 
+    // M4D P2: a read may no longer rebuild a `corpus_id` mismatch (D-3), so the
+    // degraded rebuild this test pins is the command's job now.
     patch_manifest_corpus(vault.path(), "renamed");
-    let report = search_json(vault.path(), &["cache", "--no-embeddings"]);
-    assert_eq!(report["alpha"], 0.0, "{report}");
+    let report = common::json_ok(vault.path(), &["index", "--no-embeddings", "--json"]);
+    assert_eq!(report["embedded"], 0, "{report}");
+    assert_eq!(report["reused_vectors"], report["chunks"], "{report}");
     assert!(
         vectors.exists(),
         "nothing changed, so a degraded rebuild carries the rows"
@@ -181,8 +184,8 @@ fn a_no_embeddings_rebuild_carries_unchanged_rows_and_drops_changed_ones() {
     fs::write(&note, format!("{text}\n\nchanged body\n")).expect("append to the document");
     patch_manifest_corpus(vault.path(), "renamed-again");
 
-    let report = search_json(vault.path(), &["cache", "--no-embeddings"]);
-    assert_eq!(report["alpha"], 0.0, "{report}");
+    let report = common::json_ok(vault.path(), &["index", "--no-embeddings", "--json"]);
+    assert_eq!(report["dim"], Value::Null, "{report}");
     assert!(
         !vectors.exists(),
         "one changed document makes the rows uncarryable, so they go"

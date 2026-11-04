@@ -405,6 +405,13 @@ chunk. Tests use a counting embedder and assert the values, never the text.
 | D-16 | Who prints the incomplete line | **`build_until_stable` itself.** Both writers reach this one function, and a caller-side flag would let one of them forget the line | `store.rs` |
 | D-17 | Already-resolved documents in the writer | **Resolved only when they are needed.** `PATHS` resolves the walk to find the `DocId`s it forces; a plain write resolves once, inside the loop. A second resolve of the same walk would read every file twice | `cmd.rs`, `refresh.rs` |
 | D-18 | Does P1 split at the 450-line seam | **No.** P1 lands at 559 logic lines and 686 test lines: under the 600 ceiling. The seam would put the digest in one PR and the writer that stores it in the next, so the first PR would have no behaviour a test can see | — |
+| D-19 | Where the corrupt vector-triple check lives | **`read_generation`.** `Expected::check` returns `Check` for the six manifest fields only, so a manifest holding two of three vector facts stays a rebuild, not a refusal. Moving it into `check` would have made a corrupt manifest look like a cold mismatch | `store.rs` |
+| D-20 | How `Mismatch` reproduces two different embedder texts | **One sentinel `found` value.** The rows read `index has no vectors and this build embeds with …` and `embedder a != b`; `Mismatch { field, found, wanted }` plus a sentinel renders both, and M3's wording stays exact | `store.rs` |
+| D-21 | How a read reports what it did | **A typed `Decision`, not a string.** `refresh::on_read` returns the generation, a `Decision` and the `stale` fact; `Decision::line()` owns the seven texts, so a caller cannot invent an eighth (§3.5, D-12) | `refresh.rs` |
+| D-22 | What a read prints when another writer already published | **Nothing.** It adopts the newer generation and answers. `refresh:` means this process wrote a generation, and this one did not (§3.5). The adoption branch runs only when a writer publishes between the read's load and its lock | `refresh.rs` |
+| D-23 | How a read tells a first build from a repair | **The manifest's presence before the load.** `on_read` stats `manifest.json` first: absent means `refresh: no index yet`, present means `refresh: index repaired`. `store::load` keeps one `Stale` reason and gains no new field | `refresh.rs` |
+| D-24 | Does a moved root print a line under `--no-rebuild` | **Yes.** A repair the caller declined is a skipped refresh, so it prints `refresh: skipped, --no-rebuild` (§3.5). It writes nothing, and the generation still answers | `refresh.rs` |
+| D-25 | What a manifest repair republishes | **The current plan.** It runs `build_until_stable` with the read's walk, so one pass writes the current root and the current digest through the one writer loop (§3.2). Republishing without planning would need a second write path | `refresh.rs` |
 
 ## 5. Phases
 
@@ -702,7 +709,38 @@ Two decisions are agreed and belong to the temporal milestone, not to M4D:
 
 ## 12. Implementation log — Phase 2
 
-_Nothing recorded yet._
+### Phase 2a — the mutations a read needs
+
+- **The size forced the split the plan named.** The phase reached 683 logic
+  lines, over the 600 ceiling, so it ships as P2a (writer and validation) and
+  P2b (read policy and lines), stacked. P2a is 524 logic lines.
+- **`Check` is the only validation answer.** `Expected::check` returns
+  `Check { Ok, Refresh, Refuse }` and compares `format_version`, `tokenizer`,
+  `chunker`, `corpus_id` and `embedder` before `built_root` (D-3a). A unit test
+  pins both facts: every cold field refuses with M3's message text, and a cold
+  field wins over `built_root`. That ordering is the whole point: the reverse
+  sends a read to an 18-minute re-embed.
+- **The corrupt vector triple stayed a rebuild.** It moved out of `check` into
+  `read_generation` (D-19), so a manifest holding two of three vector facts is
+  still repaired by a build, as M3 did.
+- **`Mismatch` carries the two embedder wordings through one sentinel** (D-20).
+  The message text is unchanged, so every existing assertion kept its string.
+- **`Lock::try_acquire` is one attempt.** `acquire` keeps its timeout for the
+  absent-index and corrupt-pair rows. `open_lock_file` is shared, so both open
+  the file the same way.
+- **`on_read` runs the seven steps of §3.4.** It loads the generation first,
+  walks, declines or refreshes, and returns a typed `Decision` (D-21). It adopts
+  a writer's generation only when the manifest's `corpus_sig` equals the digest
+  this read computed; the predicate is `adoptable`, and a unit test fails if the
+  comparison is inverted or the pre-M4D `None` is accepted (D-22).
+- **A first build is told from a repair by the manifest's presence** (D-23),
+  read before the load. `store::load` gains one field, `refresh_request`, and
+  keeps its one `Stale` reason.
+- **Not in this phase.** No `prepare` change, no `refresh:` line, no config
+  wiring, no progress sink. A read still answers from the old index in P2a; P2b
+  wires `on_read` into `prepare`.
+- **Size.** 524 logic lines and 379 test lines, measured with
+  `BASE=origin/main scripts/pr-size.sh`.
 
 ## 13. Implementation log — Phase 3
 

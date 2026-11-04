@@ -23,7 +23,8 @@ use janus_mem::index::Snapshot;
 use janus_mem::index::build::{self, BuildPlan, BuildStats};
 use janus_mem::index::embed::{Embedder, HashEmbedder};
 use janus_mem::index::store::{
-    self, INDEX_FILE, Load, LoadOptions, Lock, MANIFEST_FILE, Policy, Publication, Stage,
+    self, INDEX_FILE, Load, LoadOptions, Lock, MANIFEST_FILE, MismatchField, Policy, Publication,
+    Stage,
 };
 use janus_mem::index::vectors::{VECTORS_FILE, Vectors};
 use janus_mem::vault::{self, WalkOptions, identity, resolve};
@@ -890,22 +891,35 @@ fn a_payload_whose_manifest_shape_disagrees_rebuilds() {
     assert!(stale.contains("does not match"), "{stale}");
 }
 
+// M4D P2 row 3: a read may not rebuild a format change, so the old rebuild
+// path is gone. The version-3 rebuild lives in `tests/cli_index.rs` now, under
+// `janus_index_rebuilds_a_format_version_2_manifest_to_version_3`.
 #[test]
-fn a_format_version_2_manifest_is_stale_and_the_rebuild_writes_version_3() {
+fn a_format_version_2_manifest_refuses_a_read_with_a_full_build_reason() {
     let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
     let root = vault.path().to_path_buf();
     publish(&root, &clean_plan(&root));
+    let dir = index_dir(&root);
     patch_manifest(&root, |manifest| {
         manifest["format_version"] = serde_json::json!(2)
     });
+    let before = dir_snapshot(&dir);
 
-    let load = load_with(&root, false, None).expect("load");
-    assert!(load.rebuilt, "an M4 index is refused and rebuilt");
-    let stale = load.stale.expect("cause");
-    assert!(stale.contains("format_version 2 != 3"), "{stale}");
+    let error = load_with(&root, false, None).expect_err("a cold mismatch must refuse");
+    let JanusError::IndexNeedsFullBuild { reason } = &error else {
+        panic!("expected IndexNeedsFullBuild, got {error:?}");
+    };
+    assert_eq!(reason, "format_version 2 != 3");
+    assert_eq!(
+        error.to_string(),
+        "index needs a full build: run janus index (format_version 2 != 3)"
+    );
+    assert_eq!(error.exit_code(), 1);
+    assert_eq!(dir_snapshot(&dir), before, "a refusal writes nothing");
     assert_eq!(
         read_manifest(&root).format_version,
-        janus_mem::index::FORMAT_VERSION
+        2,
+        "the refused manifest is untouched"
     );
 }
 
@@ -926,15 +940,53 @@ fn a_manifest_holding_two_of_three_vector_fields_is_corrupt() {
     assert!(stale.contains("vectors_sha absent"), "{stale}");
 }
 
+// M4D P2 D-3a: a moved vault is never an error. The generation loads, and the
+// caller is told to rewrite the manifest.
 #[test]
-fn a_vectors_less_generation_is_stale_for_a_process_that_can_embed() {
+fn a_built_root_mismatch_loads_and_requests_a_manifest_repair() {
+    let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
+    let root = vault.path().to_path_buf();
+    publish(&root, &clean_plan(&root));
+    patch_manifest(&root, |manifest| {
+        manifest["built_root"] = serde_json::json!("/elsewhere");
+    });
+    let dir = index_dir(&root);
+    let before = dir_snapshot(&dir);
+
+    let load = load_with(&root, false, None).expect("a moved vault still loads");
+    assert!(!load.rebuilt, "the generation is usable as it is");
+    assert_eq!(
+        load.snapshot.docs.len(),
+        1,
+        "the bytes are the published generation"
+    );
+    let mismatch = load.refresh_request.expect("the root must be repaired");
+    assert_eq!(mismatch.field, MismatchField::BuiltRoot);
+    assert_eq!(mismatch.found, "/elsewhere");
+    assert_eq!(mismatch.wanted, store::built_root(&root));
+    assert!(
+        !mismatch.field.needs_full_build(),
+        "a root is diagnostic only"
+    );
+    assert_eq!(
+        dir_snapshot(&dir),
+        before,
+        "store::load alone writes nothing: the repair is the caller's"
+    );
+}
+
+// M4D P2 row 4: a generation without vectors is not a read's work. Adding them
+// means embedding every chunk, which is exactly the 18-minute build §0 problem
+// 2 forbids. `janus index` adds them; a read refuses and writes nothing.
+#[test]
+fn a_vectors_less_generation_refuses_to_build_from_a_read() {
     let vault = temp_vault(&[("a.md", "Alpha", "alpha cache body")]);
     let root = vault.path().to_path_buf();
     publish(&root, &clean_plan(&root));
     assert!(!vectors_path(&root).exists());
     let dir = index_dir(&root);
 
-    // `--no-rebuild` refuses without touching the generation.
+    // `--no-rebuild` refuses without touching the generation, as M3 did.
     let before = dir_snapshot(&dir);
     let embedder = embedder();
     let config = config(&root);
@@ -945,18 +997,17 @@ fn a_vectors_less_generation_is_stale_for_a_process_that_can_embed() {
     assert!(matches!(error, JanusError::IndexUnstable { .. }));
     assert_eq!(dir_snapshot(&dir), before);
 
-    // Allowed to rebuild: one build, then the generation has vectors.
-    let load = load_with(&root, true, Some(&embedder)).expect("load");
-    assert!(load.rebuilt);
-    let stale = load.stale.expect("cause");
-    assert!(stale.contains("no vectors"), "{stale}");
-    assert_eq!(read_manifest(&root).embedder.as_ref(), Some(embedder.id()));
-    assert!(vectors_path(&root).exists());
-
-    // …and it is stable: the next read adopts it.
-    let again = load_with(&root, true, Some(&embedder)).expect("load");
-    assert!(!again.rebuilt);
-    assert!(again.stale.is_none());
+    // Allowed to rebuild, a read still refuses: the cure is a cold build.
+    let error = load_with(&root, true, Some(&embedder)).expect_err("a read must not embed");
+    let JanusError::IndexNeedsFullBuild { reason } = &error else {
+        panic!("expected IndexNeedsFullBuild, got {error:?}");
+    };
+    assert_eq!(
+        reason,
+        "index has no vectors and this build embeds with `hash-64`; rebuilding to add them"
+    );
+    assert_eq!(dir_snapshot(&dir), before, "a refusal writes nothing");
+    assert!(read_manifest(&root).embedder.is_none());
 }
 
 #[test]

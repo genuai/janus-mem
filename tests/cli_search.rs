@@ -3,10 +3,25 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::fs;
+use std::path::Path;
 
 use common::{fixture_vault, index, result_paths, run, run_ok, search_json};
 use serde_json::Value;
+
+/// Every file in `dir`, so "wrote nothing" can be asserted byte-for-byte.
+fn dir_snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut files = BTreeMap::new();
+    for entry in fs::read_dir(dir).expect("the index directory exists") {
+        let entry = entry.expect("index directory entry");
+        files.insert(
+            entry.file_name().to_string_lossy().into_owned(),
+            fs::read(entry.path()).expect("read an index directory file"),
+        );
+    }
+    files
+}
 
 /// A vault where one document owns many chunk scores and nine others match.
 fn contract_vault() -> tempfile::TempDir {
@@ -143,10 +158,13 @@ fn an_empty_corpus_returns_no_results() {
     assert!(dir.path().join(".janus/index.bin").exists());
 }
 
+// M4D P2 row 1: a `corpus_id` change is cold. A read refuses with one line that
+// names the command, and `.janus/` keeps every byte it had.
 #[test]
-fn a_stale_index_rebuilds_with_exactly_one_stderr_line() {
+fn a_changed_corpus_id_refuses_with_one_line() {
     let vault = fixture_vault();
     index(vault.path());
+    let before = dir_snapshot(&vault.path().join(".janus"));
 
     let config_path = vault.path().join("janus.toml");
     let config = fs::read_to_string(&config_path).unwrap();
@@ -155,19 +173,26 @@ fn a_stale_index_rebuilds_with_exactly_one_stderr_line() {
     fs::write(&config_path, rewritten).unwrap();
 
     let output = run(vault.path(), &["search", "cache"]);
-    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    let stale: Vec<&str> = stderr
-        .lines()
-        .filter(|line| line.starts_with("stale:"))
-        .collect();
-    assert_eq!(stale.len(), 1, "expected one stale line, got: {stderr:?}");
-    assert!(stale[0].contains("corpus_id"), "{stale:?}");
-    assert!(stale[0].contains("renamed"), "{stale:?}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines.len(), 1, "expected exactly one line, got: {stderr:?}");
+    assert!(
+        lines[0].contains("index needs a full build: run janus index"),
+        "{stderr:?}"
+    );
+    assert!(lines[0].contains("corpus_id"), "{stderr:?}");
+    assert!(lines[0].contains("renamed"), "{stderr:?}");
+    assert_eq!(
+        dir_snapshot(&vault.path().join(".janus")),
+        before,
+        "a refused read writes nothing"
+    );
 
-    // The rebuild published a generation that now agrees with the config.
+    // `janus index` is the cure, and the next read prints nothing.
+    index(vault.path());
     let output = run(vault.path(), &["search", "cache"]);
-    assert!(output.status.success());
+    assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
 }
 
