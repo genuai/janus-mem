@@ -42,9 +42,11 @@ pub use lexical::{LexicalIndex, squash};
 /// Version 2 (M4 V-1) adds `DocMeta::body_hash` to the snapshot and the
 /// `vectors.f32` payload with its three manifest fields. Version 3 (M4B B-7)
 /// adds `DocMeta::date_source`. Version 4 (M5 P1) adds `Snapshot::path_history`,
-/// `Snapshot::identity` and `Snapshot::tombstones`. An older index is refused by
-/// `Expected::check` and rebuilt with one warning, never misread.
-pub const FORMAT_VERSION: u16 = 4;
+/// `Snapshot::identity` and `Snapshot::tombstones`. Version 5 (M5 P2) adds
+/// `Snapshot::edges`, `Snapshot::dangling_links` and `DocMeta::effective_to`.
+/// An older index is refused by `Expected::check` and rebuilt with one warning,
+/// never misread.
+pub const FORMAT_VERSION: u16 = 5;
 
 /// The compact persisted status (§3.2); the resolver's `Status` is reused.
 pub use crate::document::Status as StatusCode;
@@ -88,6 +90,11 @@ pub struct Snapshot {
     pub identity: BTreeMap<DocId, IdentityRecord>,
     /// The ids this generation saw last and no longer sees, sorted by id.
     pub tombstones: Vec<TombstoneMeta>,
+    /// Every declared link this generation resolved, sorted by `(from, to)`
+    /// (M5 §2.2). The graph at query time is derived from these rows.
+    pub edges: Vec<Edge>,
+    /// Every declared link that resolved to nothing, sorted and de-duplicated.
+    pub dangling_links: Vec<DanglingLink>,
 }
 
 /// One path a document has occupied (M5 §2.1). `path_history` is keyed by
@@ -145,6 +152,52 @@ pub struct IdentityRecord {
     pub keys: Vec<MatchKey>,
 }
 
+/// The only edge kind in v1 (§8.9, D35).
+///
+/// A second kind is additive and needs a new variant, never a new field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum EdgeKind {
+    /// `to` replaces `from` (§6.7).
+    Supersedes,
+}
+
+/// A declared link, resolved to two document ids (M5 §2.2).
+///
+/// `from` and `to` are relational, not chronological: `from` is the document
+/// the declaration replaces, and the dates need not agree with the direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Edge {
+    /// The document the declaration replaces.
+    pub from: DocId,
+    /// The document that replaces it.
+    pub to: DocId,
+    /// Reserved for additive kinds (§8.9).
+    pub kind: EdgeKind,
+}
+
+/// A declared link that resolved to nothing (M5 §2.2).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DanglingLink {
+    /// The document that declared the link.
+    pub from: DocId,
+    /// The text the frontmatter carried, for `doctor` to print.
+    ///
+    /// Text, not `StringId`: the value may name nothing in the corpus, so there
+    /// is no pool handle to give it (M5-24, M5-29).
+    pub target: String,
+    /// Why the target did not resolve.
+    pub reason: DanglingReason,
+}
+
+/// Why a declared link did not resolve (M5 §3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum DanglingReason {
+    /// No current path, historical path or declared id matched.
+    NotFound,
+    /// The target names another corpus. Cross-corpus links are M6 (§6.11).
+    OtherCorpus,
+}
+
 /// The last known facts about a document that no longer exists (M5 §2.1).
 ///
 /// The row lets a retired successor close its predecessor's window (§3.6) and
@@ -191,6 +244,8 @@ pub struct DocMeta {
     pub date_source: crate::document::DateSource,
     /// Valid-time start (§6.10).
     pub effective_from: Option<NaiveDate>,
+    /// Valid-time end, exclusive (§6.10). The window rule reads it in P3.
+    pub effective_to: Option<NaiveDate>,
     /// Whether the type (or the document) is exempt from decay.
     pub timeless: bool,
     /// Hash of the full file bytes.

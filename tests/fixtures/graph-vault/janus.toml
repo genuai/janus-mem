@@ -1,0 +1,12 @@
+# Graph fixture: the supersession cases of the M5 plan (§5 Phase 2).
+#
+# A second vault, not an addition to the main fixture: five linked documents in
+# the main one would move three goldens and `FIXTURE_DOCUMENTS` (M5-18). No date
+# here is later than 2022, so no assertion depends on the day it runs.
+
+index_dir = ".janus"
+corpus_id = "graph"
+
+[embedding]
+# The deterministic test double, so an index needs no model file.
+model = "hash-64"

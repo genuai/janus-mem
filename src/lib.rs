@@ -21,6 +21,7 @@
 //! * [`id`] — `DocId`, `Blake3Hash`, `ChunkId` newtypes.
 //! * [`ids`] — `janus ids`: the identity and match keys of each document (M5).
 //! * [`index`] — the in-memory lexical index and BM25 (M3).
+//! * [`link`] — build-time resolution of declared supersession links (M5).
 //! * [`progress`] — the stderr progress printer for a long build (M4D).
 //! * [`search`] — `janus search` and `janus facts`: the M3 command surface.
 //! * [`score`] — authority, status gating, decay and scope: pure scoring (M3).
@@ -47,6 +48,7 @@ pub mod error;
 pub mod id;
 pub mod ids;
 pub mod index;
+pub mod link;
 pub mod progress;
 pub mod scan;
 pub mod score;

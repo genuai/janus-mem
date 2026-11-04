@@ -18,6 +18,7 @@ use crate::chunk::{Chunk, chunk_body};
 use crate::config::Config;
 use crate::document::Document;
 use crate::id::{Blake3Hash, ChunkId, DocId};
+use crate::link;
 use crate::tokenize::{Stemmer, Tokenizer, TokenizerFingerprint, Tokens};
 use crate::vault::identity;
 
@@ -498,6 +499,7 @@ fn plan_inner(
             date: doc.date,
             date_source: doc.date_source,
             effective_from: doc.effective_from,
+            effective_to: doc.effective_to,
             timeless: doc.type_spec.timeless,
             content_hash: doc.content_hash,
             // Raw body bytes: a normalised body would fold line endings and
@@ -507,6 +509,25 @@ fn plan_inner(
             chunk_range: (start, end),
         });
     }
+
+    // Links resolve from this generation's own tables: no file is opened and no
+    // path is confined, because every step is a lookup (§3.2). This runs before
+    // the pool moves into the index, and needs nothing the pool holds.
+    let declared: Vec<link::Declared<'_>> = drafts
+        .iter()
+        .map(|draft| link::Declared {
+            id: draft.doc.id,
+            rel_path: &draft.doc.rel_path,
+            supersedes: &draft.doc.frontmatter.supersedes,
+            superseded_by: &draft.doc.frontmatter.superseded_by,
+        })
+        .collect();
+    let (edges, dangling_links) = link::resolve(
+        &declared,
+        &resolution.path_history,
+        &resolution.identity,
+        &config.corpus_id,
+    );
 
     let index = LexicalIndex::from_parts(pool, terms, postings, lengths, avgdl);
     let mut snapshot = Snapshot::from_index(
@@ -522,6 +543,8 @@ fn plan_inner(
     snapshot.path_history = resolution.path_history;
     snapshot.identity = resolution.identity;
     snapshot.tombstones = resolution.tombstones;
+    snapshot.edges = edges;
+    snapshot.dangling_links = dangling_links;
     let total_rows = snapshot.chunks.len();
     let (vectors, vector_id, vectors_dropped) = match (embedder, target_id) {
         (Some(embedder), Some(id)) => {

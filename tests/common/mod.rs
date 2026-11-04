@@ -29,6 +29,12 @@ use serde_json::{Value, json};
 /// The committed fixture vault, relative to the crate root.
 pub const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/vault");
 
+/// The committed graph fixture: supersession chains, scopes and dangling links.
+///
+/// A second vault rather than more documents in the first: the M1-M4 goldens
+/// stay as evidence that M5 changed nothing (M5-18).
+pub const GRAPH_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/graph-vault");
+
 /// Fixture document generated at ~2 MB instead of being committed.
 pub const LARGE_REL: &str = "big/2025-03-06-large.md";
 
@@ -56,6 +62,16 @@ pub fn fixture_vault() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir for the fixture copy");
     copy_tree(Path::new(FIXTURE), dir.path()).expect("copy the fixture vault");
     write_generated(dir.path());
+    dir
+}
+
+/// Copies the committed graph fixture into a fresh temporary directory.
+///
+/// No generated inputs: every graph case is expressible in committed text, and
+/// a committed fixture is never written to.
+pub fn graph_vault() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir for the graph fixture copy");
+    copy_tree(Path::new(GRAPH_FIXTURE), dir.path()).expect("copy the graph fixture vault");
     dir
 }
 

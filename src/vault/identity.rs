@@ -223,6 +223,28 @@ pub fn derive_identity(documents: &mut [Document], basis: Option<&Snapshot>, con
     assign(documents, basis, &identity, config);
 }
 
+/// Every path a `DocId` has occupied, mapped back to that id (M5 §2.1).
+///
+/// The map is derived, never stored: `path_history` is the only source of
+/// paths, so a stored alias map could only disagree with it (M5-1). Both a
+/// live path and a tombstoned path are present, because a link to a retired
+/// document must still resolve (case 2.6).
+///
+/// Two ids can hold one path at different times. Later entries then overwrite
+/// earlier ones, and `path_history` iterates in `DocId` order, so the greatest
+/// id wins. That case is why a resolver tries current paths first: the document
+/// that holds a path today is the one a link to that path means.
+#[must_use]
+pub fn alias_map(path_history: &BTreeMap<DocId, Vec<PathEntry>>) -> BTreeMap<&str, DocId> {
+    let mut aliases = BTreeMap::new();
+    for (id, entries) in path_history {
+        for entry in entries {
+            aliases.insert(entry.rel_path.as_str(), *id);
+        }
+    }
+    aliases
+}
+
 /// One rendered line per reachable match rung of a live document (§3.1).
 #[must_use]
 pub fn key_report(document: &Document, config: &Config) -> Vec<String> {
@@ -737,6 +759,7 @@ mod tests {
                 date: document.date,
                 date_source: document.date_source,
                 effective_from: document.effective_from,
+                effective_to: document.effective_to,
                 timeless: false,
                 content_hash: document.content_hash,
                 body_hash: document.content_hash,
