@@ -26,6 +26,7 @@ use crate::clock::Clock;
 use crate::config::{self, Config, TypeSpec};
 use crate::document::{DateSource, Status};
 use crate::error::JanusError;
+use crate::graph::EffectiveStatus;
 use crate::id::{ChunkId, DocId};
 use crate::index::embed::Embedder;
 use crate::index::refresh;
@@ -244,6 +245,7 @@ pub fn query(
                 lexical: crate::index::squash(raw, reference),
                 semantic: semantics.get(index).copied().unwrap_or(0.0),
                 intent,
+                effective_status: EffectiveStatus::from(doc.status),
                 alpha,
                 title_boost: title_boosts.get(*doc_index).copied().unwrap_or(1.0),
                 half_life_days: options.decay_half_life,
@@ -266,7 +268,7 @@ pub fn query(
         breakdowns.push(breakdown);
     }
 
-    let ranked = score::rank_documents(policy, &docs, &chunk_to_doc, &chunk_ids, &breakdowns);
+    let ranked = score::rank_documents(&docs, &chunk_to_doc, &chunk_ids, &breakdowns);
     let matched = ranked.len();
     let mut hits = Vec::new();
     for winner in ranked {

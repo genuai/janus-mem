@@ -24,9 +24,13 @@
 //! `ChunkMeta.doc`.
 //!
 //! **Scope is a filter, never a weight** (§7.2): [`ScopeFilter`] implements
-//! §6.12 rules 3, 4 and 9. TODO(M5): rules 6–8 — scope-relative validity
-//! windows and `effective_status` — need supersession, so "superseded" means
-//! the declared status here (S-19).
+//! §6.12 rules 3, 4 and 9. It is also the one query scope set the graph rules
+//! read, so a successor matches the query exactly as a document does (§3.6,
+//! §3.7).
+//!
+//! **Status is the effective status** (§6.10 rule 6): [`ScoreInput`] carries the
+//! status the graph derived for this query, and the table is consulted with it.
+//! The table itself is unchanged — only its input moved.
 
 use std::cmp::Ordering;
 
@@ -36,6 +40,7 @@ use serde::Serialize;
 use crate::clock::Clock;
 use crate::config::TypeSpec;
 use crate::document::{Document, Status};
+use crate::graph::EffectiveStatus;
 use crate::id::{ChunkId, DocId};
 use crate::vault::resolve::GLOBAL_SCOPE;
 
@@ -257,6 +262,9 @@ pub struct ScoreInput<'a> {
     pub semantic: f64,
     /// Query intent; selects the decay and inclusion row.
     pub intent: Intent,
+    /// The status the graph derived for this query (§3.7). The table is
+    /// consulted with it, never with [`ScoreDoc::status`].
+    pub effective_status: EffectiveStatus,
     /// Semantic weight in `[0, 1]`; `0.0` is exactly the lexical path (§7.2).
     pub alpha: f64,
     /// Title multiplier in `[1, 2]`, computed once per document by the caller
@@ -281,7 +289,9 @@ pub struct ScoreInput<'a> {
 pub fn score(clock: &dyn Clock, input: &ScoreInput<'_>) -> Breakdown {
     let doc = input.doc;
     let policy = policy(input.intent, input.include_superseded);
-    let status_factor = policy.status_factor(doc.status).unwrap_or(0.0);
+    let status_factor = policy
+        .status_factor(Status::from(input.effective_status))
+        .unwrap_or(0.0);
     let blended = input.alpha * input.semantic + (1.0 - input.alpha) * input.lexical;
     let relevance = blended * input.title_boost;
     let authority = doc.type_spec.authority * status_factor;
@@ -390,18 +400,23 @@ pub fn cmp_date_desc(a: Option<NaiveDate>, b: Option<NaiveDate>) -> Ordering {
     }
 }
 
-/// Groups chunks by document, drops excluded statuses, and sorts (§3.1).
+/// Groups chunks by document, drops chunks that carry no status factor, and
+/// sorts (§3.1).
 ///
 /// `chunk_to_doc[i]` indexes `docs`; `chunk_ids[i]` and `chunk_scores[i]`
 /// describe the same chunk occurrence. The three slices must be parallel — a
 /// length mismatch returns no hits rather than panicking. The grouping ordinal
 /// is the chunk's position among that document's occurrences in input order.
 ///
+/// An excluded status scores `status_factor = 0.0`, so the score itself is the
+/// check. The declared status on `docs` is not: eligibility reads the effective
+/// status, which is a per-query value and lives in the [`ScoreInput`] that
+/// produced each breakdown.
+///
 /// Type, tag and scope filters run on documents before this call: pass only the
 /// documents that passed (§3.1 step 3).
 #[must_use]
 pub fn rank_documents<'a>(
-    policy: &IntentPolicy,
     docs: &[ScoreDoc<'a>],
     chunk_to_doc: &[u32],
     chunk_ids: &[ChunkId],
@@ -416,10 +431,10 @@ pub fn rank_documents<'a>(
 
     for (index, &doc_index) in chunk_to_doc.iter().enumerate() {
         let doc_index = doc_index as usize;
-        let (Some(doc), Some(ordinal)) = (docs.get(doc_index), seen.get_mut(doc_index)) else {
+        let (Some(_doc), Some(ordinal)) = (docs.get(doc_index), seen.get_mut(doc_index)) else {
             continue;
         };
-        if !policy.includes(doc.status) {
+        if chunk_scores[index].status_factor <= 0.0 {
             continue;
         }
 
@@ -458,15 +473,18 @@ pub fn rank_documents<'a>(
     ranked
 }
 
-/// `facts(doc)`: an authoritative fact in M3 (§3.6, S-12).
+/// `facts(doc)`: an authoritative fact (SPEC §9.2, §3.6, S-12).
 ///
-/// A canonical fact type **and** declared status `active` — deliberately
+/// A canonical fact type **and** effective status `active` — deliberately
 /// narrower than `current`'s gate, which admits `draft` (0.7×) and `unknown`
-/// (1.0×). A weight is not an inclusion rule. `--include-superseded` does not
-/// reach this predicate, and the scope filter is applied separately.
+/// (1.0×). A weight is not an inclusion rule. The graph supplies the status, so
+/// a document declared active but replaced by a link is not a fact (§9
+/// correction 11, M5-11). `--include-superseded` does not reach this predicate,
+/// the window gate is applied by the caller, and the scope filter is applied
+/// separately.
 #[must_use]
-pub fn is_fact(doc: &ScoreDoc<'_>) -> bool {
-    doc.status == Status::Active && FACT_TYPES.contains(&doc.type_name)
+pub fn is_fact(doc: &ScoreDoc<'_>, status: EffectiveStatus) -> bool {
+    status == EffectiveStatus::Active && FACT_TYPES.contains(&doc.type_name)
 }
 
 /// A normalised query-side scope set (§6.12 rules 3, 4, 9).
@@ -514,19 +532,36 @@ impl ScopeFilter {
     /// shared-only matches are dropped.
     #[must_use]
     pub fn matches(&self, scope: &str, shared_with: &[String]) -> bool {
+        if self.scope_only {
+            // `--scope-only` narrows the result set (§6.12 rule 4); with no
+            // query scope there is nothing to narrow to.
+            if self.scopes.is_empty() {
+                return true;
+            }
+            let scope = normalise_scope(scope);
+            return scope != GLOBAL_SCOPE && self.scopes.contains(&scope);
+        }
+        self.intersects(scope, shared_with)
+    }
+
+    /// Whether `S(d)` intersects the query scope set: the successor-match rule
+    /// of §3.6 and §3.7, and §6.12 rule 7.
+    ///
+    /// With no query scope the set is universal and everything intersects.
+    /// Otherwise a document intersects when its owning scope is `global`, when
+    /// its owning scope is in the set, or when one of its shared tags is in the
+    /// set. `--scope-only` is deliberately ignored: it narrows the result set
+    /// (§6.12 rule 4), never the meaning of `Q`. A global successor always
+    /// counts, whatever the caller asked to be shown.
+    #[must_use]
+    pub fn intersects(&self, scope: &str, shared_with: &[String]) -> bool {
         if self.scopes.is_empty() {
             return true;
         }
-
         let scope = normalise_scope(scope);
-        let owns = self.scopes.contains(&scope);
-        if self.scope_only {
-            return owns && scope != GLOBAL_SCOPE;
-        }
-        if owns || scope == GLOBAL_SCOPE {
+        if scope == GLOBAL_SCOPE || self.scopes.contains(&scope) {
             return true;
         }
-
         shared_with.iter().any(|tag| {
             let tag = normalise_scope(tag);
             self.scopes.contains(&tag)
@@ -624,6 +659,7 @@ mod tests {
             lexical: 0.5,
             semantic: 0.0,
             intent,
+            effective_status: EffectiveStatus::from(doc.status),
             alpha: 0.0,
             title_boost: 1.0,
             half_life_days: None,
@@ -873,7 +909,7 @@ mod tests {
             .iter()
             .map(|d| score(&clock(), &input(d, intent, flag)))
             .collect();
-        rank_documents(policy(intent, flag), docs, &mapping, &ids, &scores)
+        rank_documents(docs, &mapping, &ids, &scores)
             .iter()
             .map(|hit| hit.doc.status)
             .collect()
@@ -1060,6 +1096,22 @@ mod tests {
     }
 
     #[test]
+    fn intersects_ignores_scope_only() {
+        // The successor-match rule never reads `--scope-only`: a global
+        // document and a shared tag intersect the set either way.
+        let only = scoped(&["org:acme"], true);
+        assert!(only.intersects(GLOBAL_SCOPE, &[]));
+        assert!(only.intersects("org:acme", &[]));
+        assert!(!only.intersects("org:beta", &[]));
+        assert!(only.intersects("org:beta", &["ORG:Acme".to_owned()]));
+        assert!(scoped(&[], false).intersects("org:beta", &[]), "universal");
+        assert!(
+            !only.matches(GLOBAL_SCOPE, &[]),
+            "`matches` still applies scope_only"
+        );
+    }
+
+    #[test]
     fn scope_only_drops_global_and_shared_only_matches() {
         let acme = scoped(&["org:acme"], true);
         assert!(acme.scope_only());
@@ -1119,7 +1171,6 @@ mod tests {
         // Identical title, date and score share a `ChunkId`, so `DocId` is the
         // key that keeps the order stable (§3.1, §6.12.1 obligation 5).
         let ranked = rank_documents(
-            policy(Intent::Current, false),
             &docs,
             &[0, 1],
             &[chunk_id(9), chunk_id(9)],
@@ -1139,7 +1190,7 @@ mod tests {
                 cells += 1;
                 let doc = with_type(doc(1, status), type_name, DECISION);
                 assert_eq!(
-                    is_fact(&doc),
+                    is_fact(&doc, EffectiveStatus::from(status)),
                     status == Status::Active,
                     "{type_name}/{status}"
                 );
@@ -1147,7 +1198,8 @@ mod tests {
         }
         for type_name in ["journal", "note", "finding", "idea"] {
             let doc = with_type(doc(1, Status::Active), type_name, DECISION);
-            assert!(!is_fact(&doc), "{type_name} is not a fact type");
+            let active = EffectiveStatus::from(Status::Active);
+            assert!(!is_fact(&doc, active), "{type_name} is not a fact type");
         }
         assert_eq!(cells, 15, "every status times every fact type");
     }
@@ -1156,9 +1208,27 @@ mod tests {
     fn a_draft_decision_is_searchable_but_not_a_fact() {
         let draft = doc(1, Status::Draft);
         assert!(policy(Intent::Current, false).includes(Status::Draft));
-        assert!(!is_fact(&draft));
-        assert!(is_fact(&doc(1, Status::Active)));
-        assert!(!is_fact(&doc(1, Status::Unknown)));
+        assert!(!is_fact(&draft, EffectiveStatus::Draft));
+        assert!(is_fact(&doc(1, Status::Active), EffectiveStatus::Active));
+        assert!(!is_fact(&doc(1, Status::Unknown), EffectiveStatus::Unknown));
+    }
+
+    #[test]
+    fn the_table_reads_the_effective_status_not_the_declared_one() {
+        // `bad/status-lies.md`: declared `active`, replaced by a link. Under
+        // `current` the effective status has no factor even though the declared
+        // status does, and the override row admits it at 1.0.
+        let lying = doc(1, Status::Active);
+        let mut input = input(&lying, Intent::Current, false);
+        assert_eq!(score(&clock(), &input).status_factor, 1.0, "declared");
+
+        input.effective_status = EffectiveStatus::Superseded;
+        let scored = score(&clock(), &input);
+        assert_eq!(scored.status_factor, 0.0);
+        assert_eq!(scored.final_score, 0.0);
+
+        input.include_superseded = true;
+        assert_eq!(score(&clock(), &input).status_factor, 1.0, "overridden");
     }
 
     // ─────────────────────────────── ordering ────────────────────────────────
@@ -1273,10 +1343,9 @@ mod tests {
         };
         let scores = [score_doc(&acme), score_doc(&beta)];
         let ids = [chunk_id(9), chunk_id(9)];
-        let row = policy(Intent::Current, false);
 
-        let forward = rank_documents(row, &[acme, beta], &[0, 1], &ids, &scores);
-        let reversed = rank_documents(row, &[beta, acme], &[1, 0], &ids, &scores);
+        let forward = rank_documents(&[acme, beta], &[0, 1], &ids, &scores);
+        let reversed = rank_documents(&[beta, acme], &[1, 0], &ids, &scores);
         let order = |hits: &[ScoredDoc<'_>]| hits.iter().map(|h| h.doc.id).collect::<Vec<_>>();
 
         assert_eq!(order(&forward), order(&reversed));
@@ -1297,7 +1366,6 @@ mod tests {
         };
 
         let hits = rank_documents(
-            policy(Intent::Current, false),
             &[doc],
             &[0, 0],
             &[chunk_id(1), chunk_id(2)],
@@ -1312,11 +1380,9 @@ mod tests {
     fn an_equal_score_tie_picks_the_lower_chunk_id_then_the_lower_ordinal() {
         let doc = doc(1, Status::Active);
         let breakdown = score_doc(&doc);
-        let row = policy(Intent::Current, false);
 
         // Input order [2, 1]: the lower chunk id wins, at ordinal 1.
         let hits = rank_documents(
-            row,
             &[doc],
             &[0, 0],
             &[chunk_id(2), chunk_id(1)],
@@ -1328,7 +1394,6 @@ mod tests {
 
         // Identical ids (expected, CH-10): the lower ordinal wins.
         let hits = rank_documents(
-            row,
             &[doc],
             &[0, 0],
             &[chunk_id(1), chunk_id(1)],
@@ -1341,13 +1406,7 @@ mod tests {
     fn mismatched_parallel_slices_rank_nothing_instead_of_panicking() {
         let doc = doc(1, Status::Active);
         let scores = [score_doc(&doc), score_doc(&doc)];
-        let hits = rank_documents(
-            policy(Intent::Current, false),
-            &[doc],
-            &[0, 0],
-            &[chunk_id(1)],
-            &scores,
-        );
+        let hits = rank_documents(&[doc], &[0, 0], &[chunk_id(1)], &scores);
         assert!(hits.is_empty());
     }
 
@@ -1387,7 +1446,8 @@ mod tests {
             view.date,
             Some(NaiveDate::from_ymd_opt(2024, 10, 3).expect("date"))
         );
-        assert!(!is_fact(&view), "a draft decision is never a fact");
+        let status = EffectiveStatus::from(view.status);
+        assert!(!is_fact(&view, status), "a draft decision is never a fact");
     }
 
     #[test]
@@ -1439,6 +1499,7 @@ mod tests {
                 alpha,
                 title_boost,
                 intent,
+                effective_status: EffectiveStatus::from(dated.status),
                 half_life_days: None,
                 include_superseded: superseded,
             });

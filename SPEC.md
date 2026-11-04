@@ -420,7 +420,7 @@ The Rust side resolves each type once into a `TypeSpec { authority, timeless, ha
 - Links are **symmetric in effect**: `A.superseded_by = B` implies `B.supersedes = A` for traversal, even if only one side is declared. `doctor` reports one-sided links.
 - Chains are followed transitively (`A → B → C`); cycles are detected, reported by `doctor`, and broken deterministically (link ignored, warning emitted) rather than panicking.
 - Supersession is orthogonal to `status`: a doc can be `superseded` without a `superseded_by` (retired with no replacement) — this is the "quiet expiry" case that Graphiti-style systems get wrong. `lineage` still reports it as a terminal state.
-- **Validity windows.** A document's `valid_to` is `min(effective_to, earliest successor's effective_from)`. The chain is a *derivation fallback*, never the only source: explicit `effective_from`/`effective_to` win (§6.10).
+- **Validity windows.** A document's `valid_to` is `min(effective_to, earliest successor's `effective_from ?? date`)`. A successor with no date at all closes no window: the index holds no date to close it with. The chain is a *derivation fallback*, never the only source: explicit `effective_from`/`effective_to` win (§6.10).
 - **Cross-corpus links are qualified and opt-in.** `supersedes: "third-brain:/decisions/old.md"`; unqualified paths resolve only inside the document's own corpus, and qualified links require `allow_cross_corpus_links = true` (§6.11). An archived decision can never supersede a current one by accident.
 
 ### 6.8 Versions
@@ -511,7 +511,7 @@ Rules:
 2. `effective_to` is exclusive. If absent, it is derived as the earliest successor's `effective_from` (§6.7). The chain is the *fallback*; explicit keys win.
 3. `valid = [effective_from, valid_to)` where `valid_to = min(effective_to, earliest successor's effective_from)`.
 4. `valid_to <= effective_from` → `invalid_validity` (`doctor` error). The window is treated as empty; the document still appears in `history` and `exhaustive`.
-5. `current(now) = effective_status ∈ {active, draft} AND effective_from <= now AND (valid_to is None OR valid_to > now)`, where `effective_status` is defined in rule 6.
+5. `current(now) = effective_status ∈ {active, draft} AND effective_from <= now AND (valid_to is None OR valid_to > now)`, where `effective_status` is defined in rule 6. `effective_status` has no `expired` variant: a document past its `effective_to` keeps its declared status and is outside its window, and the window is the only expiry signal. A document with no `effective_from` passes the time test, because rule 9 keeps an undated document in `current`.
 6. **Effective status is derived, not hand-maintained.** If `superseded_by` resolves to an existing document, the document is superseded even when `status: active` is declared. If `status: superseded` has no successor, it is quiet-expired (still superseded). `doctor` reports disagreements as `status_mismatch` and never rewrites them.
 7. **`as_of DATE` uses valid time only.** It includes documents where `effective_from <= T < valid_to`; decay is off; **status is returned but does not gate**. A document that is superseded today may have been current in June 2025 — gating on today's status would silently drop the correct answer.
 8. Decay in the `current` intent is anchored on `effective_from`, not `date`: a decision that took effect yesterday is recent even if it was drafted a year ago.

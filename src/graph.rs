@@ -20,8 +20,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::NaiveDate;
 
 use crate::config::Config;
+use crate::document::Status;
 use crate::id::DocId;
 use crate::index::{Edge, Snapshot};
+use crate::score::ScopeFilter;
 
 /// The scope a document has when it declares none (§6.12).
 const GLOBAL_SCOPE: &str = "global";
@@ -48,6 +50,11 @@ pub struct NodeFacts {
     pub shared_with: Vec<String>,
     /// `effective_from ?? date`, or a tombstone's last valid start.
     pub valid_from: Option<NaiveDate>,
+    /// The declared valid-time end, exclusive. A tombstone records none.
+    pub effective_to: Option<NaiveDate>,
+    /// The declared status, or `None` for a retired document, which has no
+    /// current metadata to read (R4-1).
+    pub declared_status: Option<Status>,
 }
 
 /// A node endpoint: a live document, or a retired one that keeps its place in
@@ -181,6 +188,8 @@ impl Graph {
                 scope: text(snapshot, doc.scope),
                 shared_with: texts(snapshot, &doc.shared_with),
                 valid_from: doc.effective_from.or(doc.date),
+                effective_to: doc.effective_to,
+                declared_status: Some(doc.status),
             }));
         }
         for meta in &snapshot.tombstones {
@@ -198,6 +207,9 @@ impl Graph {
                 scope: meta.scope.clone(),
                 shared_with: meta.shared_with.clone(),
                 valid_from: meta.valid_from,
+                // A tombstone holds no valid-time end and no declared status.
+                effective_to: None,
+                declared_status: None,
             }));
         }
         Self::build(
@@ -224,6 +236,35 @@ impl Graph {
     #[must_use]
     pub fn endpoint(&self, id: DocId) -> Option<&Endpoint> {
         self.endpoints.get(&id)
+    }
+
+    /// One [`Window`] per node, resolved for one query scope set (§3.6).
+    ///
+    /// The query computes this map once, before its row loop, and never walks
+    /// the successors again: a window per row would rebuild the same answer for
+    /// every document on every query (P3 scope 10).
+    #[must_use]
+    pub fn windows(&self, scopes: &ScopeFilter) -> BTreeMap<DocId, Window> {
+        self.nodes
+            .keys()
+            .filter_map(|id| {
+                let facts = self.endpoint(*id)?.facts();
+                Some((*id, Window::of(facts, self, scopes)))
+            })
+            .collect()
+    }
+
+    /// One [`EffectiveStatus`] per live node, resolved for one query scope set
+    /// (§3.7). A retired node has no status to report, so it has no entry.
+    #[must_use]
+    pub fn effective_statuses(&self, scopes: &ScopeFilter) -> BTreeMap<DocId, EffectiveStatus> {
+        self.nodes
+            .keys()
+            .filter_map(|id| {
+                let facts = self.endpoint(*id)?.facts();
+                Some((*id, EffectiveStatus::of(facts, self, scopes)?))
+            })
+            .collect()
     }
 
     /// The edges the cycle breaker ignored, sorted. They stay in the snapshot.
@@ -260,6 +301,154 @@ fn effective(endpoints: &BTreeMap<DocId, Endpoint>, (from, to): Pair) -> bool {
             .shared_with
             .iter()
             .any(|tag| right.shared_with.contains(tag))
+}
+
+/// A document's valid-time interval, resolved for one query scope set (§3.6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Window {
+    /// `effective_from ?? date`, or a tombstone's last valid start.
+    pub valid_from: Option<NaiveDate>,
+    /// Exclusive. The declared end, clamped by the earliest matching successor.
+    pub valid_to: Option<NaiveDate>,
+    /// True when `valid_to <= valid_from`. The window is then empty.
+    pub invalid: bool,
+}
+
+impl Window {
+    /// Resolves the window for one document against one query scope set.
+    ///
+    /// `valid_to = min(effective_to, min over matching successors of their
+    /// valid_from)`. An inert edge contributes nothing because [`Graph`] never
+    /// lists it as a successor. A successor with no date closes no window: the
+    /// document is still `Superseded`, and an `--as-of` query still returns it,
+    /// because the index holds no date to close the window with (§3.6).
+    #[must_use]
+    pub fn of(facts: &NodeFacts, graph: &Graph, scopes: &ScopeFilter) -> Self {
+        let mut valid_to = facts.effective_to;
+        for successor in graph
+            .node(facts.id)
+            .map_or(&[][..], |node| &node.successors)
+        {
+            let Some(facts) = graph.endpoint(*successor).map(Endpoint::facts) else {
+                continue;
+            };
+            // `intersects`, not `matches`: a global successor always counts.
+            if !scopes.intersects(&facts.scope, &facts.shared_with) {
+                continue;
+            }
+            let Some(start) = facts.valid_from else {
+                continue;
+            };
+            valid_to = Some(valid_to.map_or(start, |current| current.min(start)));
+        }
+
+        let invalid = matches!((facts.valid_from, valid_to), (Some(from), Some(to)) if to <= from);
+        Self {
+            valid_from: facts.valid_from,
+            valid_to,
+            invalid,
+        }
+    }
+
+    /// Whether this window contains `date`: `valid_from <= date < valid_to`.
+    ///
+    /// A document with no `valid_from` is never inside a window, so an
+    /// `--as-of` query excludes it (§3.8). An invalid window contains nothing.
+    #[must_use]
+    pub fn contains(&self, date: NaiveDate) -> bool {
+        let Some(from) = self.valid_from else {
+            return false;
+        };
+        from <= date && self.valid_to.is_none_or(|to| date < to)
+    }
+
+    /// Whether this window contains `today`, which is `current`'s gate (§3.7).
+    ///
+    /// A missing `valid_from` passes: §6.10 rule 9 keeps an undated document in
+    /// `current`, and the eval set asserts it (R-4). An invalid window fails
+    /// both comparisons by construction.
+    #[must_use]
+    pub fn covers_today(&self, today: NaiveDate) -> bool {
+        self.valid_from.is_none_or(|from| from <= today)
+            && self.valid_to.is_none_or(|to| today < to)
+    }
+}
+
+/// The status a reader must use. Not persisted, and never a sixth value.
+///
+/// There is no `expired` variant: expiry is a window property and nothing else
+/// (§6.10 rule 5, M5-10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveStatus {
+    /// Current and in force.
+    Active,
+    /// Work in progress.
+    Draft,
+    /// Retired with no successor.
+    Deprecated,
+    /// Replaced by an effective successor, or declared superseded.
+    Superseded,
+    /// Declared value the corpus does not know.
+    Unknown,
+}
+
+impl EffectiveStatus {
+    /// Resolves the status for one document against one query scope set.
+    ///
+    /// A document is `Superseded` when the graph gives it at least one successor
+    /// that matches `Q`; otherwise it keeps its declared status. `None` means a
+    /// retired endpoint, which has no current metadata to read (R4-1).
+    #[must_use]
+    pub fn of(facts: &NodeFacts, graph: &Graph, scopes: &ScopeFilter) -> Option<Self> {
+        let declared = Self::from(facts.declared_status?);
+        let superseded = graph
+            .node(facts.id)
+            .map_or(&[][..], |node| &node.successors)
+            .iter()
+            .filter_map(|id| graph.endpoint(*id).map(Endpoint::facts))
+            .any(|facts| scopes.intersects(&facts.scope, &facts.shared_with));
+        Some(if superseded {
+            Self::Superseded
+        } else {
+            declared
+        })
+    }
+
+    /// The stable lowercase name used in JSON output.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Draft => "draft",
+            Self::Deprecated => "deprecated",
+            Self::Superseded => "superseded",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl From<EffectiveStatus> for Status {
+    fn from(status: EffectiveStatus) -> Self {
+        match status {
+            EffectiveStatus::Active => Self::Active,
+            EffectiveStatus::Draft => Self::Draft,
+            EffectiveStatus::Deprecated => Self::Deprecated,
+            EffectiveStatus::Superseded => Self::Superseded,
+            EffectiveStatus::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<Status> for EffectiveStatus {
+    fn from(status: Status) -> Self {
+        match status {
+            Status::Active => Self::Active,
+            Status::Draft => Self::Draft,
+            Status::Deprecated => Self::Deprecated,
+            Status::Superseded => Self::Superseded,
+            Status::Unknown => Self::Unknown,
+        }
+    }
 }
 
 /// Removes one edge per cycle until the graph is acyclic.
@@ -377,6 +566,16 @@ mod tests {
             scope: scope.to_owned(),
             shared_with: shared_with.iter().map(|tag| (*tag).to_owned()).collect(),
             valid_from: None,
+            effective_to: None,
+            declared_status: Some(Status::Active),
+        }
+    }
+
+    /// The same facts with a valid-time start, still declared active.
+    fn dated(number: u8, path: &str, start: (i32, u32, u32)) -> NodeFacts {
+        NodeFacts {
+            valid_from: Some(date(start)),
+            ..facts(number, path, "global", &[])
         }
     }
 
@@ -398,6 +597,62 @@ mod tests {
         }
         out.sort_unstable();
         out
+    }
+
+    fn date((year, month, day): (i32, u32, u32)) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("valid test date")
+    }
+
+    /// The query scope set; `&[]` is the universal set (§6.12 rule 3).
+    fn scopes(list: &[&str]) -> ScopeFilter {
+        let owned: Vec<String> = list.iter().map(|scope| (*scope).to_owned()).collect();
+        ScopeFilter::new(&owned, false)
+    }
+
+    /// The graph fixture chain by hand: A 2020-01-01, B 2020-07-01, C
+    /// 2021-01-01, D 2021-07-01, E 2022-01-01, each replacing the one before.
+    fn chain() -> Graph {
+        let edges = [edge(1, 2), edge(2, 3), edge(3, 4), edge(4, 5)];
+        let endpoints = [
+            (1, "chain/2020-01-01-adopt-postgres.md", (2020, 1, 1)),
+            (2, "chain/2020-07-01-move-to-redis.md", (2020, 7, 1)),
+            (3, "chain/2021-01-01-cache-in-front.md", (2021, 1, 1)),
+            (4, "chain/2021-07-01-drop-cache.md", (2021, 7, 1)),
+            (5, "chain/2022-01-01-cache-returns.md", (2022, 1, 1)),
+        ]
+        .map(|(number, path, start)| Endpoint::Live(dated(number, path, start)));
+        Graph::build(&edges, endpoints, false)
+    }
+
+    /// G, a global document of 2020-02-01, replaced by H, an `org:acme`
+    /// document of 2020-03-01 (the fixture's `scopes/global-claim.md` pair).
+    fn scope_pair() -> Graph {
+        let edges = [edge(91, 92)];
+        let endpoints = [
+            Endpoint::Live(dated(91, "scopes/global-claim.md", (2020, 2, 1))),
+            Endpoint::Live(NodeFacts {
+                scope: "org:acme".to_owned(),
+                ..dated(92, "scopes/acme-claim.md", (2020, 3, 1))
+            }),
+        ];
+        Graph::build(&edges, endpoints, false)
+    }
+
+    fn window_of(graph: &Graph, number: u8, query: &ScopeFilter) -> Window {
+        let facts = graph.endpoint(id(number)).expect("endpoint").facts();
+        Window::of(facts, graph, query)
+    }
+
+    fn status_of(graph: &Graph, number: u8, query: &ScopeFilter) -> Option<EffectiveStatus> {
+        let facts = graph.endpoint(id(number)).expect("endpoint").facts();
+        EffectiveStatus::of(facts, graph, query)
+    }
+
+    /// The chain nodes whose window contains `at`, in id order.
+    fn members(graph: &Graph, at: NaiveDate) -> Vec<u8> {
+        (1..=5)
+            .filter(|number| window_of(graph, *number, &scopes(&[])).contains(at))
+            .collect()
     }
 
     #[test]
@@ -534,5 +789,201 @@ mod tests {
         assert_eq!(graph.node(id(71)).expect("a").successors, [id(72)]);
         assert_eq!(graph.node(id(72)).expect("b").predecessors, [id(71)]);
         assert!(matches!(graph.endpoint(id(72)), Some(Endpoint::Retired(_))));
+    }
+
+    #[test]
+    fn case_6_1_only_a_was_valid_on_2020_03_01() {
+        // The chain windows are A [2020-01-01, 2020-07-01), B [2020-07-01,
+        // 2021-01-01), C [2021-01-01, 2021-07-01), D [2021-07-01, 2022-01-01)
+        // and E [2022-01-01, None). 2020-03-01 is inside A alone.
+        assert_eq!(members(&chain(), date((2020, 3, 1))), [1]);
+    }
+
+    #[test]
+    fn case_6_2_the_successors_start_is_exclusive() {
+        // 2020-07-01 is B's first day and A's last day plus one, so only B.
+        assert_eq!(members(&chain(), date((2020, 7, 1))), [2]);
+    }
+
+    #[test]
+    fn case_6_3_the_last_link_has_no_end() {
+        // E starts 2022-01-01 and nothing replaces it, so it alone spans 2025.
+        let window = window_of(&chain(), 5, &scopes(&[]));
+        assert_eq!(window.valid_to, None);
+        assert_eq!(members(&chain(), date((2025, 1, 1))), [5]);
+    }
+
+    #[test]
+    fn case_6_4_a_declared_end_wins_over_the_successor() {
+        // A declares `effective_to: 2020-04-01`. The successor would end the
+        // window at 2020-07-01; the smaller value wins (§6.10 rule 2).
+        let mut end = dated(1, "chain/a.md", (2020, 1, 1));
+        end.effective_to = Some(date((2020, 4, 1)));
+        let edges = [edge(1, 2)];
+        let endpoints = [
+            Endpoint::Live(end),
+            Endpoint::Live(dated(2, "chain/b.md", (2020, 7, 1))),
+        ];
+        let graph = Graph::build(&edges, endpoints, false);
+
+        let window = window_of(&graph, 1, &scopes(&[]));
+        assert_eq!(window.valid_from, Some(date((2020, 1, 1))));
+        assert_eq!(window.valid_to, Some(date((2020, 4, 1))));
+        assert!(window.contains(date((2020, 3, 31))));
+        assert!(!window.contains(date((2020, 4, 1))));
+    }
+
+    #[test]
+    fn case_6_5_an_invalid_window_contains_no_date() {
+        // `bad/invalid-window.md`: effective_from 2021-01-01, effective_to
+        // 2020-01-01, so the window is empty and no as-of date can enter it.
+        let mut invalid = dated(31, "bad/invalid-window.md", (2021, 1, 1));
+        invalid.effective_to = Some(date((2020, 1, 1)));
+        let graph = Graph::build(&[], [Endpoint::Live(invalid)], false);
+
+        let window = window_of(&graph, 31, &scopes(&[]));
+        assert_eq!(window.valid_to, Some(date((2020, 1, 1))));
+        assert!(window.invalid, "effective_to <= effective_from");
+        assert!(!window.contains(date((2020, 6, 1))));
+        assert!(!window.contains(date((2021, 6, 1))));
+        assert!(!window.covers_today(date((2025, 4, 1))));
+    }
+
+    #[test]
+    fn case_6_6_a_retired_successor_still_closes_the_window() {
+        // `bad/one-sided.md` (2020-10-01) is replaced by `bad/one-sided-new.md`
+        // (2020-11-01), which then leaves the corpus and becomes a tombstone.
+        // The tombstone keeps its valid_from, so the window still ends there.
+        let edges = [edge(81, 82)];
+        let endpoints = [
+            Endpoint::Live(dated(81, "bad/one-sided.md", (2020, 10, 1))),
+            Endpoint::Retired(dated(82, "bad/one-sided-new.md", (2020, 11, 1))),
+        ];
+        let graph = Graph::build(&edges, endpoints, false);
+
+        let window = window_of(&graph, 81, &scopes(&[]));
+        assert_eq!(window.valid_from, Some(date((2020, 10, 1))));
+        assert_eq!(window.valid_to, Some(date((2020, 11, 1))));
+    }
+
+    #[test]
+    fn case_6_7_an_acme_successor_closes_a_global_window_only_for_acme() {
+        // `scopes/global-claim.md` (2020-02-01) is replaced by
+        // `scopes/acme-claim.md` (org:acme, 2020-03-01). For Q = {org:beta} the
+        // successor does not match, so the window stays open; for Q =
+        // {org:acme} it ends at 2020-03-01.
+        let graph = scope_pair();
+        assert_eq!(window_of(&graph, 91, &scopes(&["org:beta"])).valid_to, None);
+        assert_eq!(
+            window_of(&graph, 91, &scopes(&["org:acme"])).valid_to,
+            Some(date((2020, 3, 1)))
+        );
+    }
+
+    #[test]
+    fn case_6_8_the_default_query_is_universal() {
+        // With no `--scope` every successor matches, so H closes G's window.
+        let graph = scope_pair();
+        assert_eq!(
+            window_of(&graph, 91, &scopes(&[])).valid_to,
+            Some(date((2020, 3, 1)))
+        );
+        assert!(!window_of(&graph, 91, &scopes(&[])).contains(date((2020, 3, 1))));
+    }
+
+    #[test]
+    fn case_7_1_a_link_beats_a_declared_active() {
+        // `bad/status-lies.md` declares `status: active` and is replaced by
+        // `bad/one-sided-new.md` through `superseded_by`.
+        let edges = [edge(101, 102)];
+        let endpoints = [
+            Endpoint::Live(dated(101, "bad/status-lies.md", (2021, 2, 1))),
+            Endpoint::Live(dated(102, "bad/one-sided-new.md", (2020, 11, 1))),
+        ];
+        let graph = Graph::build(&edges, endpoints, false);
+
+        assert_eq!(
+            status_of(&graph, 101, &scopes(&[])),
+            Some(EffectiveStatus::Superseded)
+        );
+        assert_eq!(
+            status_of(&graph, 102, &scopes(&[])),
+            Some(EffectiveStatus::Active)
+        );
+    }
+
+    #[test]
+    fn case_7_2_quiet_expiry_keeps_the_declared_superseded() {
+        // `bad/quiet-expiry.md` declares `superseded` and has no successor, so
+        // the derived status equals the declared one.
+        let mut quiet = dated(111, "bad/quiet-expiry.md", (2020, 12, 1));
+        quiet.declared_status = Some(Status::Superseded);
+        let graph = Graph::build(&[], [Endpoint::Live(quiet)], false);
+
+        assert_eq!(
+            status_of(&graph, 111, &scopes(&[])),
+            Some(EffectiveStatus::Superseded)
+        );
+    }
+
+    #[test]
+    fn case_7_3_expiry_is_a_window_property_not_a_status() {
+        // `bad/expired.md` declares `status: active` and `effective_to:
+        // 2020-01-01`. It stays active and lies outside its window.
+        let mut expired = dated(121, "bad/expired.md", (2021, 3, 1));
+        expired.effective_to = Some(date((2020, 1, 1)));
+        let graph = Graph::build(&[], [Endpoint::Live(expired)], false);
+
+        let window = window_of(&graph, 121, &scopes(&[]));
+        assert_eq!(
+            status_of(&graph, 121, &scopes(&[])),
+            Some(EffectiveStatus::Active)
+        );
+        assert!(window.invalid);
+        assert!(!window.covers_today(date((2025, 4, 1))));
+    }
+
+    #[test]
+    fn a_global_successor_counts_under_scope_only_too() {
+        // `--scope-only` narrows the result set (§6.12 rule 4); it does not
+        // change `Q`. A global successor always matches (§6.12 rule 7), so it
+        // closes A's window and makes A superseded even when the caller asked
+        // to see owned scopes only.
+        let edges = [edge(91, 92)];
+        let endpoints = [
+            Endpoint::Live(NodeFacts {
+                scope: "org:acme".to_owned(),
+                ..dated(91, "a/acme.md", (2020, 1, 1))
+            }),
+            Endpoint::Live(dated(92, "global.md", (2020, 6, 1))),
+        ];
+        let graph = Graph::build(&edges, endpoints, false);
+        let only = ScopeFilter::new(&["org:acme".to_owned()], true);
+        assert!(
+            !only.matches(GLOBAL_SCOPE, &[]),
+            "the result set is narrowed"
+        );
+
+        assert_eq!(
+            window_of(&graph, 91, &only).valid_to,
+            Some(date((2020, 6, 1)))
+        );
+        assert_eq!(
+            status_of(&graph, 91, &only),
+            Some(EffectiveStatus::Superseded)
+        );
+    }
+
+    #[test]
+    fn case_7_6_no_successor_and_no_end_stays_current() {
+        // `chain/2022-01-01-cache-returns.md`: active, replaced by nothing, so
+        // its window has no end and today is inside it.
+        let window = window_of(&chain(), 5, &scopes(&[]));
+        assert_eq!(window.valid_to, None);
+        assert!(window.covers_today(date((2025, 4, 1))));
+        assert_eq!(
+            status_of(&chain(), 5, &scopes(&[])),
+            Some(EffectiveStatus::Active)
+        );
     }
 }
