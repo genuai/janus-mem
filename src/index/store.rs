@@ -450,21 +450,8 @@ impl Lock {
     ///
     /// [`JanusError::LockTimeout`], or [`JanusError::Write`] on the lock file.
     pub fn acquire(dir: &Path, timeout: Duration) -> Result<Self, JanusError> {
-        fs::create_dir_all(dir).map_err(|source| JanusError::CreateDir {
-            path: dir.to_path_buf(),
-            source,
-        })?;
         let path = dir.join(LOCK_FILE);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|source| JanusError::Write {
-                path: path.clone(),
-                source,
-            })?;
+        let file = open_lock_file(dir)?;
 
         let deadline = Instant::now() + timeout;
         loop {
@@ -485,6 +472,25 @@ impl Lock {
             }
         }
     }
+
+    /// Tries the lock once and never waits (§3.4, D-11).
+    ///
+    /// A read uses this: the refresh is a convenience, so a busy writer means
+    /// "skip the refresh", never a timeout and never a failed read.
+    ///
+    /// # Errors
+    ///
+    /// [`JanusError::Write`] on the lock file, or [`JanusError::CreateDir`] when
+    /// the index directory cannot be made.
+    pub fn try_acquire(dir: &Path) -> Result<Option<Self>, JanusError> {
+        let path = dir.join(LOCK_FILE);
+        let file = open_lock_file(dir)?;
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => Ok(Some(Self { file })),
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(source)) => Err(JanusError::Write { path, source }),
+        }
+    }
 }
 
 impl Drop for Lock {
@@ -492,6 +498,25 @@ impl Drop for Lock {
         // Closing the handle releases it too; unlocking first is explicit.
         let _ = fs4::FileExt::unlock(&self.file);
     }
+}
+
+/// Opens (and creates) `.janus/lock` for both lock variants.
+fn open_lock_file(dir: &Path) -> Result<File, JanusError> {
+    fs::create_dir_all(dir).map_err(|source| JanusError::CreateDir {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    let path = dir.join(LOCK_FILE);
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|source| JanusError::Write {
+            path: path.clone(),
+            source,
+        })
 }
 
 /// The stages of a publication (S-17, V-3), the seam behind
@@ -770,7 +795,12 @@ impl Expected {
         }
     }
 
-    /// The reason this manifest is stale, or `Ok` when it describes us.
+    /// Why this manifest does or does not describe us, and what a read may do.
+    ///
+    /// The five fields that change the identity of every chunk or every row are
+    /// compared **first**. A moved vault whose generation has no vectors must
+    /// report `Refresh`, not `Refuse`: the reverse order would send a read to a
+    /// cold build that re-embeds the whole corpus (M4D §3.3, D-3a).
     ///
     /// The embedder comparison is V-21's **ordering**, not an equality: a
     /// generation that has vectors is acceptable to a process that cannot embed
@@ -778,56 +808,194 @@ impl Expected {
     /// generation without vectors is stale for a process that can embed, so
     /// vectors appear without a manual `--rebuild`. Plain equality would let a
     /// feature-off binary and a featured one delete each other's vectors forever.
-    fn check(&self, manifest: &Manifest) -> Result<(), String> {
-        let vectors = (
-            manifest.embedder.is_some(),
-            manifest.vectors_sha.is_some(),
-            manifest.vectors_len.is_some(),
-        );
-        if vectors != (true, true, true) && vectors != (false, false, false) {
-            return Err(format!(
-                "manifest vector fields disagree: embedder {}, vectors_sha {}, vectors_len {}",
-                present(vectors.0),
-                present(vectors.1),
-                present(vectors.2)
-            ));
-        }
-
-        let found = [
-            ("format_version", manifest.format_version.to_string()),
-            ("tokenizer", tokenizer_name(&manifest.tokenizer)),
-            ("chunker", chunker_name(manifest.chunker)),
-            ("corpus_id", manifest.corpus_id.clone()),
-            ("built_root", manifest.built_root.clone()),
+    fn check(&self, manifest: &Manifest) -> Check {
+        let cold = [
+            (
+                MismatchField::FormatVersion,
+                manifest.format_version.to_string(),
+                self.format_version.to_string(),
+            ),
+            (
+                MismatchField::Tokenizer,
+                tokenizer_name(&manifest.tokenizer),
+                tokenizer_name(&self.tokenizer),
+            ),
+            (
+                MismatchField::Chunker,
+                chunker_name(manifest.chunker),
+                chunker_name(self.chunker),
+            ),
+            (
+                MismatchField::CorpusId,
+                manifest.corpus_id.clone(),
+                self.corpus_id.clone(),
+            ),
         ];
-        let wanted = [
-            self.format_version.to_string(),
-            tokenizer_name(&self.tokenizer),
-            chunker_name(self.chunker),
-            self.corpus_id.clone(),
-            self.built_root.clone(),
-        ];
-        if let Some(index) = found.iter().zip(&wanted).position(|((_, a), b)| a != b) {
-            let (field, actual) = &found[index];
-            return Err(format!("{field} {actual} != {}", wanted[index]));
+        for (field, found, wanted) in cold {
+            if found != wanted {
+                return Check::Refuse(Mismatch {
+                    field,
+                    found,
+                    wanted,
+                });
+            }
         }
 
         match (&manifest.embedder, &self.embedder) {
             // Row 6: strictly more information than this process reads.
-            (Some(_), None) => Ok(()),
-            // Row 5: rebuild once, then stable.
-            (None, Some(want)) => Err(format!(
-                "index has no vectors and this build embeds with `{}`; rebuilding to add them",
-                want.name
-            )),
-            (Some(have), Some(want)) if have != want => Err(format!(
-                "embedder `{}` != `{}`",
-                embedder_name(have),
-                embedder_name(want)
-            )),
-            _ => Ok(()),
+            (Some(_), None) => {}
+            // Row 5: the rows are missing, so a build must add them.
+            (None, Some(want)) => {
+                return Check::Refuse(Mismatch {
+                    field: MismatchField::Embedder,
+                    found: NO_VECTORS.to_owned(),
+                    wanted: want.name.clone(),
+                });
+            }
+            (Some(have), Some(want)) if have != want => {
+                return Check::Refuse(Mismatch {
+                    field: MismatchField::Embedder,
+                    found: embedder_name(have),
+                    wanted: embedder_name(want),
+                });
+            }
+            _ => {}
+        }
+
+        // Diagnostic only: every `DocId` is unchanged, so the generation still
+        // loads and a refresh rewrites the manifest (D-3a, SPEC §8.3).
+        if manifest.built_root != self.built_root {
+            return Check::Refresh(Mismatch {
+                field: MismatchField::BuiltRoot,
+                found: manifest.built_root.clone(),
+                wanted: self.built_root.clone(),
+            });
+        }
+        Check::Ok
+    }
+}
+
+/// The manifest field that did not agree with this process (M4D §2, §3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MismatchField {
+    /// The snapshot layout changed.
+    FormatVersion,
+    /// The tokenizer changed, so every posting changes.
+    Tokenizer,
+    /// The chunker changed, so every chunk boundary changes.
+    Chunker,
+    /// The corpus identity changed, so every `DocId` changes.
+    CorpusId,
+    /// The root recorded in the manifest is not this root. Diagnostic only.
+    BuiltRoot,
+    /// The embedder changed, or the rows it needs are absent.
+    Embedder,
+}
+
+impl MismatchField {
+    /// The field name the manifest and the old messages use.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::FormatVersion => "format_version",
+            Self::Tokenizer => "tokenizer",
+            Self::Chunker => "chunker",
+            Self::CorpusId => "corpus_id",
+            Self::BuiltRoot => "built_root",
+            Self::Embedder => "embedder",
         }
     }
+
+    /// True when only a cold build can cure this field (M4D D-3).
+    #[must_use]
+    pub fn needs_full_build(self) -> bool {
+        self != Self::BuiltRoot
+    }
+}
+
+/// The `found` value of the embedder row that reports absent rows.
+///
+/// The two embedder rows read differently, and M3's wording is part of the
+/// contract, so one sentinel keeps both texts (M4D §3.3).
+const NO_VECTORS: &str = "no vectors";
+
+/// One disagreement between a manifest and this process (M4D §2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mismatch {
+    /// Which field disagreed.
+    pub field: MismatchField,
+    /// What the manifest says.
+    pub found: String,
+    /// What this process wants.
+    pub wanted: String,
+}
+
+impl fmt::Display for Mismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.field, self.found.as_str()) {
+            (MismatchField::Embedder, NO_VECTORS) => write!(
+                f,
+                "index has no vectors and this build embeds with `{}`; rebuilding to add them",
+                self.wanted
+            ),
+            (MismatchField::Embedder, found) => {
+                write!(f, "embedder `{found}` != `{}`", self.wanted)
+            }
+            (field, found) => write!(f, "{} {found} != {}", field.name(), self.wanted),
+        }
+    }
+}
+
+/// The three outcomes of validation (M4D §2, §3.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Check {
+    /// The manifest describes this process and this corpus.
+    Ok,
+    /// The generation is usable, but the manifest must be rewritten.
+    Refresh(Mismatch),
+    /// Only a cold build can cure this. A read refuses.
+    Refuse(Mismatch),
+}
+
+impl Check {
+    /// D-3: true when a read must refuse instead of building.
+    #[must_use]
+    pub fn needs_full_build(&self) -> bool {
+        match self {
+            Self::Refuse(mismatch) => mismatch.field.needs_full_build(),
+            Self::Ok | Self::Refresh(_) => false,
+        }
+    }
+
+    /// The mismatch that carried this outcome, if any.
+    #[must_use]
+    pub fn mismatch(&self) -> Option<&Mismatch> {
+        match self {
+            Self::Ok => None,
+            Self::Refresh(mismatch) | Self::Refuse(mismatch) => Some(mismatch),
+        }
+    }
+}
+
+/// The reason a manifest's three vector fields disagree, or `None`.
+///
+/// This is a corrupt manifest, not a mismatch with this process, so it stays on
+/// [`Attempt::Stale`]: a rebuild repairs it (M4D §3.3 row 4).
+fn vector_fields_reason(manifest: &Manifest) -> Option<String> {
+    let vectors = (
+        manifest.embedder.is_some(),
+        manifest.vectors_sha.is_some(),
+        manifest.vectors_len.is_some(),
+    );
+    if vectors == (true, true, true) || vectors == (false, false, false) {
+        return None;
+    }
+    Some(format!(
+        "manifest vector fields disagree: embedder {}, vectors_sha {}, vectors_len {}",
+        present(vectors.0),
+        present(vectors.1),
+        present(vectors.2)
+    ))
 }
 
 fn present(yes: bool) -> &'static str {
@@ -855,6 +1023,9 @@ struct Generation {
     snapshot: Snapshot,
     /// The rows, present only when the read asked for them (V-4).
     vectors: Option<Vectors>,
+    /// A disagreement the generation survives, such as a moved root. The
+    /// caller repairs the manifest and answers from these bytes (M4D §3.3).
+    refresh: Option<Mismatch>,
 }
 
 /// The result of one validated-read attempt (§3.5 steps 1–4).
@@ -864,8 +1035,12 @@ enum Attempt {
     /// The pair did not agree; a publisher may be between two renames. `path`
     /// names the file that failed, so a refusal can name it too.
     Retry { path: PathBuf, reason: String },
-    /// Nothing retrying can fix: absent, unreadable, or built for another world.
+    /// Nothing retrying can fix: absent, unreadable, or the manifest's vector
+    /// fields disagree.
     Stale(String),
+    /// Nothing retrying can fix either, and only a cold build can cure it.
+    /// `reason` is the mismatch, in the words M3 used (M4D §3.3, D-3).
+    NeedsFullBuild(String),
 }
 
 /// Reads one file, distinguishing absence from a real IO failure.
@@ -897,9 +1072,16 @@ fn read_generation(
             return Ok(Attempt::Stale(reason));
         }
     };
-    if let Err(reason) = expected.check(&manifest) {
+    // A manifest holding two of the three vector facts is corrupt, not a
+    // mismatch with this process, so a rebuild repairs it.
+    if let Some(reason) = vector_fields_reason(&manifest) {
         return Ok(Attempt::Stale(reason));
     }
+    let refresh = match expected.check(&manifest) {
+        Check::Ok => None,
+        Check::Refresh(mismatch) => Some(mismatch),
+        Check::Refuse(mismatch) => return Ok(Attempt::NeedsFullBuild(mismatch.to_string())),
+    };
 
     let index_path = dir.join(INDEX_FILE);
     let Some(bytes) = read_optional(&index_path)? else {
@@ -932,6 +1114,7 @@ fn read_generation(
         manifest,
         snapshot,
         vectors,
+        refresh,
     })))
 }
 
@@ -1066,6 +1249,9 @@ pub struct Load {
     pub stats: BuildStats,
     /// Why a generation on disk was rejected (S-8); `None` when one validated.
     pub stale: Option<String>,
+    /// A disagreement this generation survives, so the caller must rewrite the
+    /// manifest and may still answer (M4D §3.3 row 6, D-3a). `None` otherwise.
+    pub refresh_request: Option<Mismatch>,
 }
 
 impl Load {
@@ -1078,6 +1264,7 @@ impl Load {
             rebuilt: false,
             stats: BuildStats::default(),
             stale,
+            refresh_request: generation.refresh,
         }
     }
 }
@@ -1087,13 +1274,15 @@ impl Load {
 /// recovery does, and may wait for an active publisher. Errors:
 /// [`JanusError::IndexUnstable`] under [`Policy::Refuse`], naming the file that
 /// failed (`.janus/index.bin`, `.janus/vectors.f32` or the manifest),
+/// [`JanusError::IndexNeedsFullBuild`] when only a cold build can cure the
+/// manifest and a rebuild is allowed (M4D D-3),
 /// [`JanusError::LockTimeout`] if recovery cannot get the lock, and IO failures.
 pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
     let dir = config::resolve_index_dir(options.root, &options.config.index_dir);
     let expected = Expected::new(options.root, options.config, options.embedder);
 
     let mut ready = None;
-    let mut last = String::new();
+    let mut last = None;
     // A refusal names the file that failed. A retry says which payload it was;
     // a stale manifest keeps M3's answer, `index.bin`, because the generation it
     // describes is what could not be used.
@@ -1105,13 +1294,20 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
                 ready = Some(generation);
                 break;
             }
+            // A cold mismatch is not a retry: nothing a publisher does cures it.
+            Attempt::NeedsFullBuild(reason) => {
+                if options.policy == Policy::Refuse {
+                    return Err(JanusError::IndexUnstable { path: failed });
+                }
+                return Err(JanusError::IndexNeedsFullBuild { reason });
+            }
             Attempt::Stale(reason) => {
-                last = reason;
+                last = Some(reason);
                 break;
             }
             Attempt::Retry { path, reason } => {
                 failed = path;
-                last = reason;
+                last = Some(reason);
             }
         }
         let Some(backoff) = RETRY_BACKOFF.get(retries) else {
@@ -1122,10 +1318,7 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
     }
 
     if let Some(generation) = ready {
-        return Ok(Load::adopted(
-            *generation,
-            (!last.is_empty()).then_some(last),
-        ));
+        return Ok(Load::adopted(*generation, last));
     }
     if options.policy == Policy::Refuse {
         return Err(JanusError::IndexUnstable { path: failed });
@@ -1135,10 +1328,7 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
     // Double-checked freshness (S-7): another process may have published while
     // we waited. Adopting it is what makes two auto-builds cost one build.
     if let Attempt::Ready(generation) = read_generation(&dir, &expected, options.want_vectors)? {
-        return Ok(Load::adopted(
-            *generation,
-            (!last.is_empty()).then_some(last),
-        ));
+        return Ok(Load::adopted(*generation, last));
     }
 
     let walk = vault::walk(options.root, options.config, WalkOptions::default())?;
@@ -1167,7 +1357,8 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
         vectors,
         rebuilt: true,
         stats,
-        stale: (!last.is_empty()).then_some(last),
+        stale: last,
+        refresh_request: None,
     })
 }
 
@@ -1466,6 +1657,133 @@ mod tests {
 
         let read = fs::read(index_dir.join("index.bin")).expect("read index");
         assert_eq!(Snapshot::from_bytes(&read).expect("decode"), snapshot);
+    }
+
+    /// An `Expected` that agrees with `manifest`, except for the root it names.
+    fn expected_for(manifest: &Manifest, built_root: &str) -> Expected {
+        Expected {
+            format_version: FORMAT_VERSION,
+            tokenizer: Tokenizer::new().fingerprint(),
+            chunker: manifest.chunker,
+            corpus_id: manifest.corpus_id.clone(),
+            built_root: built_root.to_owned(),
+            embedder: None,
+        }
+    }
+
+    /// One published manifest: no vectors, a known root, and `sample_snapshot`.
+    fn published_manifest(dir: &Path) -> Manifest {
+        let index_dir = dir.join(".janus");
+        let snapshot = sample_snapshot();
+        let publication = Publication {
+            dir: &index_dir,
+            root: dir,
+            snapshot: &snapshot,
+            chunker: ChunkingFingerprint {
+                max_chars: 1800,
+                overlap: 0.15,
+            },
+            vectors: None,
+            vectors_dropped: None,
+            built_at: "2025-04-01T00:00:00Z",
+            corpus_sig: None,
+        };
+        publish(&publication).expect("publish")
+    }
+
+    // M4D P2 item 1 and D-3: all five identity-changing fields refuse, and only
+    // `built_root` refreshes. The message text is M3's, unchanged.
+    #[test]
+    fn check_refuses_each_cold_field_and_refreshes_only_a_moved_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = published_manifest(dir.path());
+        let expected = expected_for(&manifest, &manifest.built_root);
+        assert_eq!(expected.check(&manifest), Check::Ok);
+
+        let mut cases: Vec<(Manifest, MismatchField, &str)> = Vec::new();
+
+        let mut patched = manifest.clone();
+        patched.format_version = FORMAT_VERSION + 1;
+        cases.push((
+            patched,
+            MismatchField::FormatVersion,
+            "format_version 4 != 3",
+        ));
+
+        let mut patched = manifest.clone();
+        patched.tokenizer = TokenizerFingerprint {
+            algorithm: "v2",
+            stemmer: Stemmer::None,
+        };
+        cases.push((
+            patched,
+            MismatchField::Tokenizer,
+            "tokenizer v2/none != v1/none",
+        ));
+
+        let mut patched = manifest.clone();
+        patched.chunker = ChunkingFingerprint {
+            max_chars: 1700,
+            overlap: 0.15,
+        };
+        cases.push((
+            patched,
+            MismatchField::Chunker,
+            "chunker 1700@0.15 != 1800@0.15",
+        ));
+
+        let mut patched = manifest.clone();
+        patched.corpus_id = "other".to_owned();
+        cases.push((patched, MismatchField::CorpusId, "corpus_id other != main"));
+
+        // A generation without vectors, read by a process that can embed. This
+        // is the row that would re-embed every chunk, so it must refuse.
+        let embedding = Expected {
+            embedder: Some(EmbedderId {
+                name: "hash-8".to_owned(),
+                dim: 8,
+                dtype: "f32".to_owned(),
+                normalisation: "l2".to_owned(),
+            }),
+            ..expected_for(&manifest, &manifest.built_root)
+        };
+        cases.push((
+            manifest.clone(),
+            MismatchField::Embedder,
+            "index has no vectors and this build embeds with `hash-8`; rebuilding to add them",
+        ));
+
+        for (patched, field, text) in &cases {
+            let check = if *field == MismatchField::Embedder {
+                embedding.check(patched)
+            } else {
+                expected.check(patched)
+            };
+            assert!(check.needs_full_build(), "{field:?} must refuse");
+            let got = check.mismatch().expect("a mismatch");
+            assert_eq!(got.field, *field);
+            assert_eq!(&got.to_string(), text, "{field:?} keeps M3's wording");
+        }
+
+        // The root is diagnostic: the generation loads and the manifest is
+        // rewritten. `built_root` is compared **last**, so a moved vault with no
+        // vectors refuses instead of re-embedding every chunk (D-3a).
+        let moved = expected_for(&manifest, "/elsewhere");
+        let check = moved.check(&manifest);
+        assert!(!check.needs_full_build());
+        assert_eq!(
+            check.mismatch().map(|mismatch| mismatch.field),
+            Some(MismatchField::BuiltRoot)
+        );
+        let both = embedding.check(&Manifest {
+            built_root: "/elsewhere".to_owned(),
+            ..manifest.clone()
+        });
+        assert_eq!(
+            both.mismatch().map(|mismatch| mismatch.field),
+            Some(MismatchField::Embedder),
+            "a cold field must win over the root, or a read embeds everything"
+        );
     }
 
     #[test]

@@ -164,6 +164,17 @@ pub enum JanusError {
         dir: PathBuf,
     },
 
+    /// The generation was built for another format, tokenizer, chunker, corpus
+    /// or embedder, so only a cold build can cure it (M4D §3.3, D-3). A read may
+    /// not rebuild these: it would re-embed the whole corpus unasked. The
+    /// message names the command that can, and repeats the mismatch that
+    /// refused the read.
+    #[error("index needs a full build: run janus index ({reason})")]
+    IndexNeedsFullBuild {
+        /// The manifest field that disagreed, and its two values.
+        reason: String,
+    },
+
     /// A command-line combination that cannot mean anything: understood, but
     /// rejected before any work (§9.1 code 2).
     #[error("{message}")]
@@ -204,6 +215,7 @@ impl JanusError {
             | Self::Write { .. }
             | Self::LockTimeout { .. }
             | Self::IndexUnstable { .. }
+            | Self::IndexNeedsFullBuild { .. }
             | Self::IndexMissing { .. }
             | Self::Io(_) => 1,
 

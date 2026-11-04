@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use janus_mem::config::{Config, resolve_index_dir};
+use janus_mem::config::{Config, Refresh, resolve_index_dir};
 use janus_mem::index::Snapshot;
 use janus_mem::index::embed::{EmbedError, Embedder, EmbedderId, HashEmbedder};
 use janus_mem::index::refresh::{self, Signature, Witness};
@@ -378,6 +378,59 @@ fn paths(snapshot: &Snapshot) -> Vec<String> {
                 .to_owned()
         })
         .collect()
+}
+
+// ──────────────────────────── refresh on read ─────────────────────────────
+
+/// The witness walk, then `on_read` with the default policy.
+fn read_on(root: &Path) -> refresh::ReadOutcome {
+    let config = config(root);
+    let dir = index_dir(root);
+    refresh::on_read(
+        &dir,
+        &LoadOptions::new(root, &config, BUILT_AT),
+        walk(root),
+        Refresh::Auto,
+    )
+    .expect("refresh on read")
+}
+
+#[test]
+fn a_fresh_corpus_is_read_without_a_build() {
+    let vault = temp_vault(&[("a.md", "alpha")]);
+    index(vault.path());
+    let before = fs::read(index_dir(vault.path()).join(store::INDEX_FILE)).expect("read index");
+
+    let outcome = read_on(vault.path());
+
+    assert_eq!(outcome.decision, refresh::Decision::Fresh);
+    assert!(!outcome.stale);
+    assert_eq!(
+        fs::read(index_dir(vault.path()).join(store::INDEX_FILE)).expect("read index"),
+        before,
+        "a fresh read writes nothing"
+    );
+}
+
+// M4D P2 DoD 2. A deletion lowers no maximum and a rename keeps its mtime, so
+// only the digest can see either.
+#[test]
+fn a_deleted_document_leaves_the_index_and_a_renamed_one_appears_at_its_path() {
+    let vault = temp_vault(&[("a.md", "alpha body"), ("b.md", "beta body")]);
+    let root = vault.path();
+    index(root);
+
+    fs::remove_file(root.join("a.md")).expect("delete a document");
+    fs::rename(root.join("b.md"), root.join("c.md")).expect("rename a document");
+
+    let outcome = read_on(root);
+    assert_eq!(outcome.decision, refresh::Decision::CorpusChanged);
+    assert!(!outcome.stale, "the answered generation is current");
+    assert_eq!(paths(&outcome.load.snapshot), vec!["c.md".to_owned()]);
+
+    // The refreshed generation is stable: the next read builds nothing.
+    let again = read_on(root);
+    assert_eq!(again.decision, refresh::Decision::Fresh);
 }
 
 fn build(root: &Path, embedder: &dyn Embedder, walk: vault::WalkResult) -> store::BuildOutcome {

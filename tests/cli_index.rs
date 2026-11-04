@@ -145,6 +145,34 @@ fn an_empty_corpus_indexes_to_an_empty_generation() {
     assert_eq!(report["docs"], 0, "{report}");
 }
 
+// M4D §5 P2: an edit that changes only frontmatter metadata costs no
+// embedding work. The body hash is unchanged, so every row is reused.
+#[test]
+fn a_status_only_edit_embeds_nothing() {
+    let vault = fixture_vault();
+    let first = receipt(vault.path(), &["--json"]);
+    let vectors = fs::read(vault.path().join(".janus/vectors.f32")).expect("read vectors");
+
+    let path = vault.path().join("notes/yaml-comments.md");
+    let text = fs::read_to_string(&path).expect("read a fixture note");
+    let changed = text.replace("status: active", "status: draft");
+    assert_ne!(
+        text, changed,
+        "the fixture note must declare an active status"
+    );
+    fs::write(&path, changed).expect("change only the status");
+
+    let second = receipt(vault.path(), &["--json"]);
+    assert_eq!(second["embedded"], 0, "{second}");
+    assert_eq!(second["retokenized"], 0, "{second}");
+    assert_eq!(second["reused_vectors"], first["chunks"], "{second}");
+    assert_eq!(
+        fs::read(vault.path().join(".janus/vectors.f32")).expect("read vectors"),
+        vectors,
+        "the payload is untouched because no body changed"
+    );
+}
+
 // ─────────────────── the two-file generation through the CLI ───────────────
 
 /// Every file in `.janus/`, so "wrote nothing" can be asserted byte-for-byte.
@@ -359,39 +387,68 @@ fn a_vectors_bearing_generation_is_read_by_search_without_a_rebuild() {
     );
 }
 
+// M4D P2 row 2: a read may not rebuild a format change. It refuses, and the
+// directory stays byte-identical. The rebuild that does cure it is `janus
+// index`, which the next test covers.
 #[test]
-fn a_format_version_2_manifest_is_refused_with_a_warning_and_rebuilt() {
+fn a_format_version_2_manifest_is_refused_with_one_line_and_not_rebuilt() {
+    let vault = fixture_vault();
+    index(vault.path());
+    patch_manifest(vault.path(), |manifest| {
+        manifest["format_version"] = serde_json::json!(2)
+    });
+    let before = dir_snapshot(&vault.path().join(".janus"));
+
+    let output = run(vault.path(), &["search", "cache"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines.len(), 1, "expected exactly one line, got {stderr:?}");
+    assert!(
+        lines[0].contains("index needs a full build: run janus index"),
+        "{stderr:?}"
+    );
+    assert!(lines[0].contains("format_version 2 != 3"), "{stderr:?}");
+    assert_eq!(
+        dir_snapshot(&vault.path().join(".janus")),
+        before,
+        "a refused read writes nothing"
+    );
+
+    // `--no-rebuild` refuses the same state without writing, and keeps M3's
+    // message naming the file it could not use (R-18).
+    let output = run(vault.path(), &["search", "cache", "--no-rebuild"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("index is unstable"), "{stderr}");
+    assert!(stderr.contains(".janus/index.bin"), "{stderr}");
+    assert_eq!(dir_snapshot(&vault.path().join(".janus")), before);
+}
+
+// Moved out of `tests/publish.rs`: a read no longer rebuilds a cold mismatch,
+// so the command is the only place the new version can be observed.
+#[test]
+fn janus_index_rebuilds_a_format_version_2_manifest_to_version_3() {
     let vault = fixture_vault();
     index(vault.path());
     patch_manifest(vault.path(), |manifest| {
         manifest["format_version"] = serde_json::json!(2)
     });
 
+    let report = receipt(vault.path(), &["--json"]);
+    assert_eq!(
+        report["docs"],
+        common::FIXTURE_DOCUMENTS,
+        "the rebuild covers the corpus: {report}"
+    );
+    assert_eq!(
+        manifest(vault.path())["format_version"],
+        serde_json::json!(janus_mem::index::FORMAT_VERSION)
+    );
+    // …and the next read adopts it without a line.
     let output = run(vault.path(), &["search", "cache"]);
     assert!(output.status.success(), "{output:?}");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    let stale: Vec<&str> = stderr
-        .lines()
-        .filter(|line| line.starts_with("stale:"))
-        .collect();
-    assert_eq!(stale.len(), 1, "expected one stale line, got {stderr:?}");
-    assert!(stale[0].contains("format_version 2 != 3"), "{stale:?}");
-    assert_eq!(manifest(vault.path())["format_version"], 3);
-
-    // `--no-rebuild` refuses the same state without writing.
-    patch_manifest(vault.path(), |manifest| {
-        manifest["format_version"] = serde_json::json!(2)
-    });
-    let before = dir_snapshot(&vault.path().join(".janus"));
-    let output = run(vault.path(), &["search", "cache", "--no-rebuild"]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains(".janus/index.bin"),
-        "the refusal names the generation it could not use"
-    );
-    assert_eq!(dir_snapshot(&vault.path().join(".janus")), before);
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
 }
 
 #[test]
