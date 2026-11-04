@@ -147,10 +147,17 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// The intent the envelope reports. `--as-of` is a parameter, not an
-    /// intent, so it reports none (§3.8).
+    /// The intent the envelope reports: the row that ranked the answer.
+    ///
+    /// An `--as-of` query ranks with the `history` row, so that is what it
+    /// names, next to `as_of` (§3.8, M5-34). The key is never removed: a caller
+    /// that keys on `intent` keeps working.
     fn reported_intent(&self) -> Option<Intent> {
-        self.as_of.is_none().then_some(self.intent)
+        Some(if self.as_of.is_some() {
+            Intent::History
+        } else {
+            self.intent
+        })
     }
 }
 
@@ -340,7 +347,7 @@ pub fn query(
         // says why. An out-of-window document is simply not in the answer, so
         // it gets no line: the window is the query, not a gate over it.
         notes.push(format!(
-            "{} result(s) have no validity window",
+            "{} document(s) have no validity window",
             selection.no_validity
         ));
     }
@@ -1210,7 +1217,15 @@ fn intent_name(intent: Intent) -> &'static str {
 fn write_human(out: &mut impl io::Write, r: &Render<'_>, notes: &[String]) {
     let _ = writeln!(out, "corpus:  {}", r.root.display());
     match (r.query, r.intent, r.as_of) {
-        (Some(query), _, Some(as_of)) => {
+        (Some(query), Some(intent), Some(as_of)) => {
+            let _ = writeln!(
+                out,
+                "query:   {query:?}  as-of = {as_of}  intent = {}  limit = {}",
+                intent_name(intent),
+                r.limit
+            );
+        }
+        (Some(query), None, Some(as_of)) => {
             let _ = writeln!(
                 out,
                 "query:   {query:?}  as-of = {as_of}  limit = {}",

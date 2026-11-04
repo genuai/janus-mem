@@ -1436,6 +1436,48 @@ fn case_7_7_a_global_document_keeps_its_status_for_a_scope_that_does_not_match()
 }
 
 #[test]
+fn case_7_7b_scope_only_does_not_change_who_supersedes_whom() {
+    // The mirror of the same pair: a global document replaces an owned one.
+    // A scope-only query drops the global document from the result set
+    // (§6.12 rule 4) but the global successor still supersedes, so the owned
+    // document must not report itself current (§6.12 rule 7, M5-31).
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"only\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.path().join("a")).unwrap();
+    fs::write(
+        dir.path().join("a/acme.md"),
+        "---\ntitle: Acme cache\nstatus: active\ndate: 2020-01-01\nscope: org:acme\n---\n\ncache rule\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("global.md"),
+        "---\ntitle: Global cache\nstatus: active\ndate: 2020-06-01\nsupersedes: a/acme.md\n---\n\nthe cache is replaced\n",
+    )
+    .unwrap();
+    index(dir.path());
+
+    // Without `--scope-only` the global successor is returned and the owned
+    // document is superseded: `cache` matches both bodies.
+    let plain = search_json(dir.path(), &["cache", "--scope", "org:acme"]);
+    assert_eq!(result_paths(&plain), ["global.md"], "{plain}");
+    let history = search_json(dir.path(), &["cache", "--intent", "history"]);
+    let owned = hit(&history, "a/acme.md").expect("history returns the owned document");
+    assert_eq!(owned["effective_status"], "superseded", "{owned}");
+
+    // With `--scope-only` the global document leaves the result set, and the
+    // owned document is still superseded: the result set is empty.
+    let only = search_json(
+        dir.path(),
+        &["cache", "--scope", "org:acme", "--scope-only"],
+    );
+    assert!(result_paths(&only).is_empty(), "{only}");
+}
+
+#[test]
 fn case_7_8_an_undated_document_stays_in_current() {
     // §6.10 rule 9 and R-4: a missing `valid_from` passes the window gate, so
     // the fixture's one undated document still answers its eval query.
@@ -1590,7 +1632,7 @@ fn case_8_6_a_document_with_no_window_is_counted_and_excluded() {
     assert!(result_paths(&report).is_empty(), "{report}");
     assert_eq!(
         notes(&report),
-        ["1 result(s) have no validity window"],
+        ["1 document(s) have no validity window"],
         "{report}"
     );
 }
@@ -1629,7 +1671,7 @@ fn case_8_8_as_of_wins_over_intent_with_one_note() {
         notes(&report).contains(&"as-of 2020-03-01 overrides intent history".to_owned()),
         "{report}"
     );
-    assert!(report.get("intent").is_none(), "{report}");
+    assert_eq!(report["intent"], "history", "the row that ranked: {report}");
     assert_eq!(report["as_of"], "2020-03-01", "{report}");
 }
 
@@ -1683,10 +1725,7 @@ fn case_8_10_an_as_of_report_names_the_parameter_and_not_an_intent() {
         ],
     );
     assert_eq!(report["api"], 1, "{report}");
-    assert!(
-        report.get("intent").is_none(),
-        "no intent is reported: {report}"
-    );
+    assert_eq!(report["intent"], "history", "the row that ranked: {report}");
     assert_eq!(report["as_of"], "2020-03-01", "{report}");
     assert!(
         notes(&report).contains(&"as-of 2020-03-01 overrides intent exhaustive".to_owned()),

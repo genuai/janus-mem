@@ -652,7 +652,7 @@ each, only when non-zero:
 |---|---|
 | `N document(s) hidden by the status gate; …` | `current` dropped a document by status |
 | `N document(s) hidden by the validity window; …` | today's window dropped it |
-| `N result(s) have no validity window` | `--as-of` alone, and it is the only note an `as-of` query adds |
+| `N document(s) have no validity window` | `--as-of` alone, and it is the only note an `as-of` query adds |
 
 An `--as-of` query adds no window-hidden line: the window **is** the query, so a document
 outside it is not hidden, it is simply not the answer (M5-35).
@@ -676,11 +676,12 @@ outside it is not hidden, it is simply not the answer (M5-35).
 **Statement.** `--as-of` selects the valid-time window and nothing else.
 
 - Inclusion is `valid_from <= T < valid_to`. A document with no `valid_from` is excluded and
-  counted in `notes` as `N results have no validity window`.
+  counted in `notes` as `N document(s) have no validity window`.
 - Decay is `1.0`; a `--decay-half-life` value is accepted and inert. Both properties come
   from one place: the query scores with the `history` row (no decay, every status at factor
-  1.0), and the gate turns status off separately (M5-34). The envelope reports no `intent`
-  for an `as-of` query, because `--as-of` is a parameter.
+  1.0), and the gate turns status off separately (M5-34). The envelope reports
+  `intent: "history"` next to `as_of`, because that is the row that ranked the answer; the key is
+  never removed, so a caller that keys on `intent` keeps working.
 - The status gate is off. `effective_status` is still computed and reported for `T`'s scope
   set, so a reader sees the document's standing at `T` without losing it to that standing.
 - The scope filter still applies.
@@ -703,7 +704,7 @@ outside it is not hidden, it is simply not the answer (M5-35).
 | 8.6 | `--as-of 2019-01-01` | zero results, one note counting documents with no window |
 | 8.7 | `--as-of 2025-13-40` | exit 2, message names the value |
 | 8.8 | `--as-of 2020-03-01 --intent history` | one result, A; note names the override; behaviour is as-of's |
-| 8.10 | `--as-of 2020-03-01 --intent exhaustive --json` | `intent: "current"` is not reported; the envelope reports `as_of` and the override note |
+| 8.10 | `--as-of 2020-03-01 --intent exhaustive --json` | `intent: "history"` is reported, the row that ranked; the envelope also reports `as_of` and the override note |
 | 8.9 | `--as-of 2020-02-15 --scope org:acme` on case 6.7 | G returned, `valid_to: "2020-03-01"`; for `--scope org:beta` the same date returns G with `valid_to: null`. 2020-03-01 itself is H's first day and G's last day plus one, so the boundary is exclusive (M5-36) |
 
 ### 3.9 `janus lineage` (P4)
@@ -963,7 +964,7 @@ in the corpus, instead of by `1.0`.
 | M5-31 | The query scope set is `score::ScopeFilter`, and the window and status rules match a successor with `ScopeFilter::intersects`, never `matches` | One type owns both rules, but they are not the same predicate: `matches` also applies `--scope-only`, which narrows the *result* set (§6.12 rule 4). A successor that is global still supersedes what it replaced, even when the caller asked to see owned scopes only (§6.12 rule 7). `intersects` is the successor rule, and `matches` delegates to it when `--scope-only` is off. |
 | M5-32 | `rank_documents` drops a chunk whose scored `status_factor` is zero, not a chunk whose declared status the row excludes | The effective status is a per-query value that only the `ScoreInput` knows, and the breakdown is the only channel that carries the scored row. The declared status on `ScoreDoc` stays what it is: declared metadata, reported as `status`. |
 | M5-33 | The window map is built once per query by `Graph::windows`, and the gate lives in `search::Filter`; `ScoreInput` carries no `window_member` | §5 P3 named both `effective_status` and `window_member` on the score input, and §3.7 moves the gate into eligibility: the same field cannot be a gate the caller applies and an input the scorer reads. The map is built before the row loop, and a thread-local build counter pins the count at one (P3 scope 10). |
-| M5-34 | `--as-of` scores with the `history` row and reports no `intent` | Decay `1.0` and "no status gate" are exactly that row on both axes, so one row supplies both and `score` needs no special case. `--as-of` is a parameter and not an intent, so the envelope reports `as_of` and leaves `intent` out; the override note names the intent it replaced. |
+| M5-34 | `--as-of` scores with the `history` row and reports that row as `intent` | Decay `1.0` and "no status gate" are exactly that row on both axes, so one row supplies both and `score` needs no special case. The envelope then describes how the results were ordered: `intent: "history"` next to `as_of`, never a removed key, and the override note names the intent it replaced. |
 | M5-35 | The hidden-count notes count documents, and an `--as-of` query emits only the `no_validity` count | The gate runs before scoring, so "results" would claim a relevance the code never computed. For `--as-of` the window is the query: an out-of-window document is not hidden by a gate, it is not the answer, and a second line would only repeat that. |
 | M5-36 | Three acceptance cases were recomputed against the committed fixtures: 7.7, 8.2 and 8.4 (query), and 8.9 (date) | 7.7 asked for a `superseded` document to be `current`; 8.2 and 8.4 used `cache`, which the near-identical pair also matches; 8.9 used 2020-03-01, which is the exclusive end of G's window. The rule under test is unchanged; only the input that can show it moved. |
 | M5-28 | `Graph::build` owns its endpoint facts, and `Graph::for_snapshot(snapshot, config)` is the only caller | Two callers need one graph: the `index --json` counts and every read. A borrowed `DocRow` would force each caller to hold rows of its own, and a snapshot-only builder is what keeps the counts and the answers equal. The disjoint flag is a rule parameter, so it is an argument, not a second function. |
@@ -1402,6 +1403,10 @@ derivation, then the eligibility gate and the flag.
   neither, and `EffectiveStatus::of` answers `None` for it, which is what P4
   renders (R4-1).
 - **`ScoreInput` dropped `window_member`.** The gate lives in `Filter` (M5-33).
+- **Review round 1.** A global successor now counts under `--scope-only`, because
+  `ScopeFilter::intersects` is the successor rule and `matches` is the result rule
+  (M5-31). An `as-of` envelope reports `intent: "history"` rather than dropping the
+  key, and the third note counts documents (M5-34, M5-35).
 - **Deviations.** M5-31, M5-32, M5-33, M5-34, M5-35, M5-36. SPEC §6.7 and
   §6.10 rule 5 ship with part 1; §7.1 and §9.2 ship with part 2.
 - **Evidence.** On the graph fixture, `--as-of 2020-03-01` returns the first
