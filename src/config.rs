@@ -162,6 +162,8 @@ pub struct Config {
     pub scoring: ScoringConfig,
     /// Embedding parameters, consumed in M4.
     pub embedding: EmbeddingConfig,
+    /// Link resolution parameters, consumed in M5.
+    pub links: LinksConfig,
     /// MCP-server parameters, consumed in M6.
     pub mcp: McpConfig,
     /// Everything odd but survivable about the file itself.
@@ -476,6 +478,9 @@ impl Config {
                 allow_write: raw.mcp.allow_write.unwrap_or(false),
                 max_chars: raw.mcp.max_chars.unwrap_or(4000),
             },
+            links: LinksConfig {
+                allow_disjoint_supersession: raw.links.allow_disjoint_supersession.unwrap_or(false),
+            },
             warnings,
             aliases,
             types,
@@ -601,6 +606,17 @@ pub struct EmbeddingConfig {
     /// Weight of the semantic signal in `relevance` (§3.3, V-10); `0.0` is the
     /// exact lexical path. Clamped to `[0, 1]` with a warning.
     pub alpha: f64,
+}
+
+/// Link resolution parameters (§6.7, M5 §3.5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LinksConfig {
+    /// Treat a supersession between disjoint scopes as effective.
+    ///
+    /// It defaults to `false`, because a disjoint edge must not silently retire
+    /// another scope's facts (§6.12 rule 6). The stored edge is never deleted
+    /// either way (M5-8).
+    pub allow_disjoint_supersession: bool,
 }
 
 /// MCP-server parameters (§9.3). Consumed in M6.
@@ -889,6 +905,7 @@ struct RawConfig {
     chunking: RawChunking,
     scoring: RawScoring,
     embedding: RawEmbedding,
+    links: RawLinks,
     mcp: RawMcp,
 }
 
@@ -980,6 +997,12 @@ struct RawEmbedding {
     model_dir: Option<String>,
     batch_size: Option<usize>,
     alpha: Option<f64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RawLinks {
+    allow_disjoint_supersession: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1471,6 +1494,22 @@ mod tests {
                 value: "sometimes".to_owned()
             }]
         );
+    }
+
+    #[test]
+    fn case_5_5_the_links_table_is_known_and_defaults_to_off() {
+        // The default: a disjoint supersession is inert (§3.5).
+        let config = parse("index_dir = \".janus\"\n");
+        assert!(!config.links.allow_disjoint_supersession);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+
+        // Set, with a sibling key this version does not know: the flag is read
+        // and the unknown key is tolerated, as every config table is (§16.1).
+        let config = parse(
+            "index_dir = \".janus\"\n\n[links]\nallow_disjoint_supersession = true\nfuture_key = 1\n",
+        );
+        assert!(config.links.allow_disjoint_supersession);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
     #[test]

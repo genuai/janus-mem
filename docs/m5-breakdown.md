@@ -297,25 +297,44 @@ pub struct Node {
     pub successors: Vec<DocId>,
 }
 
+/// The facts one endpoint carries, live or retired.
+pub struct NodeFacts {
+    pub id: DocId,
+    pub rel_path: String,
+    pub scope: String,
+    pub shared_with: Vec<String>,
+    /// `effective_from ?? date`, or a tombstone's last valid start.
+    pub valid_from: Option<NaiveDate>,
+}
+
 /// A node endpoint: a live document, or a retired one that keeps its place in
 /// the graph so it can still close a predecessor's window.
-pub enum Endpoint<'a> {
-    Live(&'a DocRow),
-    Retired(&'a TombstoneMeta),
+pub enum Endpoint {
+    Live(NodeFacts),
+    Retired(NodeFacts),
 }
 
 /// The resolved graph for one generation.
 pub struct Graph {
     nodes: BTreeMap<DocId, Node>,
+    endpoints: BTreeMap<DocId, Endpoint>,
     /// Edges the cycle breaker ignored, with both paths, for `doctor`.
-    pub ignored: Vec<(DocId, DocId)>,
+    ignored: Vec<(DocId, DocId)>,
+    /// Edges stored but inert, for `doctor` (§3.5).
+    inert: BTreeSet<(DocId, DocId)>,
 }
 ```
 
-`Graph::build(edges, rows, tombstones)` takes the snapshot's edges, the document rows **and
-the tombstone rows**, and returns the closed, cycle-broken graph. A tombstoned edge endpoint
-gets a `Node` like any other, so `successors(A)` still names it and §3.6 can close A's
-window at its `valid_from` (case 6.6). It is pure and it reads no clock.
+`Graph::build(edges, endpoints, allow_disjoint)` takes the snapshot's edges, one endpoint per
+live document **and per tombstone**, and the `[links]` flag, and returns the closed,
+cycle-broken graph. A tombstoned edge endpoint gets a `Node` like any other, so
+`successors(A)` still names it and §3.6 can close A's window at its `valid_from` (case 6.6).
+It is pure and it reads no clock.
+
+`Graph::for_snapshot(snapshot, config)` is the one function that turns a generation into a
+graph, and both callers use it: `janus index --json` for the counts and the readers for the
+answers (M5-28). The graph owns its endpoint facts, so a caller holds no rows of its own and
+the two answers cannot drift.
 
 `Graph::endpoint(id)` returns an `Endpoint`, so the window and status rules read the scope,
 `shared_with` and dates from one place whether the document is live or retired.
@@ -907,6 +926,7 @@ in the corpus, instead of by `1.0`.
 | M5-26 | Case 1.15 tests a removal, not a move | A move tombstones nothing (R-7): the id follows the document to its new path. Only a document that leaves the corpus retires, so only a removal can exercise the cleared flag. |
 | M5-27 | Scope qualifies every match key, including rungs 1 and 2 | A scope change is a re-key, not a move (§6.12 rule 5), so the id is not reported as `inherited`, and P6 does not report it as a confirmed move. The declared-id and content-hash id *values* are unaffected: only the candidate set is narrowed. §6.4's "keys 1–2 are not namespaced" describes the encoding, not the match. |
 | M5-29 | `DanglingLink.target` stores text, not `StringId` | The value may name nothing in the corpus, so there is no pool handle to give it, and `doctor` prints the user's own words. Same reason as M5-24. |
+| M5-28 | `Graph::build` owns its endpoint facts, and `Graph::for_snapshot(snapshot, config)` is the only caller | Two callers need one graph: the `index --json` counts and every read. A borrowed `DocRow` would force each caller to hold rows of its own, and a snapshot-only builder is what keeps the counts and the answers equal. The disjoint flag is a rule parameter, so it is an argument, not a second function. |
 
 ## 5. Phases
 
@@ -1308,6 +1328,21 @@ measured against `main` and each is inside its ceiling.
   the two `format_version` literals, which the bump requires.
 - **Not included.** The graph, the cycle break, the scope rule and the four
   `--json` counts are the follow-up change.
+
+**Part 2 — the graph at query time.** Measured against part 1, inside both
+ceilings.
+
+- **One builder.** `Graph::for_snapshot` is the only caller of `Graph::build`,
+  and the receipt's four counts come from its result (M5-28). The graph owns
+  its endpoint facts, so `src/search/mod.rs` needed no change: `DocRow` gained
+  no link field.
+- **The two rules bite.** With the cycle breaker disabled, case 4.1 fails with
+  an empty ignored list. With the scope rule disabled, case 5.1 fails with the
+  disjoint pair listed as a relation.
+- **Evidence.** The main fixture reports 3 edges, 1 dangling with `NotFound`, 1
+  cycle break and 0 inert links. The graph fixture reports 9, 1, 0 and 1. The
+  flag makes the disjoint pair effective and leaves nothing inert or ignored.
+  Two runs of the receipt are identical except `taken_ms`. No golden moved.
 
 ### Phase 3 — windows, effective status, and `--as-of`
 
