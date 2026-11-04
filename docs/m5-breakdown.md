@@ -963,8 +963,9 @@ own base. The rejected seam — writer versus readers — put 880 lines in one P
 
 ### Phase 2 — Edges in the generation
 
-**Files.** `src/index/mod.rs`, `src/index/build.rs`, `src/link.rs` (new),
-`src/vault/identity.rs` (`alias_map`), `src/graph.rs` (new), `src/config.rs`,
+**Files.** `src/index/mod.rs`, `src/index/build.rs`, `src/index/store.rs`,
+`src/index/cmd.rs`, `src/link.rs` (new), `src/vault/identity.rs` (`alias_map`),
+`src/graph.rs` (new), `src/config.rs`, `src/lib.rs`, `janus.toml`,
 `tests/fixtures/graph-vault/**`, `tests/common`, `tests/edges.rs`, `tests/graph.rs`.
 
 **Build.** `Snapshot` gains `edges` and `dangling_links`; `DocMeta` gains `effective_to`;
@@ -1149,7 +1150,7 @@ done-when.
 - **No `unwrap`/`expect` in library code.** A resolution failure is a `JanusError` or a
   documented default, never a panic.
 - **Determinism.** Every map that reaches output is a `BTreeMap`. Every list is sorted. Two
-  runs on one vault are byte-identical, except `took_ms`.
+  runs on one vault are byte-identical, except the elapsed-time field (`taken_ms`).
 - **Injected time.** `today` and `--as-of` arrive as `NaiveDate` arguments. No module below
   `main.rs` reads the wall clock.
 - **Read policy.** Every new read command inherits `store::load`'s policy: refresh when the
