@@ -1200,6 +1200,9 @@ pub struct LoadOptions<'a> {
     /// embed (V-25). It decides V-21's ordering and, on a rebuild, what the
     /// published generation contains.
     pub embedder: Option<&'a dyn Embedder>,
+    /// Reports progress while a build this read triggers embeds (§3.6, D-6).
+    /// `None` means this read reports nothing.
+    pub sink: Option<build::EmbedSink<'a>>,
 }
 
 impl<'a> LoadOptions<'a> {
@@ -1215,6 +1218,7 @@ impl<'a> LoadOptions<'a> {
             policy: Policy::Rebuild,
             want_vectors: false,
             embedder: None,
+            sink: None,
         }
     }
 }
@@ -1229,6 +1233,7 @@ impl fmt::Debug for LoadOptions<'_> {
             .field("policy", &self.policy)
             .field("want_vectors", &self.want_vectors)
             .field("embedder", &self.embedder.map(|embedder| embedder.id()))
+            .field("sink", &self.sink.is_some())
             .finish()
     }
 }
@@ -1341,6 +1346,7 @@ pub fn load(options: &LoadOptions<'_>) -> Result<Load, JanusError> {
         walk,
         &BTreeSet::new(),
         false,
+        options.sink,
         &lock,
     )?;
     // A read that did not want vectors does not receive them, even though the
@@ -1395,8 +1401,9 @@ pub struct BuildOutcome {
 /// Any walk, resolve, plan, encode or publication failure. A failed pass
 /// publishes nothing, so the previous generation stays readable.
 // Every argument is one input the loop reads: the writers' two neighbours, the
-// walk, its digest inputs, and the lock the caller already holds. Grouping them
-// into a struct would make one call site read `request.request`.
+// walk, its digest inputs, the progress sink, and the lock the caller already
+// holds. Grouping them into a struct would make one call site read
+// `request.request`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_until_stable(
     dir: &Path,
@@ -1407,14 +1414,17 @@ pub fn build_until_stable(
     first_walk: vault::WalkResult,
     forced: &BTreeSet<DocId>,
     rebuild: bool,
+    sink: Option<build::EmbedSink<'_>>,
     lock: &Lock,
 ) -> Result<BuildOutcome, JanusError> {
     let mut walk = first_walk;
     let mut passes = 0;
+    // A caller with no printer reports nothing, in one place.
+    let sink = sink.unwrap_or(&build::no_progress);
     loop {
         passes += 1;
         let signature = refresh::Signature::of(&walk.files);
-        let plan = refresh::plan_from_walk(config, &walk, dir, embedder, forced, rebuild)?;
+        let plan = refresh::plan_from_walk(config, &walk, dir, embedder, forced, rebuild, sink)?;
         let digest = signature.digest();
         let publication = Publication {
             dir,

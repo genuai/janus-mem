@@ -27,6 +27,7 @@ use crate::id::DocId;
 use crate::index::build::{self, BuildPlan};
 use crate::index::embed::Embedder;
 use crate::index::store::{self, INDEX_FILE};
+use crate::progress::Printer;
 use crate::scan::API_VERSION;
 use crate::vault::{self, WalkOptions, identity, resolve};
 
@@ -39,6 +40,9 @@ pub struct Options {
     pub dry_run: bool,
     /// Emit one JSON receipt on stdout instead of the human summary.
     pub json: bool,
+    /// Report embedding progress on stderr. The edge resolved the gate, because
+    /// this crate never reads the terminal (M4D §3.6).
+    pub progress: bool,
     /// Documents to re-tokenize even if their tokens could be reused.
     pub paths: Vec<PathBuf>,
 }
@@ -65,6 +69,8 @@ pub fn run(
     let forced = forced_documents(root, config, &walk, &options.paths)?;
     let dir = config::resolve_index_dir(root, &config.index_dir);
     let built_at = format!("{}T00:00:00Z", clock.today());
+    let printer = Printer::new(options.progress);
+    let sink = |done: u64, total: u64| printer.report(done, total);
 
     // A dry run plans and writes nothing; it takes no lock, because a lock is
     // held to publish (§3.7, D-9).
@@ -76,8 +82,15 @@ pub fn run(
         } else {
             store::previous_generation(&dir)
         };
-        let plan =
-            build::plan_forced_dry_run(config, &documents, previous.as_ref(), &forced, embedder)?;
+        // A dry run embeds nothing, so it reports nothing.
+        let plan = build::plan_forced_dry_run(
+            config,
+            &documents,
+            previous.as_ref(),
+            &forced,
+            embedder,
+            &build::no_progress,
+        )?;
         (plan, None, 0)
     } else {
         // The command owns the lock and passes it, so the write loop publishes
@@ -92,6 +105,7 @@ pub fn run(
             walk,
             &forced,
             options.rebuild,
+            Some(&sink),
             &lock,
         )?;
         (outcome.plan, Some(outcome.manifest), outcome.passes)

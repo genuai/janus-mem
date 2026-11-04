@@ -86,6 +86,7 @@ fn options(query: &str, intent: &str) -> Options {
         no_rebuild: false,
         no_embeddings: false,
         embedding_reason: None,
+        progress: false,
         json: false,
     }
 }

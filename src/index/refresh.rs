@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::{Config, Refresh};
 use crate::error::JanusError;
 use crate::id::DocId;
-use crate::index::build::{self, BuildPlan};
+use crate::index::build::{self, BuildPlan, EmbedSink};
 use crate::index::embed::Embedder;
 use crate::index::store::{self, Load, LoadOptions, Lock, Policy};
 use crate::vault::{DiscoveredFile, WalkResult, identity, resolve};
@@ -199,7 +199,8 @@ impl Witness {
 ///
 /// Both writers call this: `janus index` with the walk it already made, and a
 /// read that has to rebuild with the walk it made after the lock. `rebuild`
-/// ignores the previous generation, so every chunk is tokenized again.
+/// ignores the previous generation, so every chunk is tokenized again. `sink`
+/// reports the embedding work this plan does (§3.6).
 ///
 /// # Errors
 ///
@@ -212,6 +213,7 @@ pub fn plan_from_walk(
     embedder: Option<&dyn Embedder>,
     forced: &BTreeSet<DocId>,
     rebuild: bool,
+    sink: EmbedSink<'_>,
 ) -> Result<BuildPlan, JanusError> {
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
     identity::derive_identity(&mut documents, config);
@@ -226,6 +228,7 @@ pub fn plan_from_walk(
         previous.as_ref(),
         forced,
         embedder,
+        sink,
     )?)
 }
 
@@ -449,6 +452,7 @@ fn rebuild(
         walk,
         &BTreeSet::new(),
         false,
+        options.sink,
         lock,
     )?;
     // A read that did not want vectors does not receive them, even though the

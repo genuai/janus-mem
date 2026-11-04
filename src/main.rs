@@ -4,11 +4,12 @@
 //! the same operations can be exposed over MCP and JSON-RPC without duplicating
 //! decisions (§9.5).
 
+use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use janus_mem::cli::{Cli, Command};
+use janus_mem::cli::{Cli, Command, Progress};
 use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
@@ -80,6 +81,19 @@ fn degraded_reason(reason: &str, detail: &str) -> String {
     }
 }
 
+/// Resolves `--progress` once, at the edge (M4D §3.6).
+///
+/// `auto` asks the terminal; every other value is a plain answer. This is the
+/// only place that reads the terminal, so a captured stderr is silent on any
+/// machine and no library path depends on whether a test runs in a TTY.
+fn progress_enabled(mode: Progress) -> bool {
+    match mode {
+        Progress::Always => true,
+        Progress::Never => false,
+        Progress::Auto => std::io::stderr().is_terminal(),
+    }
+}
+
 fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -148,12 +162,14 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             no_embeddings,
             dry_run,
             json,
+            progress,
             paths,
         } => {
             let root = vault::resolve_corpus(cli.vault)?;
             tracing::info!(vault = %root.display(), "corpus resolved");
 
             let config = Config::load(&root)?;
+            let progress = progress_enabled(progress);
             // `--no-embeddings` is a statement about the generation, so it skips
             // resolution entirely: no model is loaded for a lexical build, and
             // the flag is an explicit choice, so it prints nothing.
@@ -177,6 +193,7 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                     rebuild,
                     dry_run,
                     json,
+                    progress,
                     paths,
                 },
             )
@@ -196,12 +213,14 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             include_superseded,
             no_rebuild,
             no_embeddings,
+            progress,
             json,
         } => {
             let root = vault::resolve_corpus(cli.vault)?;
             tracing::info!(vault = %root.display(), "corpus resolved");
 
             let config = Config::load(&root)?;
+            let progress = progress_enabled(progress);
             // A read passes the embedder so a rebuild it triggers still produces
             // the generation this process would build (V-21 row 5); whether it
             // asks for the rows is `search`'s decision from α.
@@ -224,6 +243,7 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                     no_rebuild,
                     no_embeddings,
                     embedding_reason,
+                    progress,
                     json,
                 },
             )
@@ -237,12 +257,14 @@ fn run(cli: Cli) -> Result<(), JanusError> {
             limit,
             no_rebuild,
             no_embeddings,
+            progress,
             json,
         } => {
             let root = vault::resolve_corpus(cli.vault)?;
             tracing::info!(vault = %root.display(), "corpus resolved");
 
             let config = Config::load(&root)?;
+            let progress = progress_enabled(progress);
             let (embedder, embedding_reason) = read_embedder(&config, no_embeddings);
             search::facts::run(
                 &root,
@@ -258,6 +280,7 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                     no_rebuild,
                     no_embeddings,
                     embedding_reason,
+                    progress,
                     json,
                 },
             )

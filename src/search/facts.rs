@@ -65,6 +65,9 @@ pub struct Options {
     pub no_embeddings: bool,
     /// Why the adapter could not resolve an embedder, when it tried.
     pub embedding_reason: Option<String>,
+    /// Report embedding progress on stderr. The edge resolved the gate (M4D
+    /// §3.6).
+    pub progress: bool,
     /// Emit one JSON object on stdout instead of the table.
     pub json: bool,
 }
@@ -98,6 +101,7 @@ pub fn run(
         load_embedder,
         false,
         options.no_rebuild,
+        options.progress,
     )?;
     let mut degraded = super::degraded_reasons(
         options.no_embeddings,

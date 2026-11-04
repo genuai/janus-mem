@@ -32,6 +32,7 @@ use crate::index::refresh;
 use crate::index::store::{self, LoadOptions, Policy};
 use crate::index::vectors::{Vectors, dot};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
+use crate::progress::Printer;
 use crate::scan::API_VERSION;
 use crate::score::{self, Breakdown, Intent, ScopeFilter, ScoreDoc, ScoreInput};
 use crate::tokenize::{Tokenizer, Tokens};
@@ -69,6 +70,9 @@ pub struct Options {
     /// Why the adapter could not resolve an embedder, when it tried. `None`
     /// means resolution succeeded or the caller never resolved one.
     pub embedding_reason: Option<String>,
+    /// Report embedding progress on stderr. The edge resolved the gate, because
+    /// this crate never reads the terminal (M4D §3.6).
+    pub progress: bool,
     /// Emit one JSON object on stdout instead of the table.
     pub json: bool,
 }
@@ -171,6 +175,7 @@ pub fn query(
         load_embedder,
         prefetch,
         options.no_rebuild,
+        options.progress,
     )?;
 
     let mut alpha = configured_alpha;
@@ -345,6 +350,7 @@ pub(crate) fn prepare(
     embedder: Option<&dyn Embedder>,
     want_vectors: bool,
     no_rebuild: bool,
+    progress: bool,
 ) -> Result<Prepared, JanusError> {
     let dir = config::resolve_index_dir(root, &config.index_dir);
     let policy = if no_rebuild {
@@ -364,6 +370,9 @@ pub(crate) fn prepare(
     // One walk, made here because the refresh reuses it for its own plan
     // (§3.1). The witness is exact, so the walk is its whole price.
     let walk = vault::walk(root, config, WalkOptions::default())?;
+    // A read can embed for minutes, so a build it triggers reports too (§3.6).
+    let printer = Printer::new(progress);
+    let sink = |done: u64, total: u64| printer.report(done, total);
     let read = refresh::on_read(
         &dir,
         &LoadOptions {
@@ -380,6 +389,7 @@ pub(crate) fn prepare(
             // §3.6 row 3).
             want_vectors,
             embedder,
+            sink: Some(&sink),
         },
         walk,
         config.refresh,

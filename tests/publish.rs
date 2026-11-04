@@ -80,7 +80,8 @@ fn plan_with(root: &Path, embedder: Option<&dyn Embedder>) -> BuildPlan {
     let walk = vault::walk(root, &config, WalkOptions::default()).expect("walk the vault");
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, &config);
     identity::derive_identity(&mut documents, &config);
-    build::plan(&config, &documents, None, embedder).expect("the fixture documents build")
+    build::plan(&config, &documents, None, embedder, &build::no_progress)
+        .expect("the fixture documents build")
 }
 
 fn publish(root: &Path, plan: &BuildPlan) -> store::Manifest {
