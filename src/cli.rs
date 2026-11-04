@@ -74,6 +74,33 @@ pub enum Command {
         json: bool,
     },
 
+    /// Render the supersession chain that contains one document (§3.9)
+    Lineage {
+        /// The corpus path of the document whose chain to render
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+
+        /// Render the chain of the top current search result for this query
+        #[arg(long, value_name = "QUERY")]
+        topic: Option<String>,
+
+        /// Refuse instead of building or rebuilding; a read stays a read
+        #[arg(long)]
+        no_rebuild: bool,
+
+        /// Read without resolving or loading an embedding model
+        #[arg(long)]
+        no_embeddings: bool,
+
+        /// Report embedding progress: auto, always or never
+        #[arg(long, value_name = "WHEN", value_enum, default_value = "auto")]
+        progress: Progress,
+
+        /// Emit one JSON object on stdout instead of the table
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Report the chunks the corpus produces, without building an index
     Chunks {
         /// Emit one JSON object on stdout instead of the table

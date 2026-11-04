@@ -14,7 +14,7 @@ use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
-use janus_mem::{chunk, ids, index, scan, search, vault};
+use janus_mem::{chunk, ids, index, lineage, scan, search, vault};
 use tracing_subscriber::EnvFilter;
 
 /// The directories a model may be read from, highest precedence first (V-25).
@@ -144,6 +144,40 @@ fn run(cli: Cli) -> Result<(), JanusError> {
 
             let config = Config::load(&root)?;
             ids::run(&root, &config, &SystemClock, ids::Options { json, paths })
+        }
+
+        // The chain is a read like `search`: it refreshes, never builds under
+        // `--no-rebuild`, and never writes a vault file (M5 §3.9).
+        Command::Lineage {
+            path,
+            topic,
+            no_rebuild,
+            no_embeddings,
+            progress,
+            json,
+        } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let config = Config::load(&root)?;
+            let progress = progress_enabled(progress);
+            // A read passes the embedder so a rebuild it triggers still
+            // produces the generation this process would build (V-21 row 5).
+            let (embedder, _reason) = read_embedder(&config, no_embeddings);
+            lineage::run(
+                &root,
+                &config,
+                &SystemClock,
+                embedder.as_deref(),
+                lineage::Options {
+                    path,
+                    topic,
+                    json,
+                    no_rebuild,
+                    no_embeddings,
+                    progress,
+                },
+            )
         }
 
         // Chunking is a read command too: it shares the discovery, resolution and
