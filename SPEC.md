@@ -873,6 +873,7 @@ pub struct Index {
     pub vectors: VectorSection,        // offset, len, dim, dtype into vectors.f32
     pub vectors_sha: Option<Blake3>,   // checksum of vectors.f32; None without vectors
     pub vectors_len: Option<u64>,      // byte length; must equal chunks × dim × 4
+    pub corpus_sig: Option<String>,    // blake3 of the corpus signature the build saw (M4D)
 }
 ```
 
@@ -888,6 +889,7 @@ This also means the on-disk format does not change between M4 (simple `read` of 
 - Incremental: skip a file when `content_hash` is unchanged; reuse chunks whose `chunk_id` still exists (across moves, too — §6.9); only embed the delta.
 - Embedding is never required for correctness. With `--no-embeddings` (or if the model is absent and download is disallowed), janus-mem runs lexical-only, omits `vectors.f32`, and says so in every response (`degraded`).
 - Corruption: blake3 checksums for both files live in `manifest.json`; mismatch ⇒ rebuild from source with a warning. A truncated or partial index is never loaded. **Both payloads are validated together**, because a new-`vectors.f32`/old-`index.bin` pair is otherwise indistinguishable from a good one.
+- Freshness is a fact, not a guess (M4D). `manifest.json` carries `corpus_sig`, the blake3 digest of the sorted `(rel_path, size, mtime)` of every admitted file. A reader re-walks the corpus and compares the digest; that sees an add, a remove, a rename and an edit, at the cost of one walk. The field is additive: an older reader ignores it, a new reader defaults a missing value to `None` and falls back to `max(document mtime) > mtime(index.bin)`, and `format_version` does not move. The fallback cannot see a deletion or a rename, and neither rule sees a content change that keeps path, size and mtime; `janus index --rebuild` is the escape hatch.
 - Atomic index update: write `index.bin.new` / `vectors.f32.new`, fsync, rename both, then rewrite `manifest.json` last. Readers see the old manifest or the new one, never a mix.
 
 Every stored path is vault-relative. The manifest carries two different identifiers, and they must not be confused:
@@ -1122,6 +1124,7 @@ Rules:
 - `janus rpc` is line-delimited JSON: one request object per line in, one response object per line out, same shapes as the MCP tools. This is deliberately the simplest possible interop contract: any language can drive janus-mem with `subprocess` + `json` — no FFI, no bindings to maintain. A Python wrapper (or a Hermes tool, or an Emacs client) is then ~50 lines.
 - `status` is always available and returns `api_version`, index freshness, and capability flags (`writes_enabled`, `embeddings`), so a controller can feature-detect instead of assuming.
 - Exit codes and error codes are part of the public API and are versioned; changing one is a breaking change.
+- `--json` receipts grow by addition. `janus index --json` reports `passes`, how many build passes ran: one on a quiet corpus, more when a document changed while the build ran. Adding a field keeps `api` at `1`; changing or removing one does not.
 
 ### 9.4 Response envelope
 
@@ -1298,7 +1301,8 @@ Measured on an M-series MacBook, release build, vault of 20k docs / ~200k chunks
 |---|---|---|
 | Cold index (embeddings on) | ≤ 60 s | dominated by ONNX inference |
 | Cold index (lexical only) | ≤ 5 s | |
-| Incremental reindex (1 changed doc) | ≤ 150 ms | no embedding of unchanged chunks |
+| Incremental reindex, nothing changed (2 119 documents) | 2.6 s | walk, parse, reuse every token and row; measured in M4 |
+| Corpus witness (one walk of 2 119 files) | 8.5 ms | walk plus a blake3 digest of ~85 KB; measured in M4 |
 | Warm query, index loaded | p50 ≤ 100 ms, p95 ≤ 250 ms | **Aspirational** p50 ≤ 10 ms; do not optimize before M6, and never at the cost of correctness |
 | Cold query (index load included) | p95 ≤ 500 ms | mmap or fast bincode load |
 | Steady-state RSS (heap) | ≤ 150 MB | vectors are mmap'd page cache, not heap; text is read on demand (§8.3.1) |
@@ -1485,6 +1489,7 @@ idea = 90
 
 [index]
 exclude = ["archive/private/**", "**/*.draft.md"]
+refresh = "auto"              # auto | manual; manual refreshes only on an explicit command
 
 [chunking]
 max_chars = 1800
