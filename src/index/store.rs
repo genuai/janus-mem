@@ -202,6 +202,11 @@ impl VectorSet {
 
 impl Manifest {
     /// Assembles the manifest for an already-encoded snapshot (I-3).
+    ///
+    /// `corpus_sig` is the digest of the walk that produced the snapshot
+    /// (M4D §3.1). A writer always has one, so the field is a parameter rather
+    /// than a value patched in afterwards: there is no moment when a manifest
+    /// exists without it.
     #[must_use]
     pub fn new(
         root: &Path,
@@ -209,6 +214,7 @@ impl Manifest {
         chunker: ChunkingFingerprint,
         payloads: Payloads,
         built_at: &str,
+        corpus_sig: Option<&str>,
     ) -> Self {
         let (embedder, vectors_sha, vectors_len) = match payloads.vectors {
             Some(artifact) => (Some(artifact.id), Some(artifact.sha), Some(artifact.len)),
@@ -232,10 +238,7 @@ impl Manifest {
             embedder,
             vectors_sha,
             vectors_len,
-            // Filled by the publisher from the walk that produced the plan: the
-            // digest describes the files the plan was built from, not the end of
-            // the build (§3.2).
-            corpus_sig: None,
+            corpus_sig: corpus_sig.map(str::to_owned),
         }
     }
 }
@@ -609,7 +612,7 @@ fn publish_locked(
     sync_dir(dir)?;
     hook(Stage::IndexDirSynced);
 
-    let mut manifest = Manifest::new(
+    let manifest = Manifest::new(
         publication.root,
         publication.snapshot,
         publication.chunker,
@@ -619,8 +622,8 @@ fn publish_locked(
             vectors,
         },
         publication.built_at,
+        publication.corpus_sig,
     );
-    manifest.corpus_sig = publication.corpus_sig.map(str::to_owned);
     let manifest_path = dir.join(MANIFEST_FILE);
     let json = serde_json::to_vec_pretty(&manifest).map_err(|error| {
         let reason = format!("cannot encode {}: {error}", manifest_path.display());

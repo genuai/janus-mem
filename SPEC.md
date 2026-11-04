@@ -873,7 +873,6 @@ pub struct Index {
     pub vectors: VectorSection,        // offset, len, dim, dtype into vectors.f32
     pub vectors_sha: Option<Blake3>,   // checksum of vectors.f32; None without vectors
     pub vectors_len: Option<u64>,      // byte length; must equal chunks × dim × 4
-    pub corpus_sig: Option<String>,    // blake3 of the corpus signature the build saw (M4D)
 }
 ```
 
@@ -1301,8 +1300,9 @@ Measured on an M-series MacBook, release build, vault of 20k docs / ~200k chunks
 |---|---|---|
 | Cold index (embeddings on) | ≤ 60 s | dominated by ONNX inference |
 | Cold index (lexical only) | ≤ 5 s | |
+| Incremental reindex, 1 changed document (2 119 documents) | 141 ms | best of 5 on a synthetic 2 119-document corpus, release build; a no-change run on the same corpus costs 141 ms, so one edit is inside the noise. The author's vault is not measured |
 | Incremental reindex, nothing changed (2 119 documents) | 2.6 s | walk, parse, reuse every token and row; measured in M4 |
-| Corpus witness (one walk of 2 119 files) | 8.5 ms | walk plus a blake3 digest of ~85 KB; measured in M4 |
+| Corpus witness (one walk of 2 119 files) | 8.5 ms | walk plus a blake3 digest of ~85 KB; measured in M4D |
 | Warm query, index loaded | p50 ≤ 100 ms, p95 ≤ 250 ms | **Aspirational** p50 ≤ 10 ms; do not optimize before M6, and never at the cost of correctness |
 | Cold query (index load included) | p95 ≤ 500 ms | mmap or fast bincode load |
 | Steady-state RSS (heap) | ≤ 150 MB | vectors are mmap'd page cache, not heap; text is read on demand (§8.3.1) |

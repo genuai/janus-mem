@@ -223,13 +223,38 @@ fn a_file_touched_to_an_older_time_makes_the_index_stale() {
 #[test]
 fn a_content_change_that_keeps_path_size_and_mtime_is_invisible() {
     let vault = temp_vault(&[("a.md", "alpha")]);
-    index(vault.path());
-    let files = walk(vault.path()).files;
+    let root = vault.path();
+    index(root);
 
-    // The signature encodes path, size and mtime only, so an in-place rewrite
-    // that keeps all three is the named blind spot (§3.1, D-1b). Two walks of
-    // the same bytes therefore agree, and only `--rebuild` finds the change.
-    assert!(!stale(vault.path(), &files));
+    // Rewrite the file with different bytes of the same length, then give it
+    // back its old mtime. This is what `cp -a` or a backup restore does.
+    let path = root.join("a.md");
+    let before = fs::metadata(&path).expect("stat the document");
+    let mut bytes = fs::read(&path).expect("read the document");
+    let first = bytes[0];
+    bytes[0] = if first == b'-' { b'#' } else { b'-' };
+    fs::write(&path, &bytes).expect("rewrite the document");
+    let restored = fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open the document")
+        .set_times(
+            fs::FileTimes::new().set_modified(before.modified().expect("the document mtime")),
+        );
+    restored.expect("restore the document mtime");
+
+    let after = fs::metadata(&path).expect("stat the document again");
+    assert_ne!(first, bytes[0], "the content changed");
+    assert_eq!(before.len(), after.len(), "the size did not change");
+    assert_eq!(
+        before.modified().expect("mtime"),
+        after.modified().expect("mtime"),
+        "the mtime did not change"
+    );
+
+    // The signature encodes path, size and mtime only, so this rewrite is the
+    // named blind spot (§3.1, D-1b). A digest over content would report stale.
+    assert!(!stale(root, &walk(root).files));
 }
 
 // ──────────────────────── the pre-M4D fallback ────────────────────────────
