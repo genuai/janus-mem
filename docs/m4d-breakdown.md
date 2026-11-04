@@ -181,7 +181,9 @@ stale     ⟺ digest(signature) ≠ manifest.corpus_sig
   and a second stored list would cost more than the walk it saves. The line says the corpus changed
   and names the command that fixes a corpus it cannot see (`--rebuild`).
 - **The cost is one walk**: 8.5 ms over 2 119 files (best of 7, release, warm cache), plus a hash of
-  about 85 KB. There is no budget line. P1's PR body records the number; no test asserts it.
+  about 85 KB. A fresh read pays that once. A stale read pays it once for the witness and once more
+  after the publish, and reuses the first walk for the plan. There is no budget line. P1's PR body
+  records the number; no test asserts it.
 - **`corpus_sig` is additive, not a format change.** `Manifest` is JSON without
   `deny_unknown_fields`, so an older binary ignores the field. A new binary reading an older manifest
   gets `None` and falls back to the rule below. `format_version` guards the bincode payload, not the
@@ -218,7 +220,7 @@ stop after 3 passes, or when two consecutive signatures are equal
 - **The second pass is cheap.** It reuses every token and every row, so it costs 2.6 s on the real
   corpus, not 18.3 minutes.
 - **Both writers use it**: `janus index` and a read-triggered build. One function.
-- **One lock, one holder.** `store::build_until_stable` takes the `&Lock` its caller already holds and
+- **One lock, one holder.** `store::build_until_stable` takes the walk and the `&Lock` its caller already holds and
   publishes with `publish_locked`. `cmd::run` acquires the lock itself instead of calling
   `store::publish`, which would try to take it a second time and time out.
 - **The receipt describes the last pass.** `index_sha`, `taken_ms` and the stats come from the pass
@@ -239,7 +241,7 @@ corrupt. It refuses only when a full build is the only cure.**
 | index absent | **build once, then read**. `refresh: no index yet` | `no index yet: run janus index` (exit 1) |
 | pair corrupt, retries exhausted | **rebuild once, then read**. `refresh: index repaired` | refuse; write nothing (exit 1) |
 | `format_version`, `tokenizer`, `chunker`, `corpus_id` or `embedder` mismatch | **refuse**: `index needs a full build: run janus index` (exit 1) | refuse (`IndexUnstable`, exit 1; unchanged) |
-| `built_root` mismatch | **load the generation, refresh, then read**. `refresh: corpus changed` | read (unchanged) |
+| `built_root` mismatch | **load the generation, repair the manifest, then read**. `refresh: manifest repaired` | read (unchanged) |
 
 **Which mismatches refuse.** A refusal is correct only when an incremental build cannot cure the
 state. `Expected::check` (`src/index/store.rs:758`) compares six fields. Five of them change the
@@ -312,7 +314,8 @@ because the corpus changed", not "do not work".
 
 ### 3.5 One line per read, one meaning
 
-`refresh:` means **this process ran a build**. Nothing else uses the word.
+`refresh:` means **this process wrote a generation, or repaired the manifest that names one**.
+Nothing else uses the word.
 
 | line | when |
 |---|---|
@@ -329,7 +332,8 @@ because the corpus changed", not "do not work".
 Rules:
 
 - **At most one line per read.** A read that refreshes prints the `refresh:` line and nothing else.
-  A read that adopts a valid generation prints nothing.
+  A read that adopts a valid generation prints one skip line when it declined to refresh
+  (`index busy`, `refresh = manual`, `--no-rebuild`) and nothing otherwise.
 - **`stale:` is retired** when P2 replaces `prepare`'s line. Until then it keeps its M3 meaning.
 - **P1 prints no line.** It reports the witness in `--json` as `index: { "stale": bool }`, which is
   additive and keeps `api` at `1`. P2 adds the stderr line.
@@ -386,7 +390,7 @@ chunk. Tests use a counting embedder and assert the values, never the text.
 | D-3 | May a read run a cold build | **No**, for the five identity-changing mismatches. It refuses and names `janus index` | `store.rs` |
 | D-3a | Does a `built_root` mismatch refuse | **No.** The generation loads and the read refreshes: every `DocId` is unchanged, and SPEC §8.3 says a moved vault is never an error | `store.rs` |
 | D-4 | Is the refresh configurable | Yes: `[index] refresh = "auto" \| "manual"`, default `auto`. `manual` disables the corpus-changed refresh only | `config.rs` |
-| D-5 | The cost budget for the witness | **None.** One walk per read, shared with the refresh; 8.5 ms measured. Reported, never asserted | `refresh.rs` |
+| D-5 | The cost budget for the witness | **None.** One walk for a fresh read, two for a stale one; the first is reused by the plan. 8.5 ms measured, reported, never asserted | `refresh.rs` |
 | D-5a | ~~Directory-mtime prefilter~~ | **Deleted.** A directory's mtime does not change on an in-place edit | — |
 | D-6 | Progress cadence | One line per 5 % of the chunks this build embeds, on stderr, only when the edge resolved the gate to `true` | `build.rs`, `cmd.rs` |
 | D-7 | The progress seam | A sink in `plan_inner`/`embed_all`, threaded through all three plan entry points and `LoadOptions` | `build.rs` |
@@ -419,8 +423,10 @@ JSON key changes.
 2. `Witness { stale, changed }`, from the stored digest and the fresh walk, with the max-mtime
    fallback when `corpus_sig` is `None`.
 3. `Manifest.corpus_sig: Option<String>` with `#[serde(default)]`, carried by `Publication`.
-4. `store::build_until_stable(dir, root, config, embedder, built_at, forced, rebuild, &Lock)`: walk →
-   plan → publish → re-walk → compare, bounded at 3 passes (D-13, D-14). `forced` and `rebuild` keep
+4. `store::build_until_stable(dir, root, config, embedder, built_at, first_walk, forced, rebuild,
+   &Lock)`: plan from `first_walk` → publish → re-walk → compare, bounded at 3 passes (D-13, D-14).
+   `first_walk` is the walk the caller already has, so a stale read does not walk twice for nothing.
+   `forced` and `rebuild` keep
    `janus index PATHS` and `--rebuild` working exactly as today. It replaces the bodies of
    `store::rebuild_plan` (`src/index/store.rs:1151`) and the plan half of `cmd::run`
    (`src/index/cmd.rs:65`). `cmd` acquires the lock itself. P3 adds the sink parameter.
@@ -599,9 +605,9 @@ duration. Write comments in Simplified Technical English."
 5. A held writer lock makes a stale read print `refresh: skipped, index busy`, answer from the old
    generation, and exit 0.
 6. `--no-rebuild`, `refresh = "manual"` and every refusal write nothing: `.janus/` byte-identical.
-7. **Person check.** A fresh read costs one walk; a stale read costs two, one for the witness and one
-   after the publish. P1's PR body records `janus index --json`'s `taken_ms` over the real corpus,
-   before and after.
+7. **Person check.** A fresh read costs one walk; a stale read costs two, because the witness walk
+   feeds the plan and only the post-publish comparison walks again. P1's PR body records
+   `search --json`'s `taken_ms` over the fixture before and after, and over the real corpus.
 8. With `--progress=always`, a build prints at most one line per 5 % of the chunks it embeds, and a
    read-triggered build does the same. With the gate off it prints nothing, and stdout is unchanged.
 9. No `format_version` change, no rebuild for an existing vault, no new dependency.
