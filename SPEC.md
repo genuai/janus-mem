@@ -1525,6 +1525,9 @@ idea = 90
 exclude = ["archive/private/**", "**/*.draft.md"]
 refresh = "auto"              # auto | manual; manual refreshes only on an explicit command
 
+[links]
+allow_disjoint_supersession = false   # true makes a cross-scope link effective (§6.12 rule 6)
+
 [chunking]
 max_chars = 1800
 overlap = 0.15

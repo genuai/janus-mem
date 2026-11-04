@@ -102,6 +102,12 @@ idea = 90
 #   "**/.venv/**", "**/.next/**", "**/.gradle/**", "**/.terraform/**",
 exclude = ["archive/private/**", "**/*.draft.md"]
 
+[links]
+# A supersession link between documents whose scopes do not intersect is stored
+# and inert: acme must not silently retire beta's facts (§6.12 rule 6). Set this
+# to true for a deliberate exception; `janus doctor` then reports nothing.
+allow_disjoint_supersession = false
+
 [chunking]
 max_chars = 1800
 overlap = 0.15

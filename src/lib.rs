@@ -18,6 +18,7 @@
 //! * [`clock`] — the injected clock, so scoring never reads the wall clock.
 //! * [`config`] — `janus.toml`, alias resolution, type registry, globs, decay.
 //! * [`document`] — the parsed shape of a document and its resolved metadata.
+//! * [`graph`] — the supersession graph at query time: closure, cycles, scopes.
 //! * [`id`] — `DocId`, `Blake3Hash`, `ChunkId` newtypes.
 //! * [`ids`] — `janus ids`: the identity and match keys of each document (M5).
 //! * [`index`] — the in-memory lexical index and BM25 (M3).
@@ -45,6 +46,7 @@ pub mod clock;
 pub mod config;
 pub mod document;
 pub mod error;
+pub mod graph;
 pub mod id;
 pub mod ids;
 pub mod index;

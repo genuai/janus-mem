@@ -24,6 +24,7 @@ use serde::Serialize;
 use crate::clock::Clock;
 use crate::config::{self, Config};
 use crate::error::JanusError;
+use crate::graph::Graph;
 use crate::id::DocId;
 use crate::index::Snapshot;
 use crate::index::build::{self, BuildPlan};
@@ -124,6 +125,10 @@ pub fn run(
     }
 
     let taken_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // One graph for the whole receipt, built by the same function a read calls.
+    // The counts below and the answers a reader gives can then never disagree
+    // about what a node is (§3.4, §3.5).
+    let graph = Graph::for_snapshot(&plan.snapshot, config);
     let mut out = io::stdout().lock();
     if options.json {
         let receipt = Receipt {
@@ -143,6 +148,8 @@ pub fn run(
             vectors_bytes: plan.vectors_bytes(),
             edges: plan.snapshot.edges.len(),
             dangling_links: plan.snapshot.dangling_links.len(),
+            cycle_breaks: graph.ignored().len(),
+            inert_links: graph.inert().len(),
             passes,
             taken_ms,
             index_sha: written.as_ref().map(|manifest| manifest.index_sha.clone()),
@@ -248,6 +255,10 @@ struct Receipt {
     edges: usize,
     /// Links that resolved to nothing.
     dangling_links: usize,
+    /// Edges the cycle breaker ignored.
+    cycle_breaks: usize,
+    /// Edges stored but inert because their scopes do not intersect.
+    inert_links: usize,
     /// How many build passes ran: one on a quiet corpus, more when a document
     /// changed while the build ran (§3.2). Zero on `--dry-run`.
     passes: u32,
