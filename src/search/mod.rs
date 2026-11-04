@@ -13,7 +13,6 @@
 //! stderr (§8.2).
 
 use std::collections::BTreeSet;
-use std::fs;
 
 pub mod facts;
 use std::io::{self, Write as _};
@@ -29,7 +28,7 @@ use crate::document::{DateSource, Status};
 use crate::error::JanusError;
 use crate::id::{ChunkId, DocId};
 use crate::index::embed::Embedder;
-use crate::index::refresh::{self, Witness};
+use crate::index::refresh;
 use crate::index::store::{self, LoadOptions, Policy};
 use crate::index::vectors::{Vectors, dot};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
@@ -330,11 +329,15 @@ pub(crate) struct Prepared {
     pub(crate) index: LexicalIndex,
     pub(crate) vectors: Option<Vectors>,
     /// True when the corpus changed after the generation was built (M4D §3.1).
+    /// True only when this read declined to refresh.
     pub(crate) stale: bool,
 }
 
-/// Loads a validated generation and prints the one stale line when a read built
-/// one (§3.5, S-8). The library stays silent; the command owns stderr.
+/// Loads a validated generation, refreshes it when the corpus changed, and
+/// prints the one `refresh:` line that describes what it did (§3.4, §3.5).
+///
+/// The library stays silent; the command owns stderr. A fresh read prints
+/// nothing at all.
 pub(crate) fn prepare(
     root: &Path,
     config: &Config,
@@ -358,56 +361,39 @@ pub(crate) fn prepare(
         eprintln!("warning: {warning}");
     }
     let built_at = format!("{}T00:00:00Z", clock.today());
-    let load = store::load(&LoadOptions {
-        root,
-        config,
-        built_at: &built_at,
-        lock_timeout: store::LOCK_TIMEOUT,
-        policy,
-        // A lexical-only read never opens the payload (V-4) and a generation
-        // with vectors still loads (row 6). The embedder is passed anyway
-        // because a read that has to **rebuild** must publish the generation
-        // this process would have built: without it, a first `search` after
-        // `janus index` would drop the payload it just inherited (V-21 row 5,
-        // §3.6 row 3).
-        want_vectors,
-        embedder,
-    })?;
-    // Only a generation this call had to build is stale; a retry that ended by
-    // adopting a valid one is not.
-    if let (true, Some(cause)) = (load.rebuilt, &load.stale) {
-        eprintln!("stale: {cause}");
-    }
-    // The witness: one walk, compared with the digest the manifest stores. This
-    // phase only reports it; a read still refreshes nothing (§3.5, D-2).
-    let witness = corpus_witness(root, config, &dir, &load.manifest)?;
-    let index = load.snapshot.to_index()?;
-    Ok(Prepared {
-        snapshot: load.snapshot,
-        index,
-        vectors: load.vectors,
-        stale: witness.stale,
-    })
-}
-
-/// Computes the witness for a loaded generation (M4D §3.1).
-///
-/// The walk is the price of an exact answer: an mtime comparison cannot see a
-/// deletion or a rename, and the digest can. A read pays this walk once; the
-/// refresh phase reuses it for its own plan.
-fn corpus_witness(
-    root: &Path,
-    config: &Config,
-    dir: &Path,
-    manifest: &store::Manifest,
-) -> Result<Witness, JanusError> {
+    // One walk, made here because the refresh reuses it for its own plan
+    // (§3.1). The witness is exact, so the walk is its whole price.
     let walk = vault::walk(root, config, WalkOptions::default())?;
-    // A stat failure leaves the witness without the one fact the fallback needs;
-    // a read that cannot prove a change reports a fresh corpus.
-    let index_mtime = fs::metadata(dir.join(store::INDEX_FILE))
-        .and_then(|metadata| metadata.modified())
-        .ok();
-    Ok(refresh::Witness::of(&walk.files, manifest, index_mtime))
+    let read = refresh::on_read(
+        &dir,
+        &LoadOptions {
+            root,
+            config,
+            built_at: &built_at,
+            lock_timeout: store::LOCK_TIMEOUT,
+            policy,
+            // A lexical-only read never opens the payload (V-4) and a generation
+            // with vectors still loads (row 6). The embedder is passed anyway
+            // because a read that has to **rebuild** must publish the generation
+            // this process would have built: without it, a first `search` after
+            // `janus index` would drop the payload it just inherited (V-21 row 5,
+            // §3.6 row 3).
+            want_vectors,
+            embedder,
+        },
+        walk,
+        config.refresh,
+    )?;
+    if let Some(line) = read.decision.line() {
+        eprintln!("{line}");
+    }
+    let index = read.load.snapshot.to_index()?;
+    Ok(Prepared {
+        snapshot: read.load.snapshot,
+        index,
+        vectors: read.load.vectors,
+        stale: read.stale,
+    })
 }
 
 /// Builds the `degraded` list from the flag, the resolved embedder and its reason.

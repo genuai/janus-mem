@@ -23,6 +23,27 @@ fn dir_snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
     files
 }
 
+/// Copies a vault, `.janus/` included: a refresh oracle needs the generation as
+/// it stood before the read (M4D §5 P2).
+fn copy_vault(from: &Path, to: &Path) {
+    common::copy_tree(from, to).expect("copy the corpus");
+    copy_whole_tree(&from.join(".janus"), &to.join(".janus")).expect("copy the index");
+}
+
+fn copy_whole_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_whole_tree(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 /// A vault where one document owns many chunk scores and nine others match.
 fn contract_vault() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -215,7 +236,7 @@ fn search_json_reports_a_fresh_index_with_no_stderr_line() {
 }
 
 #[test]
-fn an_edited_document_makes_search_json_report_stale() {
+fn an_edited_document_is_refreshed_and_reported_fresh() {
     let vault = fixture_vault();
     index(vault.path());
     let path = vault.path().join("notes/yaml-comments.md");
@@ -228,18 +249,23 @@ fn an_edited_document_makes_search_json_report_stale() {
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    assert_eq!(report["index"]["stale"], true, "{report}");
-    assert!(!stderr.contains("refresh:"), "{stderr}");
+    // M4D P2: the read refreshed the index, so the answer is current and the
+    // report says so. One line, and the `stale:` word is retired.
+    assert_eq!(report["index"]["stale"], false, "{report}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        vec!["refresh: corpus changed"],
+        "{stderr:?}"
+    );
     assert!(!stderr.contains("stale:"), "{stderr}");
 
-    // `janus index` writes the digest for the edited corpus.
-    index(vault.path());
+    // The edit is in the index: a fresh read finds the new text and says nothing.
     let report = search_json(vault.path(), &["cache"]);
     assert_eq!(report["index"]["stale"], false, "{report}");
 }
 
 #[test]
-fn an_edited_document_makes_facts_json_report_stale() {
+fn an_edited_document_is_refreshed_before_facts_answer() {
     let vault = fixture_vault();
     index(vault.path());
     let path = vault.path().join("notes/yaml-comments.md");
@@ -247,18 +273,35 @@ fn an_edited_document_makes_facts_json_report_stale() {
     text.push_str("\nan edit made after the build\n");
     fs::write(&path, text).unwrap();
 
-    let report = common::facts_json(vault.path(), &[]);
-
-    assert_eq!(report["index"]["stale"], true, "{report}");
+    // M4D P2: `facts` inherits the refresh, so it answers from a current index.
+    let output = run(vault.path(), &["facts", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: corpus changed\n"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["index"]["stale"], false, "{report}");
 }
 
 #[test]
 fn search_without_an_index_builds_one() {
     let vault = fixture_vault();
-    let report = search_json(vault.path(), &["cache"]);
-
+    let output = run(vault.path(), &["search", "cache", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: no index yet\n",
+        "a read that builds says so, once (§3.3 row 3)"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(!result_paths(&report).is_empty(), "{report}");
     assert!(vault.path().join(".janus/index.bin").exists());
+
+    // The second read adopts the generation and prints nothing.
+    let output = run(vault.path(), &["search", "cache", "--json"]);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
 }
 
 #[test]
@@ -299,6 +342,259 @@ fn no_rebuild_on_a_stale_index_refuses_without_writing() {
 
     assert_eq!(fs::read(dir.join("index.bin")).unwrap(), index_bytes);
     assert_eq!(fs::read(dir.join("manifest.json")).unwrap(), manifest_bytes);
+}
+
+// M4D P2 DoD 1: one edit, one line, and payloads a cold build would write.
+#[test]
+fn a_refreshed_index_is_byte_identical_to_a_cold_rebuild_of_the_same_corpus() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let note = vault.path().join("2025-01-05-corpus-notes.md");
+    let text = fs::read_to_string(&note).expect("read a fixture document");
+    fs::write(&note, format!("{text}\n\nquokka refresh marker\n")).expect("edit a document");
+
+    // The oracle is built **before** the refresh, from the same corpus and the
+    // same old generation. Comparing against the refreshed bytes would prove
+    // nothing.
+    let copy = tempfile::tempdir().unwrap();
+    copy_vault(vault.path(), copy.path());
+    let cold = run(copy.path(), &["index", "--rebuild"]);
+    assert!(cold.status.success(), "{cold:?}");
+    let cold_index = fs::read(copy.path().join(".janus/index.bin")).expect("cold index");
+    let cold_vectors = fs::read(copy.path().join(".janus/vectors.f32")).expect("cold vectors");
+
+    let output = run(vault.path(), &["search", "quokka", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: corpus changed\n",
+        "a refresh prints exactly one line"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["index"]["stale"], false, "{report}");
+    assert!(
+        result_paths(&report).contains(&"2025-01-05-corpus-notes.md".to_owned()),
+        "the edit is visible: {report}"
+    );
+
+    assert_eq!(
+        fs::read(vault.path().join(".janus/index.bin")).expect("refreshed index"),
+        cold_index,
+        "a refresh writes the bytes a cold build writes"
+    );
+    assert_eq!(
+        fs::read(vault.path().join(".janus/vectors.f32")).expect("refreshed vectors"),
+        cold_vectors,
+        "a refresh reuses rows, and the payload still equals a cold build"
+    );
+}
+
+// M4D P2 DoD 5 and D-11: a busy writer is a skip, not a failure.
+#[test]
+fn a_held_writer_lock_makes_a_stale_read_skip_and_still_answer() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let dir = vault.path().join(".janus");
+    let before = dir_snapshot(&dir);
+    fs::write(
+        vault.path().join("notes/quokka.md"),
+        "---\ntitle: Quokka\ndate: 2025-03-20\n---\n\n# Quokka\n\nquokka marker\n",
+    )
+    .expect("add a document after the build");
+
+    // This thread holds the lock for the whole read: no sleep, no second thread,
+    // so the read cannot race the holder.
+    let lock = janus_mem::index::store::Lock::acquire(&dir, std::time::Duration::from_secs(1))
+        .expect("take the writer lock");
+    let output = run(vault.path(), &["search", "quokka", "--json"]);
+    assert!(
+        output.status.success(),
+        "a busy lock must not fail a read: {output:?}"
+    );
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: skipped, index busy\n"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["index"]["stale"], true, "{report}");
+    assert!(
+        !result_paths(&report).contains(&"notes/quokka.md".to_owned()),
+        "the old generation cannot know the new document: {report}"
+    );
+    assert_eq!(
+        dir_snapshot(&dir),
+        before,
+        "a skipped refresh writes nothing"
+    );
+    drop(lock);
+
+    // Once the writer is gone the next read refreshes and finds the document.
+    let output = run(vault.path(), &["search", "quokka", "--json"]);
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: corpus changed\n"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        result_paths(&report).contains(&"notes/quokka.md".to_owned()),
+        "{report}"
+    );
+}
+
+// M4D P2 R-23: `--no-rebuild` keeps reading, says why it skipped, and writes
+// nothing.
+#[test]
+fn no_rebuild_on_a_changed_corpus_reads_and_writes_nothing() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let dir = vault.path().join(".janus");
+    let before = dir_snapshot(&dir);
+    fs::write(
+        vault.path().join("notes/quokka.md"),
+        "---\ntitle: Quokka\ndate: 2025-03-20\n---\n\n# Quokka\n\nquokka marker\n",
+    )
+    .expect("add a document after the build");
+
+    let output = run(
+        vault.path(),
+        &["search", "quokka", "--no-rebuild", "--json"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: skipped, --no-rebuild\n"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["index"]["stale"], true, "{report}");
+    assert!(
+        !result_paths(&report).contains(&"notes/quokka.md".to_owned()),
+        "{report}"
+    );
+    assert_eq!(dir_snapshot(&dir), before, "--no-rebuild writes nothing");
+}
+
+// M4D P2 D-4: `refresh = "manual"` disables the corpus-changed row only.
+#[test]
+fn manual_refresh_on_a_changed_corpus_reads_and_writes_nothing() {
+    let vault = fixture_vault();
+    let config_path = vault.path().join("janus.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    let manual = config.replace("[index]\n", "[index]\nrefresh = \"manual\"\n");
+    assert_ne!(
+        config, manual,
+        "the fixture config must carry an [index] table"
+    );
+    fs::write(&config_path, manual).unwrap();
+    index(vault.path());
+
+    let dir = vault.path().join(".janus");
+    let before = dir_snapshot(&dir);
+    fs::write(
+        vault.path().join("notes/quokka.md"),
+        "---\ntitle: Quokka\ndate: 2025-03-20\n---\n\n# Quokka\n\nquokka marker\n",
+    )
+    .expect("add a document after the build");
+
+    let output = run(vault.path(), &["search", "quokka", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: skipped, refresh = manual\n"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["index"]["stale"], true, "{report}");
+    assert_eq!(
+        dir_snapshot(&dir),
+        before,
+        "a manual refresh writes nothing"
+    );
+}
+
+// M4D P2 §3.3 row 4: a pair that no longer validates is rebuilt once.
+#[test]
+fn a_corrupt_pair_is_rebuilt_with_the_index_repaired_line() {
+    let vault = fixture_vault();
+    index(vault.path());
+    fs::write(vault.path().join(".janus/index.bin"), b"not a snapshot").unwrap();
+
+    let output = run(vault.path(), &["search", "cache", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: index repaired\n"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["index"]["stale"], false, "{report}");
+    assert!(!result_paths(&report).is_empty(), "{report}");
+}
+
+// M4D P2 §3.3 row 6: a moved vault loads, repairs the manifest, and answers.
+#[test]
+fn a_moved_vault_repairs_the_manifest_and_answers() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let moved = tempfile::tempdir().unwrap();
+    copy_vault(vault.path(), moved.path());
+
+    // A moved root is a repair, and `--no-rebuild` declines it with its own
+    // line: the generation still answers and nothing is written.
+    let before = dir_snapshot(&moved.path().join(".janus"));
+    let output = run(moved.path(), &["search", "cache", "--no-rebuild", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: skipped, --no-rebuild\n"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!result_paths(&report).is_empty(), "{report}");
+    assert_eq!(dir_snapshot(&moved.path().join(".janus")), before);
+
+    let output = run(moved.path(), &["search", "cache", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: manifest repaired\n"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!result_paths(&report).is_empty(), "{report}");
+
+    // The repair is complete: the next read prints nothing at all.
+    let output = run(moved.path(), &["search", "cache", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+}
+
+// M4D P2 §3.4 step 4: a manifest repair is skipped by a busy lock too, and the
+// generation still answers.
+#[test]
+fn a_held_writer_lock_skips_a_manifest_repair_and_still_answers() {
+    let vault = fixture_vault();
+    index(vault.path());
+    let moved = tempfile::tempdir().unwrap();
+    copy_vault(vault.path(), moved.path());
+    let dir = moved.path().join(".janus");
+    let before = dir_snapshot(&dir);
+
+    let lock = janus_mem::index::store::Lock::acquire(&dir, std::time::Duration::from_secs(1))
+        .expect("take the writer lock");
+    let output = run(moved.path(), &["search", "cache", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: skipped, index busy\n"
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!result_paths(&report).is_empty(), "{report}");
+    assert_eq!(dir_snapshot(&dir), before, "the manifest was not rewritten");
+    drop(lock);
+
+    // With the lock free the same read repairs the manifest and prints its line.
+    let output = run(moved.path(), &["search", "cache", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "refresh: manifest repaired\n"
+    );
 }
 
 #[test]

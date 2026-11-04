@@ -884,7 +884,12 @@ Two rules make this cheap:
 This also means the on-disk format does not change between M4 (simple `read` of the whole file) and M8 (mmap + optional quantization): only the load path changes.
 
 - Rebuild triggers: a `format_version`, tokenizer, chunker, `corpus_id` or `embedder` mismatch, and `--rebuild`. These five fields change the identity of every chunk or every row, so only a cold build cures them, and only `janus index` runs one. A corpus change since the build is a **refresh** trigger, not a rebuild trigger: the writer reuses every unchanged token and row (M4D). `schema_version` is not a trigger, because the code never compares it; the manifest field is diagnostic in v1. A `built_root` mismatch is never an error and never a rebuild: the generation loads and the reader rewrites the manifest, because moving a vault is legitimate.
-- **`.janus/lock` is a writer lock.** Writers take it exclusively for the whole publication (temp write, rename, fsync, manifest last) and hold it until the manifest is durable. Readers never lock: they validate the bytes they read against `manifest.index_sha` and retry with bounded backoff; if no generation validates they take the writer lock, re-check freshness, rebuild once, and then refuse (`--no-rebuild` never writes).
+- **`.janus/lock` is a writer lock.** Writers take it exclusively for the whole publication (temp write, rename, fsync, manifest last) and hold it until the manifest is durable. Readers validate the bytes they read against `manifest.index_sha` without a lock and retry with bounded backoff. A reader also re-walks the corpus and compares `manifest.corpus_sig` (below):
+  - **Fresh corpus:** answer, no lock, no line.
+  - **Changed corpus:** try the writer lock once, **without blocking**. On success re-read the manifest and adopt it only when its `corpus_sig` equals the digest this read computed; otherwise refresh and publish. On a busy lock print `refresh: skipped, index busy` and answer from the generation already validated, exit 0. A read never waits for a writer and never fails on a lock.
+  - **Absent index or a corrupt pair:** take the writer lock, re-check, rebuild once.
+  - **A cold mismatch:** refuse with `index needs a full build: run janus index` and write nothing.
+  - `--no-rebuild` never writes: it reads the validated generation and prints `refresh: skipped, --no-rebuild`, or refuses with `index is unstable` when no generation validates. `[index] refresh = "manual"` declines the changed-corpus row only.
 - Incremental: skip a file when `content_hash` is unchanged; reuse chunks whose `chunk_id` still exists (across moves, too — §6.9); only embed the delta.
 - Embedding is never required for correctness. With `--no-embeddings` (or if the model is absent and download is disallowed), janus-mem runs lexical-only, omits `vectors.f32`, and says so in every response (`degraded`).
 - Corruption: blake3 checksums for both files live in `manifest.json`; mismatch ⇒ rebuild from source with a warning. A truncated or partial index is never loaded. **Both payloads are validated together**, because a new-`vectors.f32`/old-`index.bin` pair is otherwise indistinguishable from a good one.
@@ -1077,6 +1082,8 @@ Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash,
 
 `--no-embeddings` is accepted by `index`, `search` and `facts`, and means two different things on purpose: on `index` it is a statement about the generation being published (vectors are carried forward, or dropped when a document's embedded text changed, §8.3), and on `search`/`facts` it is a statement about the query (`degraded`, §9.4).
 
+`search` and `facts` refresh the index when the corpus changed since the build (§8.3), and print exactly one `refresh:` line on stderr that says what they did. `--no-rebuild` makes both refuse to write; it reads a validated generation and says it skipped. When only a cold build can cure the manifest, both exit 1 with `index needs a full build: run janus index` and the mismatch.
+
 ### 9.2 MCP read tools
 
 | Tool | Params | Returns |
@@ -1087,6 +1094,8 @@ Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash,
 | `read_document` | `path`, `max_chars?`, `chunk_id?` | Frontmatter as JSON + body (or a specific chunk's span) |
 
 `authoritative_facts` uses its own **active-only inclusion rule** — canonical type in {`decision`, `spec`, `principle`} and declared status `active`, no decay, status factor 1.0 — and not the `current` intent's gate, which admits `draft` (0.7×) and `unknown` (1.0×). A weight is not an inclusion rule.
+
+MCP reads inherit the index refresh and the refusal. They expose no `--no-rebuild`, so a cold mismatch is answered with `index needs a full build: run janus index`, which names the command the agent must run. A changed corpus refreshes under the same non-blocking lock, and a busy writer is a skip, never an error, so a read tool cannot fail because another process is building.
 
 Plus `janus_status` (read-only, no params): index freshness, doc/chunk counts, embedder, vault root, whether writes are enabled. Cheap, and it stops agents from guessing.
 

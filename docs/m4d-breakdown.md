@@ -241,7 +241,7 @@ corrupt. It refuses only when a full build is the only cure.**
 | index absent | **build once, then read**. `refresh: no index yet` | `no index yet: run janus index` (exit 1) |
 | pair corrupt, retries exhausted | **rebuild once, then read**. `refresh: index repaired` | refuse; write nothing (exit 1) |
 | `format_version`, `tokenizer`, `chunker`, `corpus_id` or `embedder` mismatch | **refuse**: `index needs a full build: run janus index` (exit 1) | refuse (`IndexUnstable`, exit 1; unchanged) |
-| `built_root` mismatch | **load the generation, repair the manifest, then read**. `refresh: manifest repaired` | read (unchanged) |
+| `built_root` mismatch | **load the generation, repair the manifest, then read**. `refresh: manifest repaired` | read; `refresh: skipped, --no-rebuild`; write nothing (D-24) |
 
 **Which mismatches refuse.** A refusal is correct only when an incremental build cannot cure the
 state. `Expected::check` (`src/index/store.rs:758`) compares six fields. Five of them change the
@@ -500,9 +500,9 @@ lines). P2b is stacked on P2a with `BASE=origin/m4d-refresh-a scripts/pr-size.sh
 2. `JanusError::IndexNeedsFullBuild { reason }`: exit 1, message
    `index needs a full build: run janus index` plus the reason. Additive; `api` stays `1`.
 3. `Lock::try_acquire(dir) -> Result<Option<Lock>, JanusError>`.
-4. `refresh::on_read(...)`: the six-step order of §3.4, returning an adopted generation or a new plan.
-   It takes the walk it was given, so a stale read pays one walk for the witness plus one for the
-   post-publish comparison.
+4. `refresh::on_read(...)`: the seven-step order of §3.4, returning an adopted generation or a new
+   plan. It takes the walk it was given, so a stale read pays one walk for the witness plus one for
+   the post-publish comparison.
 5. `prepare` (`src/search/mod.rs:329`) calls it and prints the one `refresh:` line. `facts` inherits
    it, because both use `prepare`.
 6. `--no-rebuild` maps to the refusal rows. `[index] refresh = "manual"` skips step 4.
@@ -525,6 +525,10 @@ lines). P2b is stacked on P2a with `BASE=origin/m4d-refresh-a scripts/pr-size.sh
 - `--no-rebuild` on a changed corpus prints `refresh: skipped, --no-rebuild`, exits 0, answers from
   the generation, and writes nothing. `refresh = "manual"` prints its line and writes nothing.
 - `stale:` does not appear in any stderr.
+- Every one of the five cold fields refuses, and the check is a unit test of `Expected::check`
+  because `tokenizer` cannot be expressed as a readable manifest: the deserializer rejects an
+  unknown fingerprint (I-1). The unit test also pins the order: a cold field wins over `built_root`.
+- A held lock on a moved vault prints `refresh: skipped, index busy` and answers too.
 
 **Tests that change, and why.** These pin behaviour this phase deliberately reverses. Each change is
 listed in the PR body with its reason.
@@ -537,6 +541,8 @@ listed in the PR body with its reason.
 | `tests/publish.rs:929 a_vectors_less_generation_is_stale_for_a_process_that_can_embed` | rename to `…_refuses_to_build_from_a_read`; assert `IndexNeedsFullBuild` and no write |
 | `tests/hybrid_search.rs:150 a_no_embeddings_rebuild_carries_unchanged_rows_and_drops_changed_ones` | re-point at `janus index --no-embeddings`; a read no longer rebuilds a `corpus_id` mismatch |
 | `tests/cli_search.rs:175 search_without_an_index_builds_one` | add the `refresh: no index yet` assertion |
+| `tests/cli_search.rs:193 an_edited_document_makes_search_json_report_stale` | the plan missed this one: a read now refreshes, so `index.stale` is `false` and one `refresh: corpus changed` line appears. Renamed to `an_edited_document_is_refreshed_and_reported_fresh` |
+| `tests/cli_search.rs:217 an_edited_document_makes_facts_json_report_stale` | the same fact through `facts`, which inherits `prepare`. Renamed to `an_edited_document_is_refreshed_before_facts_answer` |
 
 **Unchanged:** `tests/cli_search.rs:198 no_rebuild_on_a_stale_index_refuses_without_writing` keeps
 `IndexUnstable`, and `tests/publish.rs:310` keeps its corrupt-pair rebuild (R-18).
@@ -713,7 +719,9 @@ Two decisions are agreed and belong to the temporal milestone, not to M4D:
 
 - **The size forced the split the plan named.** The phase reached 683 logic
   lines, over the 600 ceiling, so it ships as P2a (writer and validation) and
-  P2b (read policy and lines), stacked. P2a is 524 logic lines.
+  P2b (read policy and lines), stacked. P2a is 597 logic lines, measured with
+  `BASE=origin/main scripts/pr-size.sh`. The number is high because a deletion
+  counts: 73 of those lines are the old `Expected::check` body.
 - **`Check` is the only validation answer.** `Expected::check` returns
   `Check { Ok, Refresh, Refuse }` and compares `format_version`, `tokenizer`,
   `chunker`, `corpus_id` and `embedder` before `built_root` (D-3a). A unit test
@@ -736,11 +744,29 @@ Two decisions are agreed and belong to the temporal milestone, not to M4D:
 - **A first build is told from a repair by the manifest's presence** (D-23),
   read before the load. `store::load` gains one field, `refresh_request`, and
   keeps its one `Stale` reason.
-- **Not in this phase.** No `prepare` change, no `refresh:` line, no config
-  wiring, no progress sink. A read still answers from the old index in P2a; P2b
-  wires `on_read` into `prepare`.
-- **Size.** 524 logic lines and 379 test lines, measured with
-  `BASE=origin/main scripts/pr-size.sh`.
+- **Size.** 597 logic lines and 444 test lines.
+
+### Phase 2b — the read policy and the lines
+
+- **`prepare` is now three steps: walk, `on_read`, one line.** The walk happens
+  before the read, so the witness walk is the refresh's plan input (§3.1). The
+  `stale:` print is gone; `Load.stale` stays a field and is no longer read by
+  the command.
+- **`config.refresh` is read, not re-resolved.** `on_read` takes `Refresh` and
+  declines the changed-corpus row for `Manual`; every other row still works
+  (D-4).
+- **A declined repair prints a line** (D-24). The §3.3 table's `--no-rebuild`
+  cell for `built_root` is amended to match.
+- **The plan's test list was wrong, twice, and is amended here** (§5 P2). Two
+  tests that assert `index.stale` after an edit reverse under this phase, and
+  the `tokenizer` row of `Expected::check` cannot be reached through a readable
+  manifest, because the deserializer rejects an unknown fingerprint (I-1). It
+  is pinned by a unit test instead, together with the ordering rule.
+- **`facts` needed no code change.** It shares `prepare`, so it inherits the
+  refresh and the one line.
+- **Size.** 86 logic lines and 318 test lines against `m4d-refresh-a`, measured
+  with `BASE=m4d-refresh-a scripts/pr-size.sh`. The two phases together are 683
+  logic lines, which is why the seam was used.
 
 ## 13. Implementation log — Phase 3
 
