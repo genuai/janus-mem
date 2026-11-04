@@ -344,9 +344,8 @@ loop), `src/config.rs` (`[index] refresh`), `src/search/mod.rs` (the note), `tes
 4. `[index] refresh = "auto" | "manual"`: parse, default `auto`, warn on an unknown value and use
    `auto`.
 5. A read computes the witness and prints `refresh: N document(s) changed` when stale. In this
-   phase it does not refresh.
-6. `Load` gains `stale: bool` and `changed: usize`, so a caller can see the witness. Additive;
-   `api` stays `1`.
+   phase it does not refresh. `prepare` (`src/search/mod.rs:329`) owns the line, so `facts`
+   inherits it.
 
 **Tests (~260 lines):**
 
@@ -441,7 +440,8 @@ a read.
 
 **Goal:** a long build says what it is doing.
 
-**Files:** `src/index/build.rs`, `src/index/cmd.rs`, `src/main.rs`, `tests/progress.rs` (new).
+**Files:** `src/index/build.rs`, `src/index/cmd.rs`, `src/cli.rs` (the flag), `src/main.rs`
+(the wiring), `tests/progress.rs` (new).
 
 **Build (~180 logic lines):**
 
