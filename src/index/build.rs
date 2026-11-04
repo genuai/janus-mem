@@ -12,11 +12,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use chrono::NaiveDate;
+
 use crate::chunk::{Chunk, chunk_body};
 use crate::config::Config;
 use crate::document::Document;
 use crate::id::{Blake3Hash, ChunkId, DocId};
 use crate::tokenize::{Stemmer, Tokenizer, TokenizerFingerprint, Tokens};
+use crate::vault::identity;
 
 use super::embed::{Embedder, EmbedderId};
 use super::store::{Corrupt, Manifest, Payloads, VectorSet};
@@ -156,6 +159,11 @@ impl BuildPlan {
 /// Reused rows are copied into the new snapshot's positions, so ordinal is the
 /// mapping because the predicate requires the chunk-id sequence to match.
 ///
+/// `basis` is the identity basis, which is a different question from `previous`:
+/// `--rebuild` passes a basis and no reuse source, because a rebuild
+/// re-tokenizes and never re-identifies (M5-2). `today` stamps the identity
+/// tables and is injected (§7.2).
+///
 /// # Errors
 ///
 /// [`Corrupt`] when the embedder breaks its contract (wrong row count, wrong
@@ -164,31 +172,48 @@ impl BuildPlan {
 /// invisible quality loss (§3.2 V-7).
 pub fn plan(
     config: &Config,
-    docs: &[Document],
+    docs: &mut [Document],
     previous: Option<&Previous>,
+    basis: Option<&Snapshot>,
+    today: NaiveDate,
     embedder: Option<&dyn Embedder>,
     sink: EmbedSink<'_>,
 ) -> Result<BuildPlan, Corrupt> {
-    plan_forced(config, docs, previous, &BTreeSet::new(), embedder, sink)
+    plan_forced(
+        config,
+        docs,
+        previous,
+        basis,
+        today,
+        &BTreeSet::new(),
+        embedder,
+        sink,
+    )
 }
 
 /// [`plan`] with a set of documents whose tokens must be recomputed anyway.
 ///
 /// `janus index PATHS` uses this for a targeted refresh: reuse still applies to
 /// every other document, so the index stays complete and the save is real.
+/// Identity is resolved here, once, from the corpus and the basis.
 ///
 /// # Errors
 ///
 /// Exactly [`plan`]'s.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_forced(
     config: &Config,
-    docs: &[Document],
+    docs: &mut [Document],
     previous: Option<&Previous>,
+    basis: Option<&Snapshot>,
+    today: NaiveDate,
     force: &BTreeSet<DocId>,
     embedder: Option<&dyn Embedder>,
     sink: EmbedSink<'_>,
 ) -> Result<BuildPlan, Corrupt> {
-    plan_inner(config, docs, previous, force, embedder, true, sink)
+    plan_inner(
+        config, docs, previous, basis, today, force, embedder, true, sink,
+    )
 }
 
 /// [`plan_forced`] without calling the embedder: the `--dry-run` shape.
@@ -200,26 +225,37 @@ pub fn plan_forced(
 /// # Errors
 ///
 /// Exactly [`plan_forced`]'s.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_forced_dry_run(
     config: &Config,
-    docs: &[Document],
+    docs: &mut [Document],
     previous: Option<&Previous>,
+    basis: Option<&Snapshot>,
+    today: NaiveDate,
     force: &BTreeSet<DocId>,
     embedder: Option<&dyn Embedder>,
     sink: EmbedSink<'_>,
 ) -> Result<BuildPlan, Corrupt> {
-    plan_inner(config, docs, previous, force, embedder, false, sink)
+    plan_inner(
+        config, docs, previous, basis, today, force, embedder, false, sink,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_inner(
     config: &Config,
-    docs: &[Document],
+    docs: &mut [Document],
     previous: Option<&Previous>,
+    basis: Option<&Snapshot>,
+    today: NaiveDate,
     force: &BTreeSet<DocId>,
     embedder: Option<&dyn Embedder>,
     embed: bool,
     sink: EmbedSink<'_>,
 ) -> Result<BuildPlan, Corrupt> {
+    // Identity first: every row below names the id it resolves to, and the
+    // tables describe the generation this plan would publish (§3.1 step 4).
+    let resolution = identity::resolve(docs, basis, config, today);
     let tokenizer = Tokenizer::new();
     let tokenizer_fp = tokenizer.fingerprint();
     let chunker = ChunkingFingerprint {
@@ -473,13 +509,19 @@ fn plan_inner(
     }
 
     let index = LexicalIndex::from_parts(pool, terms, postings, lengths, avgdl);
-    let snapshot = Snapshot::from_index(
+    let mut snapshot = Snapshot::from_index(
         &index,
         config.corpus_id.clone(),
         tokenizer_fp,
         docs_meta,
         chunks_meta,
     );
+    // Carrying the tables forward is what keeps a move visible across builds:
+    // a snapshot built from this scan alone would erase the history on the next
+    // refresh and re-derive every id (§3.1 step 4).
+    snapshot.path_history = resolution.path_history;
+    snapshot.identity = resolution.identity;
+    snapshot.tombstones = resolution.tombstones;
     let total_rows = snapshot.chunks.len();
     let (vectors, vector_id, vectors_dropped) = match (embedder, target_id) {
         (Some(embedder), Some(id)) => {
@@ -884,10 +926,26 @@ mod tests {
         plan.snapshot.to_bytes().expect("valid snapshot")
     }
 
+    /// A pinned build date, so no identity table depends on the clock.
+    fn today() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+    }
+
     /// A plan built with no embedder: the token-side cases do not embed.
+    ///
+    /// Planning resolves identity, which writes to the documents it is given, so
+    /// the helper plans a copy and leaves the caller's set untouched.
     fn built(docs: &[Document], previous: Option<&Previous>) -> BuildPlan {
-        plan(&config(), docs, previous, None, &no_progress)
-            .expect("a build without an embedder cannot fail")
+        plan(
+            &config(),
+            &mut docs.to_vec(),
+            previous,
+            None,
+            today(),
+            None,
+            &no_progress,
+        )
+        .expect("a build without an embedder cannot fail")
     }
 
     fn embedder(dim: u32) -> HashEmbedder {
@@ -900,8 +958,16 @@ mod tests {
         previous: Option<&Previous>,
         embedder: &dyn crate::index::embed::Embedder,
     ) -> BuildPlan {
-        plan(&config(), docs, previous, Some(embedder), &no_progress)
-            .expect("the hash double never fails")
+        plan(
+            &config(),
+            &mut docs.to_vec(),
+            previous,
+            None,
+            today(),
+            Some(embedder),
+            &no_progress,
+        )
+        .expect("the hash double never fails")
     }
 
     /// The previous generation a follow-up build would read from disk.
@@ -1311,8 +1377,10 @@ mod tests {
         let counting = CountingEmbedder::new(8);
         let dry = plan_forced_dry_run(
             &config(),
-            &new_docs,
+            &mut new_docs.to_vec(),
             Some(&previous),
+            None,
+            today(),
             &BTreeSet::new(),
             Some(&counting),
             &no_progress,
@@ -1327,8 +1395,10 @@ mod tests {
 
         let real = plan_forced(
             &config(),
-            &new_docs,
+            &mut new_docs.to_vec(),
             Some(&previous),
+            None,
+            today(),
             &BTreeSet::new(),
             Some(&counting),
             &no_progress,
@@ -1394,8 +1464,16 @@ mod tests {
             document("a.md", "Alpha", "alpha cache body"),
             document("b.md", "Beta", "# Heading\n\nbeta store body"),
         ];
-        let computed = plan(&config(), &docs, None, Some(&embedder), &no_progress)
-            .expect("the double cannot fail");
+        let computed = plan(
+            &config(),
+            &mut docs.to_vec(),
+            None,
+            None,
+            today(),
+            Some(&embedder),
+            &no_progress,
+        )
+        .expect("the double cannot fail");
         let chunks = computed.snapshot.chunks.len();
         assert_eq!(chunks, 2, "one chunk per document at this chunk size");
         assert_eq!(computed.stats.embedded_chunks, chunks);

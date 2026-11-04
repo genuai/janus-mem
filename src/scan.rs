@@ -31,9 +31,11 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
+use crate::clock::Clock;
 use crate::config::{CONFIG_FILE, Config};
 use crate::document::{DocNote, Document, NoteDto};
 use crate::error::JanusError;
+use crate::index::store;
 use crate::vault::resolve::{self, ReadSkip};
 use crate::vault::{self, SkipReason, WalkOptions, WalkResult, identity};
 
@@ -61,12 +63,21 @@ pub struct Options {
 ///
 /// Propagates corpus, config and walk failures. A file that cannot be read is
 /// *not* an error: it is reported as a skip and the scan continues.
-pub fn run(root: &Path, config: &Config, options: Options) -> Result<(), JanusError> {
+pub fn run(
+    root: &Path,
+    config: &Config,
+    clock: &dyn Clock,
+    options: Options,
+) -> Result<(), JanusError> {
     let started = Instant::now();
     let walk = vault::walk(root, config, WalkOptions::default())?;
     let (mut documents, read_skips) = resolve::resolve_all(&walk.files, config);
     // Identity is a corpus-wide decision, so it runs after every file is parsed.
-    identity::derive_identity(&mut documents, config);
+    // It resolves against the last published generation, or the `id` this prints
+    // would disagree with `search` after an in-place edit (case 1.10). The read
+    // never builds: no generation, no basis (M5 DoD 9).
+    let basis = store::validated_snapshot(root, config, clock.today());
+    identity::derive_identity(&mut documents, basis.as_ref(), config);
     let elapsed = started.elapsed();
 
     // Diagnostics never share a stream with results (§8.2). In human mode this
@@ -485,7 +496,7 @@ mod tests {
         let config = config();
         let mut document = resolve::resolve(&file, &config).expect("resolve must succeed");
         // Identity is a corpus-wide pass; one document is a one-element corpus.
-        identity::derive_identity(std::slice::from_mut(&mut document), &config);
+        identity::derive_identity(std::slice::from_mut(&mut document), None, &config);
         document
     }
 

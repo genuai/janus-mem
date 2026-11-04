@@ -17,12 +17,18 @@ use std::fs;
 use std::path::Path;
 use std::rc::Rc;
 
+use chrono::NaiveDate;
 use common::{fixture_vault, index, run};
 use janus_mem::config::Config;
 use janus_mem::index::build::{self, BuildPlan, EmbedSink};
 use janus_mem::index::embed::HashEmbedder;
 use janus_mem::vault::{self, WalkOptions, identity, resolve};
 use serde_json::Value;
+
+/// A pinned build date: nothing in a test may depend on the clock.
+fn today() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+}
 
 /// The most progress lines one build may print: one per 5 % step.
 const BOUNDARIES: usize = 20;
@@ -32,9 +38,18 @@ fn plan(root: &Path, previous: Option<&build::Previous>, sink: EmbedSink<'_>) ->
     let config = Config::load(root).expect("the fixture has a config");
     let walk = vault::walk(root, &config, WalkOptions::default()).expect("walk the fixture");
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, &config);
-    identity::derive_identity(&mut documents, &config);
+    identity::derive_identity(&mut documents, None, &config);
     let embedder = HashEmbedder::new(64).expect("64 is a valid dimension");
-    build::plan(&config, &documents, previous, Some(&embedder), sink).expect("the fixture builds")
+    build::plan(
+        &config,
+        &mut documents,
+        previous,
+        None,
+        today(),
+        Some(&embedder),
+        sink,
+    )
+    .expect("the fixture builds")
 }
 
 /// Records every `(done, total)` pair a build reports, in call order.

@@ -63,6 +63,17 @@ pub enum Command {
         verbose: bool,
     },
 
+    /// Report each document's id, the rung behind it, and its match keys
+    Ids {
+        /// Restrict the report to these corpus paths
+        #[arg(value_name = "PATH")]
+        paths: Vec<PathBuf>,
+
+        /// Emit one JSON object on stdout instead of the table
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Report the chunks the corpus produces, without building an index
     Chunks {
         /// Emit one JSON object on stdout instead of the table

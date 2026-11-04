@@ -18,12 +18,14 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use chrono::NaiveDate;
 use serde::Serialize;
 
 use crate::clock::Clock;
 use crate::config::{self, Config};
 use crate::error::JanusError;
 use crate::id::DocId;
+use crate::index::Snapshot;
 use crate::index::build::{self, BuildPlan};
 use crate::index::embed::Embedder;
 use crate::index::store::{self, INDEX_FILE};
@@ -65,10 +67,13 @@ pub fn run(
     options: &Options,
 ) -> Result<(), JanusError> {
     let started = Instant::now();
+    let today = clock.today();
     let walk = vault::walk(root, config, WalkOptions::default())?;
-    let forced = forced_documents(root, config, &walk, &options.paths)?;
     let dir = config::resolve_index_dir(root, &config.index_dir);
-    let built_at = format!("{}T00:00:00Z", clock.today());
+    // One basis for both the forced-path lookup and the build, so a targeted
+    // `janus index PATH` forces the ids the build will publish (§3.1, R-6).
+    let basis = store::previous_snapshot(&dir);
+    let forced = forced_documents(root, config, &walk, basis.as_ref(), today, &options.paths)?;
     let printer = Printer::new(options.progress);
     let sink = |done: u64, total: u64| printer.report(done, total);
 
@@ -76,17 +81,19 @@ pub fn run(
     // held to publish (§3.7, D-9).
     let (plan, written, passes) = if options.dry_run {
         let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
-        identity::derive_identity(&mut documents, config);
         let previous = if options.rebuild {
             None
         } else {
             store::previous_generation(&dir)
         };
-        // A dry run embeds nothing, so it reports nothing.
+        // A dry run embeds nothing, so it reports nothing. It resolves identity
+        // exactly as a write would, so the receipt describes the real build.
         let plan = build::plan_forced_dry_run(
             config,
-            &documents,
+            &mut documents,
             previous.as_ref(),
+            basis.as_ref(),
+            today,
             &forced,
             embedder,
             &build::no_progress,
@@ -101,8 +108,9 @@ pub fn run(
             root,
             config,
             embedder,
-            &built_at,
+            today,
             walk,
+            basis.as_ref(),
             &forced,
             options.rebuild,
             Some(&sink),
@@ -161,17 +169,22 @@ pub fn run(
 /// against the working directory — and a path that names no document in the
 /// corpus is an error naming it, never a silent no-op. With no path there is
 /// nothing to resolve: the write loop resolves the walk itself.
+#[allow(clippy::too_many_arguments)]
 fn forced_documents(
     root: &Path,
     config: &Config,
     walk: &vault::WalkResult,
+    basis: Option<&Snapshot>,
+    today: NaiveDate,
     paths: &[PathBuf],
 ) -> Result<BTreeSet<DocId>, JanusError> {
     if paths.is_empty() {
         return Ok(BTreeSet::new());
     }
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
-    identity::derive_identity(&mut documents, config);
+    // The same basis and the same date the build uses, or the forced set names
+    // an id the published generation does not hold.
+    identity::resolve(&mut documents, basis, config, today);
     let mut forced = BTreeSet::new();
     for given in paths {
         let mut found = false;

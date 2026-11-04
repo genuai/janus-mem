@@ -519,9 +519,11 @@ fn a_corrupt_pair_is_rebuilt_with_the_index_repaired_line() {
 
     let output = run(vault.path(), &["search", "cache", "--json"]);
     assert!(output.status.success(), "{output:?}");
+    // Two lines, both earned: the identity cache is gone (M5 case 1.9) and the
+    // generation was rebuilt (§3.3 row 4). A build must not fail on either.
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "refresh: index repaired\n"
+        "identity: no previous generation; ids re-derived\nrefresh: index repaired\n"
     );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["index"]["stale"], false, "{report}");

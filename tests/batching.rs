@@ -15,11 +15,17 @@ use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
 
+use chrono::NaiveDate;
 use janus_mem::config::Config;
 use janus_mem::document::Document;
 use janus_mem::index::build::{self, BuildPlan};
 use janus_mem::index::embed::{EmbedError, Embedder, EmbedderId, HashEmbedder};
 use janus_mem::vault::{self, WalkOptions, identity, resolve};
+
+/// A pinned build date: nothing in a test may depend on the clock.
+fn today() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date")
+}
 
 /// A batch size larger than any test vault, so the reference build makes one call.
 const ONE_CALL: usize = 1000;
@@ -103,15 +109,17 @@ fn documents(root: &Path) -> Vec<Document> {
     let config = config(root, 1);
     let walk = vault::walk(root, &config, WalkOptions::default()).expect("walk the vault");
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, &config);
-    identity::derive_identity(&mut documents, &config);
+    identity::derive_identity(&mut documents, None, &config);
     documents
 }
 
 fn plan(root: &Path, batch_size: usize, embedder: &dyn Embedder) -> BuildPlan {
     build::plan(
         &config(root, batch_size),
-        &documents(root),
+        &mut documents(root),
         None,
+        None,
+        today(),
         Some(embedder),
         &build::no_progress,
     )
