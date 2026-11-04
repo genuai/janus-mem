@@ -532,19 +532,36 @@ impl ScopeFilter {
     /// shared-only matches are dropped.
     #[must_use]
     pub fn matches(&self, scope: &str, shared_with: &[String]) -> bool {
+        if self.scope_only {
+            // `--scope-only` narrows the result set (§6.12 rule 4); with no
+            // query scope there is nothing to narrow to.
+            if self.scopes.is_empty() {
+                return true;
+            }
+            let scope = normalise_scope(scope);
+            return scope != GLOBAL_SCOPE && self.scopes.contains(&scope);
+        }
+        self.intersects(scope, shared_with)
+    }
+
+    /// Whether `S(d)` intersects the query scope set: the successor-match rule
+    /// of §3.6 and §3.7, and §6.12 rule 7.
+    ///
+    /// With no query scope the set is universal and everything intersects.
+    /// Otherwise a document intersects when its owning scope is `global`, when
+    /// its owning scope is in the set, or when one of its shared tags is in the
+    /// set. `--scope-only` is deliberately ignored: it narrows the result set
+    /// (§6.12 rule 4), never the meaning of `Q`. A global successor always
+    /// counts, whatever the caller asked to be shown.
+    #[must_use]
+    pub fn intersects(&self, scope: &str, shared_with: &[String]) -> bool {
         if self.scopes.is_empty() {
             return true;
         }
-
         let scope = normalise_scope(scope);
-        let owns = self.scopes.contains(&scope);
-        if self.scope_only {
-            return owns && scope != GLOBAL_SCOPE;
-        }
-        if owns || scope == GLOBAL_SCOPE {
+        if scope == GLOBAL_SCOPE || self.scopes.contains(&scope) {
             return true;
         }
-
         shared_with.iter().any(|tag| {
             let tag = normalise_scope(tag);
             self.scopes.contains(&tag)
@@ -1076,6 +1093,22 @@ mod tests {
         assert!(union.matches("org:acme", &[]));
         assert!(union.matches("org:beta", &["shared:finance".to_owned()]));
         assert!(!union.matches("org:beta", &["shared:legal".to_owned()]));
+    }
+
+    #[test]
+    fn intersects_ignores_scope_only() {
+        // The successor-match rule never reads `--scope-only`: a global
+        // document and a shared tag intersect the set either way.
+        let only = scoped(&["org:acme"], true);
+        assert!(only.intersects(GLOBAL_SCOPE, &[]));
+        assert!(only.intersects("org:acme", &[]));
+        assert!(!only.intersects("org:beta", &[]));
+        assert!(only.intersects("org:beta", &["ORG:Acme".to_owned()]));
+        assert!(scoped(&[], false).intersects("org:beta", &[]), "universal");
+        assert!(
+            !only.matches(GLOBAL_SCOPE, &[]),
+            "`matches` still applies scope_only"
+        );
     }
 
     #[test]

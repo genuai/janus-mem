@@ -332,7 +332,8 @@ impl Window {
             let Some(facts) = graph.endpoint(*successor).map(Endpoint::facts) else {
                 continue;
             };
-            if !scopes.matches(&facts.scope, &facts.shared_with) {
+            // `intersects`, not `matches`: a global successor always counts.
+            if !scopes.intersects(&facts.scope, &facts.shared_with) {
                 continue;
             }
             let Some(start) = facts.valid_from else {
@@ -405,7 +406,7 @@ impl EffectiveStatus {
             .map_or(&[][..], |node| &node.successors)
             .iter()
             .filter_map(|id| graph.endpoint(*id).map(Endpoint::facts))
-            .any(|facts| scopes.matches(&facts.scope, &facts.shared_with));
+            .any(|facts| scopes.intersects(&facts.scope, &facts.shared_with));
         Some(if superseded {
             Self::Superseded
         } else {
@@ -940,6 +941,37 @@ mod tests {
         );
         assert!(window.invalid);
         assert!(!window.covers_today(date((2025, 4, 1))));
+    }
+
+    #[test]
+    fn a_global_successor_counts_under_scope_only_too() {
+        // `--scope-only` narrows the result set (§6.12 rule 4); it does not
+        // change `Q`. A global successor always matches (§6.12 rule 7), so it
+        // closes A's window and makes A superseded even when the caller asked
+        // to see owned scopes only.
+        let edges = [edge(91, 92)];
+        let endpoints = [
+            Endpoint::Live(NodeFacts {
+                scope: "org:acme".to_owned(),
+                ..dated(91, "a/acme.md", (2020, 1, 1))
+            }),
+            Endpoint::Live(dated(92, "global.md", (2020, 6, 1))),
+        ];
+        let graph = Graph::build(&edges, endpoints, false);
+        let only = ScopeFilter::new(&["org:acme".to_owned()], true);
+        assert!(
+            !only.matches(GLOBAL_SCOPE, &[]),
+            "the result set is narrowed"
+        );
+
+        assert_eq!(
+            window_of(&graph, 91, &only).valid_to,
+            Some(date((2020, 6, 1)))
+        );
+        assert_eq!(
+            status_of(&graph, 91, &only),
+            Some(EffectiveStatus::Superseded)
+        );
     }
 
     #[test]
