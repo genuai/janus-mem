@@ -41,9 +41,10 @@ pub use lexical::{LexicalIndex, squash};
 ///
 /// Version 2 (M4 V-1) adds `DocMeta::body_hash` to the snapshot and the
 /// `vectors.f32` payload with its three manifest fields. Version 3 (M4B B-7)
-/// adds `DocMeta::date_source`. An older index is refused by `Expected::check`
-/// and rebuilt with one warning, never misread.
-pub const FORMAT_VERSION: u16 = 3;
+/// adds `DocMeta::date_source`. Version 4 (M5 P1) adds `Snapshot::path_history`,
+/// `Snapshot::identity` and `Snapshot::tombstones`. An older index is refused by
+/// `Expected::check` and rebuilt with one warning, never misread.
+pub const FORMAT_VERSION: u16 = 4;
 
 /// The compact persisted status (§3.2); the resolver's `Status` is reused.
 pub use crate::document::Status as StatusCode;
@@ -80,6 +81,89 @@ pub struct Snapshot {
     pub postings: Vec<Posting>,
     /// Mean chunk length in tokens.
     pub avgdl: f64,
+    /// Every path each `DocId` has occupied, including the paths of retired
+    /// ids (M5 §2.1). The alias map is derived from this, never stored.
+    pub path_history: BTreeMap<DocId, Vec<PathEntry>>,
+    /// Why each `DocId` has its value, and the match keys it answers to.
+    pub identity: BTreeMap<DocId, IdentityRecord>,
+    /// The ids this generation saw last and no longer sees, sorted by id.
+    pub tombstones: Vec<TombstoneMeta>,
+}
+
+/// One path a document has occupied (M5 §2.1). `path_history` is keyed by
+/// `DocId`, so a path survives a move the document no longer occupies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathEntry {
+    /// Vault-relative, `/`-separated (§8.7).
+    pub rel_path: String,
+    /// The calendar date of the build that first saw this path. Injected, never
+    /// the wall clock (§7.2).
+    pub first_seen: NaiveDate,
+    /// The calendar date of the build that last saw this path.
+    pub last_seen: NaiveDate,
+    /// True on the last entry of a `DocId` that no longer appears in the scan. A
+    /// path the document merely left is not a tombstone: the document is still
+    /// live, and its new path is the last entry.
+    pub tombstone: bool,
+}
+
+/// One identity key of one document. Every reachable rung is stored, because a
+/// second move is matched against a rung that no longer produces the id (case
+/// 1.14). `ContentHash` is a **match** key and never a derivation key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum MatchKey {
+    /// Rung 1: a declared `id`, used verbatim.
+    DeclaredId(String),
+    /// Rung 2: the whole-file hash, which proves a byte-identical move.
+    ContentHash(Blake3Hash),
+    /// Rung 3: `title + date`, namespaced by corpus and scope at encoding time.
+    TitleDate {
+        /// The effective title.
+        title: String,
+        /// The usable date.
+        date: NaiveDate,
+    },
+    /// Rung 4: `title + doc_version`, only when no usable date exists.
+    TitleVersion {
+        /// The effective title.
+        title: String,
+        /// The declared `doc_version`.
+        version: String,
+    },
+    /// Rung 5: the title alone, when it is unique.
+    Title(String),
+}
+
+/// Why a `DocId` has its value, and every match key it answers to (M5 §2.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityRecord {
+    /// The rung that produced the id (§6.4).
+    pub tier: crate::document::IdentityTier,
+    /// One key per match rung, in ladder order. Refreshed on every build for a
+    /// live document and kept unchanged for a retired one, so it can be matched
+    /// again if the document returns. Rung 6 stores no key: the path is the key.
+    pub keys: Vec<MatchKey>,
+}
+
+/// The last known facts about a document that no longer exists (M5 §2.1).
+///
+/// The row lets a retired successor close its predecessor's window (§3.6) and
+/// gives `lineage` and `ids` a title. Its path comes from `path_history`:
+/// a path is never stored twice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TombstoneMeta {
+    /// The id the document had.
+    pub id: DocId,
+    /// The title at that moment.
+    pub title: String,
+    /// The date at that moment.
+    pub date: Option<NaiveDate>,
+    /// The valid-time start at that moment (`effective_from ?? date`).
+    pub valid_from: Option<NaiveDate>,
+    /// The owning scope at that moment, so the scope rule still applies.
+    pub scope: String,
+    /// The retrieval tags at that moment, for the same reason.
+    pub shared_with: Vec<String>,
 }
 
 /// Persisted document metadata. Metadata is always rebuilt, never reused (§3.4).
