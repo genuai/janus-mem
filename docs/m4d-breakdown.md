@@ -80,12 +80,21 @@ None. No crate. No feature flag.
 ## 2. Data model
 
 ```rust
-// src/index/refresh.rs — the witness and the writer's convergence loop.
+// src/index/refresh.rs — the witness. Pure: it reads no file.
 pub struct Witness {
+    /// `index.bin`'s mtime, or `None` when the file is absent.
+    pub index_mtime: Option<SystemTime>,
     /// The newest document mtime seen by the walk.
     pub newest: SystemTime,
     /// Documents whose mtime is newer than `index.bin`.
     pub changed: usize,
+}
+
+impl Witness {
+    pub fn is_missing(&self) -> bool { self.index_mtime.is_none() }
+    pub fn is_stale(&self) -> bool {
+        self.index_mtime.is_some_and(|built| self.newest > built)
+    }
 }
 
 /// The corpus as one walk saw it. Two signatures are equal when every admitted
@@ -338,9 +347,11 @@ loop), `src/config.rs` (`[index] refresh`), `src/search/mod.rs` (the note), `tes
 
 1. `refresh::witness(index_mtime, files) -> Witness`: the newest mtime and the number changed.
 2. `refresh::Signature`: `(rel_path, size, mtime)` per admitted file, comparable for equality.
-3. `refresh::build_until_stable(...)`: walk → plan → publish → re-walk → compare, bounded at 3
-   passes (D-13). It replaces the bodies of `store::rebuild_plan` (`src/index/store.rs:1151`) and the
-   plan half of `cmd::run` (`src/index/cmd.rs:65`), so both writers obey one rule.
+3. `store::build_until_stable(...)`: walk → plan → publish → re-walk → compare, bounded at 3
+   passes (D-13). It lives in `store.rs` because it needs `publish_locked` and the held lock, and it
+   replaces the bodies of `store::rebuild_plan` (`src/index/store.rs:1151`) and the plan half of
+   `cmd::run` (`src/index/cmd.rs:65`), so both writers obey one rule. `refresh.rs` keeps the pure
+   parts: `witness`, `Signature`, and `plan_from_walk`.
 4. `[index] refresh = "auto" | "manual"`: parse, default `auto`, warn on an unknown value and use
    `auto`.
 5. A read computes the witness and prints `refresh: N document(s) changed` when stale. In this
