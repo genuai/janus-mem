@@ -14,7 +14,7 @@ use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
-use janus_mem::{chunk, ids, index, lineage, scan, search, vault};
+use janus_mem::{chunk, doctor, ids, index, lineage, scan, search, vault};
 use tracing_subscriber::EnvFilter;
 
 /// The directories a model may be read from, highest precedence first (V-25).
@@ -105,8 +105,8 @@ fn init_tracing() {
         .init();
 }
 
-fn run(cli: Cli) -> Result<(), JanusError> {
-    match cli.command {
+fn run(cli: Cli) -> Result<ExitCode, JanusError> {
+    let result: Result<(), JanusError> = match cli.command {
         // `init` creates a corpus, so it must *not* search for an existing one:
         // running it in a subdirectory of a vault should not silently adopt the
         // parent. It uses the M0 rule — explicit path, else the working
@@ -134,6 +134,16 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                 &SystemClock,
                 scan::Options { json, verbose },
             )
+        }
+
+        // A diagnostic reads the walk and the published generation. It takes
+        // no lock, builds nothing and writes nothing (M5 §3.10, M5-12).
+        Command::Doctor { json } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let config = Config::load(&root)?;
+            return doctor::run(&root, &config, &SystemClock, doctor::Options { json });
         }
 
         // Identity is a read like `scan`: it answers from the last published
@@ -340,7 +350,8 @@ fn run(cli: Cli) -> Result<(), JanusError> {
                 },
             )
         }
-    }
+    };
+    result.map(|()| ExitCode::SUCCESS)
 }
 
 fn main() -> ExitCode {
@@ -349,7 +360,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match run(cli) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err}");
             ExitCode::from(err.exit_code())

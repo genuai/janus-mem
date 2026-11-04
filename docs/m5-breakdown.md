@@ -802,13 +802,13 @@ vault with one unknown type.
 | # | input | expected |
 |---|---|---|
 | 10.1 | main fixture | errors ≥ 2, including `dangling_link` and `supersession_cycle`; exit 1 |
-| 10.2 | graph fixture, clean subset (the `bad/` directory removed in a temp copy) | exit 0, `ok: true`, warnings for unknown types only |
-| 10.3 | graph fixture as committed | one check per seeded defect, one line each; no duplicates |
+| 10.2 | graph fixture, clean subset (`bad/` and `scopes/acme-vs-beta.md` removed in a temp copy) | exit 0, `ok: true`, no checks |
+| 10.3 | graph fixture as committed | one check per seeded defect, one line each; no duplicates. Eight rows: five errors, three warnings |
 | 10.4 | a vault with no `.janus/` | exit 0, one `index_absent` warning, no `.janus/` created |
 | 10.5 | only an unknown type is wrong | exit 0, one warning |
 | 10.6 | two documents with the same title+date | exit 1, `duplicate_identity` names both paths |
 | 10.7 | `--json` twice on the same vault | byte-identical output |
-| 10.8 | `status-lies.md` | one `status_mismatch` warning, no error |
+| 10.8 | a vault holding `status-lies.md` and a later successor that declares `supersedes` back | one `status_mismatch` warning, no error, exit 0 |
 
 ### 3.11 Continuation hints (P6)
 
@@ -977,6 +977,10 @@ in the corpus, instead of by `1.0`.
 | M5-38 | `lineage` resolves its target through `Graph::by_path`, which matches a live or a retired endpoint, and `cycle_breaks` reports an ignored pair only when both endpoints are rows of the report | One lookup answers for both states, so a retired path renders without a second table. An unrelated cycle is another chain's note. |
 | M5-39 | `lineage` answers from `search::prepare` for a `PATH` and from `search::query` for `--topic`; it never loads or builds on its own | One loader, one read policy: a refresh the command triggers must publish the generation `search` would publish, or the two answers can drift (V-21 row 5). |
 | M5-40 | `Graph::by_path` prefers a live endpoint and answers for a retired one only when no live document holds the path | A path can be held twice: by the file on disk and by the tombstone whose last path it was (§2.1). The path names the live document, and the endpoints iterate in id order, so without the rule the answer depends on which id hashes lower. Two rules cannot disagree: `ids` already prefers the live document. |
+| M5-41 | Case 10.2's clean subset removes `scopes/acme-vs-beta.md` as well as `bad/` | That file is a seeded inert edge (`cross_scope_supersession`), so the old subset could not exit 0. The clean subset is every seeded defect removed, not one directory. |
+| M5-42 | `one_sided_supersession` reads the replaced side: a `superseded_by` declaration is one-sided when its target declares no `supersedes` back. A `supersedes` declaration is complete on its own | The successor's `supersedes` is the claim that creates the relation. The five-link chain declares every link that way and stays silent, while `bad/one-sided.md` names a target that declares nothing and is reported. |
+| M5-43 | Case 10.8 uses a temp vault with a later reciprocal successor, not the committed `status-lies.md` alone | The committed target is older than `status-lies.md`, so that document also has an invalid window. It cannot be the only finding, and the case needs a vault where the warning really is alone. |
+| M5-44 | `doctor` derives the scan half's identity without a basis | A published generation carries both paths forward and suppresses the duplicate note. The scan half is one walk, so it derives the current keys and reports a duplicate that still exists. |
 
 ## 5. Phases
 
@@ -1488,7 +1492,24 @@ derivation, then the eligibility gate and the flag.
 
 ### Phase 5 — `janus doctor`
 
-_(empty)_
+- **Two halves, two id sets.** Scan checks come from the walk; graph checks come
+  from the validated generation. The graph half resolves every path through the
+  snapshot's own endpoints, so a file added since the build cannot invent an
+  edge or hide one. `index_stale` says which build the graph checks describe.
+- **One read, no lock.** `doctor` calls `store::load` with `Policy::Refuse`, so a
+  missing or corrupt generation is `index_absent`, never a build. The scan half
+  runs alone in that case, and a scan error still exits 1.
+- **A duplicate survives a build.** Scan identity is derived without a basis
+  (M5-44). Carry-forward would adopt both paths and hide the note; the stateless
+  derivation keeps the shared key visible.
+- **One-sided means the replaced side.** A `superseded_by` needs the successor's
+  `supersedes` back (M5-42). The chain declares `supersedes` and is silent;
+  `bad/one-sided.md` and `bad/status-lies.md` are reported.
+- **Deviations.** Cases 10.2, 10.3 and 10.8 were recomputed against the committed
+  fixtures (M5-41, M5-43). The code table and the exit rule are unchanged.
+- **Not included.** `moves`, `suggest-links`, quarter dates, the undated decay,
+  and any repair or write. No golden moved, no dependency was added, and
+  `format_version` stays 5.
 
 ### Phase 6 — `janus moves` and continuation hints
 
