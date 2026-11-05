@@ -29,6 +29,7 @@
 //! * [`progress`] — the stderr progress printer for a long build (M4D).
 //! * [`search`] — `janus search` and `janus facts`: the M3 command surface.
 //! * [`score`] — authority, status gating, decay and scope: pure scoring (M3).
+//! * [`suggest`] — candidate pairs of unlinked similar documents (M5).
 //! * [`vault`] — corpus root discovery, the directory walk, path confinement,
 //!   frontmatter isolation, metadata resolution, and identity derivation.
 //! * [`scan`] — the `janus scan` command (discovery report so far).
@@ -61,5 +62,6 @@ pub mod progress;
 pub mod scan;
 pub mod score;
 pub mod search;
+pub mod suggest;
 pub mod tokenize;
 pub mod vault;
