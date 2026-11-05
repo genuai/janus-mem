@@ -92,6 +92,21 @@ pub enum Command {
         json: bool,
     },
 
+    /// Report unlinked pairs of similar documents (§3.12)
+    SuggestLinks {
+        /// Report pairs at or above this cosine: a number from 0 to 1
+        #[arg(long, value_name = "X")]
+        threshold: Option<String>,
+
+        /// Read without resolving or loading an embedding model
+        #[arg(long)]
+        no_embeddings: bool,
+
+        /// Emit one JSON object on stdout instead of the table
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Render the supersession chain that contains one document (§3.9)
     Lineage {
         /// The corpus path of the document whose chain to render

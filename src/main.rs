@@ -14,7 +14,7 @@ use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
-use janus_mem::{chunk, doctor, ids, index, lineage, moves, scan, search, vault};
+use janus_mem::{chunk, doctor, ids, index, lineage, moves, scan, search, suggest, vault};
 use tracing_subscriber::EnvFilter;
 
 /// The directories a model may be read from, highest precedence first (V-25).
@@ -165,6 +165,30 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             let since = since.as_deref().map(moves::parse_since).transpose()?;
             let config = Config::load(&root)?;
             moves::run(&root, &config, &SystemClock, moves::Options { json, since })
+        }
+
+        // Suggestions are a read: the pairs are scored from the published rows,
+        // so nothing is built, refreshed or written (M5 §3.12).
+        Command::SuggestLinks {
+            threshold,
+            no_embeddings,
+            json,
+        } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let threshold = threshold
+                .as_deref()
+                .map_or(Ok(suggest::DEFAULT_THRESHOLD), suggest::parse_threshold)?;
+            let config = Config::load(&root)?;
+            let (embedder, _reason) = read_embedder(&config, no_embeddings);
+            suggest::run(
+                &root,
+                &config,
+                &SystemClock,
+                embedder.as_deref(),
+                suggest::Options { threshold, json },
+            )
         }
 
         // The chain is a read like `search`: it refreshes, never builds under
