@@ -34,6 +34,20 @@ const GLOBAL_SCOPE: &str = "global";
 /// it appears in every stage: scope filtering, cycle breaking and reporting.
 type Pair = (DocId, DocId);
 
+/// The Jaccard index of two sets: `|∩| / |∪|`, and `0.0` when both are empty.
+///
+/// One helper, because the hint score compares chunk ids and tags with the same
+/// rule (§3.11). A `BTreeSet` is the input the snapshot builds, so the result
+/// never depends on hash iteration order.
+pub(crate) fn jaccard<T: Ord>(left: &BTreeSet<T>, right: &BTreeSet<T>) -> f64 {
+    let union = left.union(right).count();
+    if union == 0 {
+        return 0.0;
+    }
+    let shared = left.intersection(right).count();
+    shared as f64 / union as f64
+}
+
 /// The facts one endpoint of an edge carries, live or retired.
 ///
 /// The graph owns them, so one builder can serve every caller from the snapshot

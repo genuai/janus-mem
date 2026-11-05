@@ -379,6 +379,11 @@ pub struct Hint {
     pub id: DocId,
     /// The weighted score from §6.9. Never applied.
     pub confidence: f32,
+    /// The chunk, title, base-name and tag components, stored for `moves`.
+    pub chunk_jaccard: f32,
+    pub title_match: f32,
+    pub basename_match: f32,
+    pub tag_jaccard: f32,
 }
 
 // Added to `DocMeta`:
@@ -834,6 +839,12 @@ confidence = 0.50 · jaccard(chunk_ids)
   stored.
 - The hint is recomputed on every build from the basis. It never survives a basis it did not
   see.
+- The stored `Hint` keeps the four components beside the confidence. A tombstoned candidate
+  has no `DocMeta` row, so `moves` cannot recompute the arithmetic from the generation
+  (M5-45).
+- When the candidate retired before the basis, its chunk evidence is gone. The live
+  continuation then carries the hint the basis recorded, provided the candidate is still
+  tombstoned and the document still inherits its id (M5-47).
 
 `janus moves [--since DATE] [--json]` reports two lists:
 
@@ -850,7 +861,7 @@ writes and never builds.
 |---|---|---|
 | 11.1 | move a document and edit its body, title and date intact | `confirmed` row with `reason: "title_date"`; no hint |
 | 11.2 | move and change title and date; the new document has 10 chunks and the vanished one had 8, all 8 reappearing | `jaccard = 8/10 = 0.8`; stem equal, tags disjoint, titles differ → `0.40 + 0.00 + 0.15 + 0.00 = 0.55`; one hint |
-| 11.3 | both documents have 4 chunks, all 4 shared; titles equal, stems differ, tags disjoint | `jaccard = 1.0` → `0.50 + 0.20 + 0.00 + 0.00 = 0.70`; one hint |
+| 11.3 | both documents have 4 chunks, all 4 shared; titles equal, stems differ, tags disjoint; a second vanished document carries the same title, so rung 5 is ambiguous | `jaccard = 1.0` → `0.50 + 0.20 + 0.00 + 0.00 = 0.70`; one hint |
 | 11.4 | the new document has 2 chunks and both were already known; titles differ, stem equal | `jaccard = 2/10 = 0.2` → `0.10 + 0.15 = 0.25`, below the floor: no hint |
 | 11.5 | `--since` before every `last_seen` | every row |
 | 11.6 | `--since` after every `last_seen` | no rows |
@@ -981,6 +992,9 @@ in the corpus, instead of by `1.0`.
 | M5-42 | `one_sided_supersession` reads the replaced side: a `superseded_by` declaration is one-sided when its target declares no `supersedes` back. A `supersedes` declaration is complete on its own | The successor's `supersedes` is the claim that creates the relation. The five-link chain declares every link that way and stays silent, while `bad/one-sided.md` names a target that declares nothing and is reported. |
 | M5-43 | Case 10.8 uses a temp vault with a later reciprocal successor, not the committed `status-lies.md` alone | The committed document also has a one-sided warning, because its target declares nothing back. It cannot be the only finding, and the case needs a vault where the warning really is alone. |
 | M5-44 | `doctor` derives the scan half's identity without a basis | A published generation carries both paths forward and suppresses the duplicate note. The scan half is one walk, so it derives the current keys and reports a duplicate that still exists. |
+| M5-45 | A `Hint` stores its four score components beside the confidence | `moves` must report the arithmetic, and a tombstoned candidate has no `DocMeta` row to recompute it from. |
+| M5-46 | Case 11.3 adds a second vanished document with the same title | P1 rung 5 would otherwise carry the id by unique title, so the case could not produce a hint. The formula and the floor do not change. |
+| M5-47 | A hint is carried from the basis when its candidate retired before that basis | The candidate's chunk evidence is gone, and a rebuild must not erase an unchanged pair. The basis stays the only source: a hint never outlives the basis that recorded it. |
 
 ## 5. Phases
 
@@ -1524,7 +1538,15 @@ derivation, then the eligibility gate and the flag.
 
 ### Phase 6 — `janus moves` and continuation hints
 
-_(empty)_
+- `DocMeta.hint` stores a `Hint` with the id, the confidence and the four components.
+  `FORMAT_VERSION` is 6. M5-45 records why the components are stored.
+- Hints are computed from the basis, so `--rebuild` still computes them. A candidate that
+  retired before the basis has no chunk evidence, so its live continuation carries the
+  recorded hint. M5-47 records that rule.
+- Case 11.3 needed a second vanished document with the same title. Rung 5 would otherwise
+  carry the id, and no hint could appear. M5-46 records the correction.
+- `janus moves` reads `store::validated_snapshot`, never builds and never writes. The report
+  is byte-identical across two runs, and a run changes no vault or `.janus/` file.
 
 ### Phase 7 — `janus suggest-links`
 
