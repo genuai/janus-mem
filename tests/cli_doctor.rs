@@ -191,7 +191,7 @@ fn case_10_3_every_seeded_defect_gets_one_check() {
     //   bad/status-lies.md       same missing answer
     //   bad/status-lies.md       declared active, effective superseded
     // `bad/expired.md` is valid [2019-01-01, 2020-01-01), so it is expired but
-    // not invalid. Seven checks: three errors and three warnings.
+    // not invalid. Six checks: three errors and three warnings.
     let vault = graph_vault();
     index(vault.path());
     let (output, report) = doctor(vault.path());

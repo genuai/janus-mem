@@ -803,7 +803,7 @@ vault with one unknown type.
 |---|---|---|
 | 10.1 | main fixture | errors ≥ 2, including `dangling_link` and `supersession_cycle`; exit 1 |
 | 10.2 | graph fixture, clean subset (`bad/` and `scopes/acme-vs-beta.md` removed in a temp copy) | exit 0, `ok: true`, no checks |
-| 10.3 | graph fixture as committed | one check per seeded defect, one line each; no duplicates. Seven rows: three errors, three warnings |
+| 10.3 | graph fixture as committed | one check per seeded defect, one line each; no duplicates. Six rows: three errors, three warnings |
 | 10.4 | a vault with no `.janus/` | exit 0, one `index_absent` warning, no `.janus/` created |
 | 10.5 | only an unknown type is wrong | exit 0, one warning |
 | 10.6 | two documents with the same title+date | exit 1, `duplicate_identity` names both paths |
@@ -1512,7 +1512,7 @@ derivation, then the eligibility gate and the flag.
   valid and simply over, and the document keeps `effective_status: active`.
   `bad/status-lies.md` is dated before its successor, so its only defects are its
   status lie and its one-sided warning. `bad/invalid-window.md` is the only
-  inverted window. Case 10.3 is seven rows: three errors, three warnings.
+  inverted window. Case 10.3 is six rows: three errors, three warnings.
 - **Size and split.** Measured as one change, the phase is 567 logic lines, over
   the 420-line split threshold. It ships as two PRs at the seam of §5: part 1 is
   the report and scan half (357 logic, 115 test lines against `main`); part 2 is
