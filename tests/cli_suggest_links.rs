@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use janus_mem::index::embed::{Embedder as _, HashEmbedder};
+use janus_mem::suggest::NO_VECTORS;
 use serde_json::Value;
 
 /// The two word sets of the positive pair.
@@ -32,18 +33,25 @@ fn janus() -> Command {
     Command::cargo_bin("janus").expect("the janus binary must build for tests")
 }
 
-/// Writes a config and one Markdown file per entry into a temp vault.
+/// Writes a config with `corpus_id` and one Markdown file per entry into a temp vault.
 fn vault(docs: &[(&str, &str)]) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
-    fs::write(
-        dir.path().join("janus.toml"),
-        "index_dir = \".janus\"\ncorpus_id = \"suggest\"\n\n[embedding]\nmodel = \"hash-64\"\n",
-    )
-    .expect("write config");
+    write_config(dir.path(), "suggest");
     for (rel_path, text) in docs {
         write(dir.path(), rel_path, text);
     }
     dir
+}
+
+/// Writes the config, so a test can republish it under another corpus id.
+fn write_config(root: &Path, corpus_id: &str) {
+    fs::write(
+        root.join("janus.toml"),
+        format!(
+            "index_dir = \".janus\"\ncorpus_id = \"{corpus_id}\"\n\n[embedding]\nmodel = \"hash-64\"\n"
+        ),
+    )
+    .expect("write config");
 }
 
 /// Writes one document, creating its directories.
@@ -387,4 +395,69 @@ fn case_12_6_two_runs_are_byte_identical_and_write_nothing() {
         "two runs must print the same bytes"
     );
     assert_eq!(before, after, "a read changes no vault and no .janus file");
+}
+
+/// A generation without vectors is a degraded report that names the fix.
+///
+/// The embedder resolves: `hash-64` is in the config. The published generation
+/// has no rows because it was indexed with `--no-embeddings`, so the fix is a
+/// build, not a model download, and the line must say so.
+#[test]
+fn a_generation_without_vectors_degrades_and_names_vectors() {
+    let body_a = format!("{SHARED} leftonly");
+    let body_b = format!("{SHARED} rightword");
+    let vault = vault(&[
+        ("notes/pair-a.md", &doc("Pair topic", "", &body_a)),
+        ("notes/pair-b.md", &doc("Pair topic", "", &body_b)),
+    ]);
+    let output = run(vault.path(), &["index", "--no-embeddings"]);
+    assert!(
+        output.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // `suggest` asserts success, so this run also pins exit 0.
+    let report = suggest(vault.path(), &[]);
+    assert!(candidates(&report).is_empty(), "{report}");
+    assert_eq!(
+        report["degraded"],
+        serde_json::json!([NO_VECTORS]),
+        "the reason is the vectors, not the embedder: {report}"
+    );
+
+    let output = run(vault.path(), &["suggest-links"]);
+    assert!(
+        output.status.success(),
+        "a buildable generation is not an error"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr.lines().count(), 1, "one degraded line: {stderr}");
+    assert!(stderr.contains("no vectors"), "{stderr}");
+    assert!(output.stdout.is_empty(), "no rows on stdout");
+}
+
+/// A refused generation is an error, and it names the file that failed.
+///
+/// A `corpus_id` edit leaves a generation that describes another corpus. The
+/// index cannot answer, so the command exits 1 with the message
+/// `janus search --no-rebuild` gives, instead of reporting an empty list.
+#[test]
+fn a_refused_generation_exits_one_and_names_the_index() {
+    let vault = vault(&[("notes/only.md", &doc("Only", "", "text"))]);
+    index(vault.path());
+    write_config(vault.path(), "changed");
+
+    let output = run(vault.path(), &["suggest-links", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a refusal is not an empty report: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("index is unstable") && stderr.contains("index.bin"),
+        "the message names the failure: {stderr}"
+    );
 }

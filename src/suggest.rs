@@ -11,8 +11,9 @@
 //!
 //! A read, like `moves`: it loads the validated generation under
 //! [`Policy::Refuse`], so it takes no lock, builds nothing, refreshes nothing
-//! and writes nothing. Without vectors it prints one `degraded` line and an
-//! empty list, and it exits 0.
+//! and writes nothing. A generation that does not validate is the one error: it
+//! exits 1 with the message every other read command gives, because a wrong
+//! diagnosis at exit 0 is the one output a diagnostic must not produce.
 //!
 //! **Representative vector.** A document is one vector, the mean of its chunk
 //! rows, renormalised. The plan named "the best chunk of each pair", which is
@@ -39,8 +40,15 @@ use crate::scan::API_VERSION;
 /// The default cosine at or above which a pair is reported.
 pub const DEFAULT_THRESHOLD: f32 = 0.85;
 
-/// The one `degraded` line the command prints when it cannot score a pair.
+/// The `degraded` line when no embedder resolved.
 pub const NO_EMBEDDER: &str = "no embedder; no semantic candidates";
+
+/// The `degraded` line when an embedder resolved but the generation has no rows.
+///
+/// A different fact from [`NO_EMBEDDER`]: the model is there and the index needs
+/// building, so the fix is `janus index`, not a model download.
+pub const NO_VECTORS: &str =
+    "this generation has no vectors; run `janus index` with an embedder to score pairs";
 
 /// How `janus suggest-links` should be rendered.
 #[derive(Debug, Clone, Default)]
@@ -85,9 +93,10 @@ fn usage(message: String) -> JanusError {
 ///
 /// # Errors
 ///
-/// Propagates config and IO failures. A missing generation, a missing embedder
-/// and a missing payload are all [`NO_EMBEDDER`], never an error: the command
-/// reports what it can and stops.
+/// Propagates config and IO failures, and every refusal [`store::load`] reports:
+/// a cold mismatch is `JanusError::IndexNeedsFullBuild`, exactly as `search`
+/// reports it. A missing embedder and a generation without vectors are
+/// `degraded` lines, not errors: the command reports what it can and stops.
 pub fn run(
     root: &Path,
     config: &Config,
@@ -96,7 +105,7 @@ pub fn run(
     options: Options,
 ) -> Result<(), JanusError> {
     let (candidates, degraded) = if embedder.is_some() {
-        read(root, config, clock, options.threshold)
+        read(root, config, clock, options.threshold)?
     } else {
         (Vec::new(), vec![NO_EMBEDDER.to_owned()])
     };
@@ -135,13 +144,16 @@ struct Report {
     candidates: Vec<Candidate>,
 }
 
-/// Loads the generation and its rows, then scores. A failure is `degraded`.
+/// Loads the generation and its rows, then scores.
+///
+/// A refused generation is an error, not an empty report: the index cannot
+/// answer, and saying "no candidates" would hide a rebuildable failure.
 fn read(
     root: &Path,
     config: &Config,
     clock: &dyn Clock,
     threshold: f32,
-) -> (Vec<Candidate>, Vec<String>) {
+) -> Result<(Vec<Candidate>, Vec<String>), JanusError> {
     // The embedder is deliberately **not** handed to the load: no build can run
     // under [`Policy::Refuse`], and a generation whose rows came from another
     // model is still internally consistent, so its cosines are still meaningful.
@@ -150,15 +162,11 @@ fn read(
         want_vectors: true,
         ..LoadOptions::new(root, config, clock.today())
     };
-    let load = match store::load(&options) {
-        Ok(load) => load,
-        // A refusal is not a failure of this command: it has no pairs to score.
-        Err(err) => return (Vec::new(), vec![format!("{err}; {NO_EMBEDDER}")]),
-    };
+    let load = store::load(&options)?;
     let Some(rows) = load.vectors.as_ref() else {
-        return (Vec::new(), vec![NO_EMBEDDER.to_owned()]);
+        return Ok((Vec::new(), vec![NO_VECTORS.to_owned()]));
     };
-    (candidates(&load.snapshot, rows, threshold), Vec::new())
+    Ok((candidates(&load.snapshot, rows, threshold), Vec::new()))
 }
 
 /// One document's representative vector and the path it is reported under.

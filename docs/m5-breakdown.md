@@ -882,7 +882,11 @@ It reads the generation and the vectors. It never writes, never applies, and nev
   direction of the pair has an edge, effective or inert.
 - Output is one row per pair, sorted by `(cosine desc, path_a asc, path_b asc)`, with
   `path_a < path_b` in byte order.
-- Without vectors: exit 0, `degraded: ["no embedder; no semantic candidates"]`, empty list.
+- Without vectors: exit 0. The `degraded` line names the fact: no embedder resolved, or the
+  generation has no rows and needs `janus index`. The list is empty.
+- A generation that does not validate is the one error: exit 1, with the message every other
+  read command gives. A wrong diagnosis at exit 0 is the one output a diagnostic must not
+  produce (M5-51).
 - `--threshold` outside `[0, 1]` is a usage error.
 - Cost is `O(n²·d)` per pair set, plus `O(n·m·d)` to build the representatives. The command
   scans the document list once and is not on the query path. It is not optimised in v1; §13
@@ -1005,6 +1009,7 @@ in the corpus, instead of by `1.0`.
 | M5-48 | The P7 module is `src/suggest.rs`, not `src/links.rs` | A `links.rs` beside `link.rs` makes every later reader guess which one resolves a declaration. `link.rs` is build-time resolution; `suggest.rs` is a read-time score. |
 | M5-49 | A document's representative vector is the mean of its chunk rows, renormalised | §3.12's "best chunk of each pair" costs `O(n²·m²·d)`: about `7×10⁸` dot products on a 2 119-document vault. Mean pooling makes the pair loop `O(n²·d)`, which is the cost §3.12 assumed. |
 | M5-50 | Case 12.1 uses a temp pair whose cosine is `12/13`, not the committed `similar/` pair | The committed pair's cosine depends on bucket collisions across about eighty tokens, so no hand-derived value exists for it and the case would assert only what the code says. The temp pair shares 12 of 13 tokens in distinct buckets. |
+| M5-51 | `suggest-links` separates "no embedder" from "no vectors", and a refused generation exits 1 | One message for three causes sends a reader to the wrong fix. A missing model and a generation with no rows are different facts, and an index that does not validate cannot answer at all: an empty list at exit 0 would hide a rebuildable failure behind a correct-looking report. |
 
 ## 5. Phases
 
