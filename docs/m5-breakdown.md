@@ -875,16 +875,21 @@ Reports only: `moves` never writes and never builds.
 **Statement.** `suggest-links` lists semantic candidate pairs that no declared link joins.
 It reads the generation and the vectors. It never writes, never applies, and never prompts.
 
-- Candidate pairs are scored by cosine between the best chunk of each document pair. Because
-  vectors are normalised, cosine is a dot product.
+- Candidate pairs are scored by cosine between one **representative vector** per document.
+  The representative vector is the mean of the document's chunk rows, renormalised (M5-49).
+  Because vectors are normalised, cosine is a dot product.
 - A pair is reported when its cosine is `>= --threshold` (default `0.85`) and neither
   direction of the pair has an edge, effective or inert.
 - Output is one row per pair, sorted by `(cosine desc, path_a asc, path_b asc)`, with
   `path_a < path_b` in byte order.
 - Without vectors: exit 0, `degraded: ["no embedder; no semantic candidates"]`, empty list.
 - `--threshold` outside `[0, 1]` is a usage error.
-- Cost is `O(n²·d)` per pair set. The command scans the document list once and is not on the
-  query path. It is not optimised in v1; §13 does not cover it.
+- Cost is `O(n²·d)` per pair set, plus `O(n·m·d)` to build the representatives. The command
+  scans the document list once and is not on the query path. It is not optimised in v1; §13
+  does not cover it.
+- The rejected shape is "the best chunk of each document pair": it costs `O(n²·m²·d)`, which
+  on a 2 119-document, 27 234-chunk vault is about `7×10⁸` dot products, and the command
+  appears to hang. Mean pooling removes one `m` from the pair loop.
 
 **Acceptance cases.**
 
@@ -997,6 +1002,9 @@ in the corpus, instead of by `1.0`.
 | M5-45 | A `Hint` stores its four score components beside the confidence | `moves` must report the arithmetic, and a tombstoned candidate has no `DocMeta` row to recompute it from. |
 | M5-46 | Case 11.3 adds a second vanished document with the same title | P1 rung 5 would otherwise carry the id by unique title, so the case could not produce a hint. The formula and the floor do not change. |
 | M5-47 | A hint is carried from the basis when its candidate retired before that basis | The candidate's chunk evidence is gone, and a rebuild must not erase an unchanged pair. The basis stays the only source: a hint never outlives the basis that recorded it. |
+| M5-48 | The P7 module is `src/suggest.rs`, not `src/links.rs` | A `links.rs` beside `link.rs` makes every later reader guess which one resolves a declaration. `link.rs` is build-time resolution; `suggest.rs` is a read-time score. |
+| M5-49 | A document's representative vector is the mean of its chunk rows, renormalised | §3.12's "best chunk of each pair" costs `O(n²·m²·d)`: about `7×10⁸` dot products on a 2 119-document vault. Mean pooling makes the pair loop `O(n²·d)`, which is the cost §3.12 assumed. |
+| M5-50 | Case 12.1 uses a temp pair whose cosine is `12/13`, not the committed `similar/` pair | The committed pair's cosine depends on bucket collisions across about eighty tokens, so no hand-derived value exists for it and the case would assert only what the code says. The temp pair shares 12 of 13 tokens in distinct buckets. |
 
 ## 5. Phases
 
@@ -1209,13 +1217,19 @@ assert continuity instead of guessing.
 
 ### Phase 7 — `janus suggest-links`
 
-**Files.** new `src/links.rs`, `src/cli.rs`, `src/main.rs`, `tests/cli_suggest_links.rs`.
+**Files.** new `src/suggest.rs`, `src/cli.rs`, `src/main.rs`, `tests/cli_suggest_links.rs`.
 
-**Build.** Pairwise cosine over per-document best chunks, excluding existing pairs, sorted.
-Degraded path without vectors.
+The module is `suggest`, not `links`: a `src/links.rs` beside the existing `src/link.rs` is a
+reading trap, and the two do different jobs — `link.rs` resolves a declaration at build time,
+`suggest.rs` scores a pair at read time (M5-48).
+
+**Build.** Pairwise cosine over per-document representative vectors, excluding existing
+pairs, sorted. Degraded path without vectors.
 
 **Tests.** Cases 12.1–12.6. The similarity fixture must produce a hand-derivable cosine; use
-`HashEmbedder` through `[embedding] model = "hash-64"`, not a real model.
+`HashEmbedder` through `[embedding] model = "hash-64"`, not a real model. Case 12.1 uses a
+temp pair with a stated cosine, because the committed `similar/` pair has no hand-derived
+value (M5-50).
 
 **Handoff.** M6 may expose it as a read tool. Nothing writes.
 
