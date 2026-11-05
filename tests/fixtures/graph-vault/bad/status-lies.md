@@ -2,7 +2,7 @@
 title: Status lies
 type: decision
 status: active
-date: 2021-02-01
+date: 2020-01-01
 superseded_by: bad/one-sided-new.md
 ---
 # Status lies

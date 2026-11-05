@@ -1071,9 +1071,10 @@ mod tests {
 
     #[test]
     fn case_7_3_expiry_is_a_window_property_not_a_status() {
-        // `bad/expired.md` declares `status: active` and `effective_to:
-        // 2020-01-01`. It stays active and lies outside its window.
-        let mut expired = dated(121, "bad/expired.md", (2021, 3, 1));
+        // `bad/expired.md` declares `status: active`, starts on 2019-01-01 and
+        // ends on 2020-01-01. The window is valid and simply over. It stays
+        // active and lies outside its window.
+        let mut expired = dated(121, "bad/expired.md", (2019, 1, 1));
         expired.effective_to = Some(date((2020, 1, 1)));
         let graph = Graph::build(&[], [Endpoint::Live(expired)], false);
 
@@ -1082,7 +1083,9 @@ mod tests {
             status_of(&graph, 121, &scopes(&[])),
             Some(EffectiveStatus::Active)
         );
-        assert!(window.invalid);
+        assert!(!window.invalid, "the window is valid but over");
+        assert_eq!(window.valid_from, Some(date((2019, 1, 1))));
+        assert_eq!(window.valid_to, Some(date((2020, 1, 1))));
         assert!(!window.covers_today(date((2025, 4, 1))));
     }
 

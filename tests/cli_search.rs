@@ -1302,7 +1302,7 @@ fn case_7_1_a_document_declared_active_but_superseded_is_absent_from_current() {
     assert_eq!(lying["status"], "active", "the declared status is reported");
     assert_eq!(lying["effective_status"], "superseded", "{lying}");
 
-    // The committed fixture carries the same lie; its window is invalid, so
+    // The committed fixture carries the same lie; its window is closed, so
     // the status gate is what keeps it out of `current` there too.
     let vault = graph_ready();
     let report = search_json(
@@ -1328,8 +1328,9 @@ fn case_7_2_quiet_expiry_is_superseded_with_no_successor() {
 
 #[test]
 fn case_7_3_expiry_is_a_window_property() {
-    // `bad/expired.md`: active, `effective_to: 2020-01-01`, so it is outside
-    // its window and absent from `current`, and it is present in `history`.
+    // `bad/expired.md`: active, valid from 2019-01-01 to 2020-01-01, so its
+    // window is valid and simply over. It is absent from `current`, and it is
+    // present in `history` with the declared status unchanged.
     let vault = graph_ready();
     let current = search_json(
         vault.path(),
@@ -1346,13 +1347,13 @@ fn case_7_3_expiry_is_a_window_property() {
         expired["effective_status"], "active",
         "no expired status exists"
     );
-    assert_eq!(expired["valid_from"], "2021-03-01", "{expired}");
+    assert_eq!(expired["valid_from"], "2019-01-01", "{expired}");
     assert_eq!(expired["valid_to"], "2020-01-01", "{expired}");
 }
 
 #[test]
 fn case_7_4_include_superseded_admits_what_the_status_gate_hid() {
-    // The flag admits `status-lies.md`, whose window is invalid, so it also
+    // The flag admits `status-lies.md`, whose window is closed, so it also
     // proves that the flag cancels the window gate (M5-9).
     let vault = graph_ready();
     let flagged = search_json(

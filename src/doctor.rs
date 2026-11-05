@@ -1,18 +1,27 @@
 //! `janus doctor`: aggregate every visible problem into one report (M5 §3.10).
 //!
-//! This half reads the walk. A document note is a statement about the file, so
-//! `unknown_type`, `invalid_scope` and their siblings come from the parsed
-//! document. `duplicate_identity` is promoted from a note to an error, and
-//! `one_sided_supersession` compares the two declarations in the walk.
+//! The report has two halves, and they read two different generations:
+//!
+//! * **Scan checks** read the walk. A document note is a statement about the
+//!   file, so `unknown_type`, `invalid_scope` and their siblings come from the
+//!   parsed document. `duplicate_identity` is promoted from a note to an error,
+//!   and `one_sided_supersession` compares the two declarations in the walk.
+//! * **Graph checks** read the published generation. A link lives in the
+//!   snapshot, so cycles, dangling rows, inert edges and windows are resolved
+//!   from `Snapshot::edges`, `Snapshot::dangling_links` and the snapshot's own
+//!   metadata. The walk is never mixed into this half: a new file would change
+//!   the id set, and every edge would then be looked up in the wrong one.
 //!
 //! A diagnostic never mutates what it diagnoses. `doctor` takes no lock, builds
-//! nothing, refreshes nothing and writes nothing (M5-12). The graph half and the
-//! index freshness warnings arrive with the next change.
+//! nothing, refreshes nothing and writes nothing (M5-12). A missing generation
+//! is one `index_absent` warning, and a stale one is one `index_stale` warning
+//! followed by the graph checks of the last build.
 //!
 //! The exit code is 1 when the report holds at least one error, and 0 otherwise.
 //! A warning never changes it (M5-13).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::process::ExitCode;
@@ -20,10 +29,16 @@ use std::process::ExitCode;
 use serde::Serialize;
 
 use crate::clock::Clock;
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::document::{DocNote, Document};
 use crate::error::JanusError;
+use crate::graph::{EffectiveStatus, Graph, Window};
+use crate::id::DocId;
+use crate::index::refresh::Witness;
+use crate::index::store::{self, LoadOptions, Policy};
+use crate::index::{DanglingReason, Snapshot};
 use crate::scan::API_VERSION;
+use crate::score::ScopeFilter;
 use crate::vault::{self, WalkOptions, identity, resolve};
 
 /// The severity of a report check. A warning never changes the exit code.
@@ -47,7 +62,7 @@ pub struct Options {
 pub fn run(
     root: &Path,
     config: &Config,
-    _clock: &dyn Clock,
+    clock: &dyn Clock,
     options: Options,
 ) -> Result<ExitCode, JanusError> {
     let walk = vault::walk(root, config, WalkOptions::default())?;
@@ -58,6 +73,27 @@ pub fn run(
     identity::derive_identity(&mut documents, None, config);
 
     let mut checks = scan_checks(&documents, config);
+    match generation(root, config, clock, &walk.files) {
+        Some(found) => {
+            checks.extend(graph_checks(&found.snapshot, config));
+            if found.stale {
+                checks.push(Check::new(
+                    "index_stale",
+                    WARNING,
+                    index_label(config, Some(store::MANIFEST_FILE)),
+                    "",
+                    "the corpus changed after this generation was built; graph checks describe the last build",
+                ));
+            }
+        }
+        None => checks.push(Check::new(
+            "index_absent",
+            WARNING,
+            index_label(config, None),
+            "",
+            "no validated generation; run `janus index` to enable the graph checks",
+        )),
+    }
 
     checks.sort_by(|left, right| {
         (left.code, left.path.as_str(), left.target.as_str()).cmp(&(
@@ -306,6 +342,160 @@ fn local_link<'a>(text: &'a str, corpus_id: &str) -> Option<&'a str> {
         return None;
     }
     Some(text)
+}
+
+// ─────────────────────────────── graph half ───────────────────────────────
+
+/// The published generation, and whether the corpus has moved on from it.
+struct Generation {
+    snapshot: Snapshot,
+    stale: bool,
+}
+
+/// Reads the validated generation without a lock, a build or a refresh.
+fn generation(
+    root: &Path,
+    config: &Config,
+    clock: &dyn Clock,
+    files: &[vault::DiscoveredFile],
+) -> Option<Generation> {
+    let load = store::load(&LoadOptions {
+        policy: Policy::Refuse,
+        ..LoadOptions::new(root, config, clock.today())
+    })
+    .ok()?;
+    let dir = config::resolve_index_dir(root, &config.index_dir);
+    // The mtime is only the pre-M4D fallback input. A manifest with a digest
+    // compares digests, and the file is not opened for its timestamp.
+    let index_mtime = fs::metadata(dir.join(store::INDEX_FILE))
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    let stale = Witness::of(files, &load.manifest, index_mtime).stale;
+    Some(Generation {
+        snapshot: load.snapshot,
+        stale,
+    })
+}
+
+/// Every check that reads the published generation.
+fn graph_checks(snapshot: &Snapshot, config: &Config) -> Vec<Check> {
+    let graph = Graph::for_snapshot(snapshot, config);
+    let scopes = ScopeFilter::new(&[], false);
+    let mut checks = Vec::new();
+
+    for &(from, to) in graph.ignored() {
+        checks.push(Check::new(
+            "supersession_cycle",
+            ERROR,
+            path_of(&graph, from),
+            path_of(&graph, to),
+            format!(
+                "the cycle breaker ignored this edge to {}",
+                path_of(&graph, to)
+            ),
+        ));
+    }
+
+    for &(from, to) in graph.inert() {
+        checks.push(Check::new(
+            "cross_scope_supersession",
+            ERROR,
+            path_of(&graph, from),
+            path_of(&graph, to),
+            format!(
+                "the edge to {} is inert: the two scope sets do not intersect",
+                path_of(&graph, to)
+            ),
+        ));
+    }
+
+    for (id, window) in graph.windows(&scopes) {
+        if window.invalid {
+            checks.push(invalid_window_check(&graph, id, window));
+        }
+    }
+
+    let statuses = graph.effective_statuses(&scopes);
+    for document in &snapshot.docs {
+        let Some(effective) = statuses.get(&document.id) else {
+            continue;
+        };
+        let declared = EffectiveStatus::from(document.status);
+        if *effective == declared {
+            continue;
+        }
+        checks.push(Check::new(
+            "status_mismatch",
+            WARNING,
+            text(snapshot, document.rel_path),
+            document.id.to_hex(),
+            format!(
+                "declared `{}`, effective `{}`",
+                declared.as_str(),
+                effective.as_str()
+            ),
+        ));
+    }
+
+    for link in &snapshot.dangling_links {
+        let (code, message) = match link.reason {
+            DanglingReason::NotFound => (
+                "dangling_link",
+                format!("a link target does not resolve: {}", link.target),
+            ),
+            DanglingReason::OtherCorpus => (
+                "cross_corpus_link_unsupported",
+                format!("a link names another corpus: {}", link.target),
+            ),
+        };
+        checks.push(Check::new(
+            code,
+            ERROR,
+            path_of(&graph, link.from),
+            link.target.clone(),
+            message,
+        ));
+    }
+
+    checks
+}
+
+/// One `invalid_validity` row for an empty window.
+fn invalid_window_check(graph: &Graph, id: DocId, window: Window) -> Check {
+    let from = window
+        .valid_from
+        .map_or_else(|| "none".to_owned(), |date| date.to_string());
+    let to = window
+        .valid_to
+        .map_or_else(|| "none".to_owned(), |date| date.to_string());
+    Check::new(
+        "invalid_validity",
+        ERROR,
+        path_of(graph, id),
+        format!("{from}/{to}"),
+        format!("the window is empty: valid_from {from} is on or after valid_to {to}"),
+    )
+}
+
+/// A node's vault-relative path, or the empty path when the graph holds no row.
+fn path_of(graph: &Graph, id: DocId) -> String {
+    graph
+        .endpoint(id)
+        .map_or_else(String::new, |endpoint| endpoint.facts().rel_path.clone())
+}
+
+/// One interned string from the snapshot's pool.
+fn text(snapshot: &Snapshot, id: crate::index::StringId) -> String {
+    snapshot.strings.get(id).unwrap_or_default().to_owned()
+}
+
+/// The report path of the index directory, or one file inside it.
+fn index_label(config: &Config, file: Option<&str>) -> String {
+    let dir = config.index_dir.to_string_lossy().replace('\\', "/");
+    match file {
+        Some(file) => format!("{dir}/{file}"),
+        None => dir,
+    }
 }
 
 // ───────────────────────────────── human ───────────────────────────────────
