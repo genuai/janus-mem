@@ -81,6 +81,17 @@ pub enum Command {
         json: bool,
     },
 
+    /// Report confirmed path changes and display-only continuation hints
+    Moves {
+        /// Keep rows whose last-seen date is on or after this date: YYYY-MM-DD, YYYY-MM or YYYY
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+
+        /// Emit one JSON object on stdout instead of the table
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Render the supersession chain that contains one document (§3.9)
     Lineage {
         /// The corpus path of the document whose chain to render

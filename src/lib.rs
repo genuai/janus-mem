@@ -25,6 +25,7 @@
 //! * [`index`] — the in-memory lexical index and BM25 (M3).
 //! * [`lineage`] — `janus lineage`: the supersession chain of one document (M5).
 //! * [`link`] — build-time resolution of declared supersession links (M5).
+//! * [`moves`] — `janus moves`: confirmed path changes and continuation hints (M5).
 //! * [`progress`] — the stderr progress printer for a long build (M4D).
 //! * [`search`] — `janus search` and `janus facts`: the M3 command surface.
 //! * [`score`] — authority, status gating, decay and scope: pure scoring (M3).
@@ -55,6 +56,7 @@ pub mod ids;
 pub mod index;
 pub mod lineage;
 pub mod link;
+pub mod moves;
 pub mod progress;
 pub mod scan;
 pub mod score;
