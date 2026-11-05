@@ -14,7 +14,7 @@ use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
-use janus_mem::{chunk, doctor, ids, index, lineage, scan, search, vault};
+use janus_mem::{chunk, doctor, ids, index, lineage, moves, scan, search, vault};
 use tracing_subscriber::EnvFilter;
 
 /// The directories a model may be read from, highest precedence first (V-25).
@@ -154,6 +154,17 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
 
             let config = Config::load(&root)?;
             ids::run(&root, &config, &SystemClock, ids::Options { json, paths })
+        }
+
+        // Moves are a read like `ids`: the published generation already holds
+        // the path history and the hints, so nothing is built or refreshed.
+        Command::Moves { since, json } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let since = since.as_deref().map(moves::parse_since).transpose()?;
+            let config = Config::load(&root)?;
+            moves::run(&root, &config, &SystemClock, moves::Options { json, since })
         }
 
         // The chain is a read like `search`: it refreshes, never builds under

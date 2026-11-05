@@ -852,8 +852,10 @@ confidence = 0.50 · jaccard(chunk_ids)
   `last_seen`, and `reason` (the `IdentityTier` that matched, or `unknown` for a tombstone).
 - `hints`: a `Hint` with both paths, the four components and the confidence.
 
-`--since` keeps rows whose `last_seen` is on or after the date. Reports only: `moves` never
-writes and never builds.
+`--since` keeps rows whose `first_seen` is on or after the date. `first_seen` is the build
+that first saw the new path; `last_seen` is the last build that saw it. Filtering on
+`last_seen` would never narrow, because every build refreshes it. Both dates stay in the row.
+Reports only: `moves` never writes and never builds.
 
 **Acceptance cases.**
 
@@ -863,8 +865,8 @@ writes and never builds.
 | 11.2 | move and change title and date; the new document has 10 chunks and the vanished one had 8, all 8 reappearing | `jaccard = 8/10 = 0.8`; stem equal, tags disjoint, titles differ → `0.40 + 0.00 + 0.15 + 0.00 = 0.55`; one hint |
 | 11.3 | both documents have 4 chunks, all 4 shared; titles equal, stems differ, tags disjoint; a second vanished document carries the same title, so rung 5 is ambiguous | `jaccard = 1.0` → `0.50 + 0.20 + 0.00 + 0.00 = 0.70`; one hint |
 | 11.4 | the new document has 2 chunks and both were already known; titles differ, stem equal | `jaccard = 2/10 = 0.2` → `0.10 + 0.15 = 0.25`, below the floor: no hint |
-| 11.5 | `--since` before every `last_seen` | every row |
-| 11.6 | `--since` after every `last_seen` | no rows |
+| 11.5 | `--since` before every `first_seen` | every row |
+| 11.6 | `--since` after every `first_seen` | no rows |
 | 11.7 | run `moves` twice | byte-identical output; vault file hashes unchanged |
 | 11.8 | no vault file has an `id` | hints still appear |
 
@@ -962,7 +964,7 @@ in the corpus, instead of by `1.0`.
 | M5-12 | `doctor` scans and never builds | A diagnostic must not mutate the thing it diagnoses. A stale index is a warning, not a reason to write. |
 | M5-13 | `doctor` warnings never set a non-zero exit | M8's CI gate must survive one unknown type. |
 | M5-14 | `duplicate_identity` is promoted from note to error | It is the one condition that can make an answer wrong rather than merely sorted oddly. |
-| M5-15 | Hints are recomputed from the basis on every build | A hint that outlives its evidence is a guess wearing a fact's clothes. |
+| M5-15 | Hints are recomputed from the basis on every build; a carried hint is a stored annotation, refreshed whenever the candidate still has evidence and never invented | A hint that outlives a basis it did not see is a guess wearing a fact's clothes. The carried case exists because a retired candidate has no chunk evidence left (M5-47). |
 | M5-16 | Quarter dates append two `DateSource` variants; no format bump | bincode encodes the variant index, so appending keeps every existing value valid. |
 | M5-17 | The undated decay median is corpus-wide and filter-independent | A median that moved with `--types` would make one filter change another document's score. |
 | M5-18 | Graph cases live in a new fixture vault | Adding five linked documents to the main fixture moves three goldens and `FIXTURE_DOCUMENTS`. A second vault keeps the M1–M4 goldens as evidence that M5 changed nothing. |
