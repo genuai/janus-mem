@@ -279,9 +279,10 @@ fn case_11_4_two_shared_chunks_of_ten_score_below_the_floor() {
 }
 
 #[test]
-fn case_11_5_a_since_before_every_last_seen_keeps_every_row() {
-    // Case 11.5. One confirmed move and one hinted move, both stamped today.
-    // `2000-01-01` precedes every `last_seen`, so both lists survive.
+fn case_11_5_a_since_before_every_first_seen_keeps_every_row() {
+    // Case 11.5. One confirmed move and one hinted move, both first seen today.
+    // `2000-01-01` precedes every `first_seen`, so both lists survive. The unit
+    // test in `src/moves.rs` covers `first_seen` and `last_seen` disagreeing.
     let (vault, root) = two_moves();
     let report = moves(&root, &["--since", "2000-01-01"]);
     assert_eq!(confirmed(&report).len(), 1, "{report}");
@@ -290,8 +291,8 @@ fn case_11_5_a_since_before_every_last_seen_keeps_every_row() {
 }
 
 #[test]
-fn case_11_6_a_since_after_every_last_seen_keeps_no_row() {
-    // Case 11.6. `2999-12-31` follows every `last_seen`, so both lists are empty.
+fn case_11_6_a_since_after_every_first_seen_keeps_no_row() {
+    // Case 11.6. `2999-12-31` follows every `first_seen`, so both lists are empty.
     let (vault, root) = two_moves();
     let report = moves(&root, &["--since", "2999-12-31"]);
     assert!(confirmed(&report).is_empty(), "{report}");

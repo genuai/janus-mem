@@ -30,7 +30,7 @@ use crate::scan::API_VERSION;
 pub struct Options {
     /// Emit one JSON object on stdout instead of the table.
     pub json: bool,
-    /// Keep rows whose `last_seen` is on or after this date.
+    /// Keep rows whose `first_seen` is on or after this date.
     pub since: Option<NaiveDate>,
 }
 
@@ -99,7 +99,7 @@ struct Report {
     api: u32,
     /// Corpus root, absolute.
     vault: String,
-    /// Confirmed path changes, sorted by `(last_seen, id, to)`.
+    /// Confirmed path changes, sorted by `(first_seen, id, to)`.
     confirmed: Vec<MoveRow>,
     /// Continuation hints, sorted by `(to, from)`.
     hints: Vec<HintRow>,
@@ -143,7 +143,9 @@ struct HintRow {
     tag_jaccard: f32,
     /// The weighted score. Never applied.
     confidence: f32,
-    /// The last day the new path was seen; the `--since` key.
+    /// The day the new path was first seen; the `--since` key.
+    first_seen: NaiveDate,
+    /// The last day the new path was seen.
     last_seen: NaiveDate,
 }
 
@@ -162,7 +164,7 @@ fn rows(snapshot: &Snapshot, since: Option<NaiveDate>) -> (Vec<MoveRow>, Vec<Hin
         };
         for pair in entries.windows(2) {
             let (from, to) = (&pair[0], &pair[1]);
-            if from.rel_path == to.rel_path || since.is_some_and(|since| to.last_seen < since) {
+            if from.rel_path == to.rel_path || since.is_some_and(|since| to.first_seen < since) {
                 continue;
             }
             confirmed.push(MoveRow {
@@ -176,8 +178,8 @@ fn rows(snapshot: &Snapshot, since: Option<NaiveDate>) -> (Vec<MoveRow>, Vec<Hin
         }
     }
     confirmed.sort_by(|left, right| {
-        left.last_seen
-            .cmp(&right.last_seen)
+        left.first_seen
+            .cmp(&right.first_seen)
             .then_with(|| left.id.cmp(&right.id))
             .then_with(|| left.to.cmp(&right.to))
     });
@@ -201,7 +203,7 @@ fn rows(snapshot: &Snapshot, since: Option<NaiveDate>) -> (Vec<MoveRow>, Vec<Hin
         else {
             continue;
         };
-        if since.is_some_and(|since| to.last_seen < since) {
+        if since.is_some_and(|since| to.first_seen < since) {
             continue;
         }
         hints.push(HintRow {
@@ -214,6 +216,7 @@ fn rows(snapshot: &Snapshot, since: Option<NaiveDate>) -> (Vec<MoveRow>, Vec<Hin
             basename_match: hint.basename_match,
             tag_jaccard: hint.tag_jaccard,
             confidence: hint.confidence,
+            first_seen: to.first_seen,
             last_seen: to.last_seen,
         });
     }
@@ -242,5 +245,72 @@ fn write_human(out: &mut impl io::Write, confirmed: &[MoveRow], hints: &[HintRow
             "hint  {} -> {}  {:.2}  {}",
             row.from, row.to, row.confidence, row.id
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{LexicalIndex, PathEntry};
+    use crate::tokenize::Tokenizer;
+    use std::collections::BTreeMap;
+
+    fn day(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).expect("valid date")
+    }
+
+    /// One id with an old path and a new path. The new path was first seen on
+    /// `first_seen` and last seen on `last_seen`, as a later build would stamp.
+    fn snapshot_with_move(first_seen: NaiveDate, last_seen: NaiveDate) -> Snapshot {
+        let index = LexicalIndex::build(&[]);
+        let mut snapshot = Snapshot::from_index(
+            &index,
+            "moves".to_owned(),
+            Tokenizer::new().fingerprint(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let id = DocId::from_match_key(b"moved");
+        snapshot.path_history = BTreeMap::from([(
+            id,
+            vec![
+                PathEntry {
+                    rel_path: "notes/old.md".to_owned(),
+                    first_seen: day(2025, 12, 1),
+                    last_seen: day(2025, 12, 31),
+                    tombstone: false,
+                },
+                PathEntry {
+                    rel_path: "notes/new.md".to_owned(),
+                    first_seen,
+                    last_seen,
+                    tombstone: false,
+                },
+            ],
+        )]);
+        snapshot
+    }
+
+    #[test]
+    fn since_filters_on_first_seen_not_the_last_build() {
+        // The move happened on 2026-01-01. `last_seen` is 2026-03-01 because a
+        // later build refreshed the current path. A filter of 2026-02-01 must
+        // still exclude the move; filtering on `last_seen` would keep it.
+        let snapshot = snapshot_with_move(day(2026, 1, 1), day(2026, 3, 1));
+
+        let (filtered, _) = rows(&snapshot, Some(day(2026, 2, 1)));
+        assert!(
+            filtered.is_empty(),
+            "the move predates the filter: {filtered:?}"
+        );
+
+        let (kept, _) = rows(&snapshot, Some(day(2025, 12, 31)));
+        assert_eq!(
+            kept.len(),
+            1,
+            "the move is on or after the filter: {kept:?}"
+        );
+        assert_eq!(kept[0].first_seen, day(2026, 1, 1));
+        assert_eq!(kept[0].last_seen, day(2026, 3, 1));
     }
 }
