@@ -186,19 +186,18 @@ fn case_10_3_every_seeded_defect_gets_one_check() {
     // Hand-derived from the committed graph fixture:
     //   scopes/beta-claim.md     replaced by acme-vs-beta across disjoint scopes
     //   bad/dangling.md          supersedes bad/never-written.md
-    //   bad/expired.md           2021-03-01 .. 2020-01-01 (declared end)
     //   bad/invalid-window.md    2021-01-01 .. 2020-01-01 (declared end)
-    //   bad/status-lies.md       2021-02-01 .. 2020-11-01 (older successor)
     //   bad/one-sided.md         superseded_by the target, no answer back
     //   bad/status-lies.md       same missing answer
     //   bad/status-lies.md       declared active, effective superseded
-    // Eight checks: five errors and three warnings, no duplicate row.
+    // `bad/expired.md` is valid [2019-01-01, 2020-01-01), so it is expired but
+    // not invalid. Seven checks: three errors and three warnings.
     let vault = graph_vault();
     index(vault.path());
     let (output, report) = doctor(vault.path());
 
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(report["summary"]["errors"], 5, "{report}");
+    assert_eq!(report["summary"]["errors"], 3, "{report}");
     assert_eq!(report["summary"]["warnings"], 3, "{report}");
     assert_eq!(
         code_paths(&report),
@@ -208,14 +207,9 @@ fn case_10_3_every_seeded_defect_gets_one_check() {
                 "scopes/beta-claim.md".to_owned()
             ),
             ("dangling_link".to_owned(), "bad/dangling.md".to_owned()),
-            ("invalid_validity".to_owned(), "bad/expired.md".to_owned()),
             (
                 "invalid_validity".to_owned(),
                 "bad/invalid-window.md".to_owned()
-            ),
-            (
-                "invalid_validity".to_owned(),
-                "bad/status-lies.md".to_owned()
             ),
             (
                 "one_sided_supersession".to_owned(),
@@ -359,10 +353,11 @@ fn case_10_7_two_runs_are_byte_identical_and_write_nothing() {
 
 #[test]
 fn case_10_8_status_lies_is_one_warning_and_exit_zero_when_alone() {
-    // The committed `status-lies.md` also has an older successor, so it has an
-    // invalid window too. This vault keeps the same lie and gives the target a
-    // later date and a reciprocal `supersedes` (M5-42, M5-43): declared active,
-    // effective superseded, so the only finding is the status warning.
+    // The committed `status-lies.md` also has a one-sided warning, so it is
+    // never the only finding. This vault keeps the same lie and gives the
+    // target a later date and a reciprocal `supersedes` (M5-42, M5-43):
+    // declared active, effective superseded, so the only finding is the status
+    // warning.
     let vault = vault(&[
         (
             "bad/status-lies.md",
