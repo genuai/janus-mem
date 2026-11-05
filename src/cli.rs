@@ -63,6 +63,13 @@ pub enum Command {
         verbose: bool,
     },
 
+    /// Aggregate every visible corpus problem into one report (§3.10)
+    Doctor {
+        /// Emit one JSON object on stdout instead of one line per check
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Report each document's id, the rung behind it, and its match keys
     Ids {
         /// Restrict the report to these corpus paths
