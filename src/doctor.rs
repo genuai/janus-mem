@@ -4,8 +4,10 @@
 //!
 //! * **Scan checks** read the walk. A document note is a statement about the
 //!   file, so `unknown_type`, `invalid_scope` and their siblings come from the
-//!   parsed document. `duplicate_identity` is promoted from a note to an error,
-//!   and `one_sided_supersession` compares the two declarations in the walk.
+//!   parsed document. `duplicate_identity` is a warning: an ambiguous key falls
+//!   through to `rel_path`, so it costs move continuity and never correctness
+//!   (M5-57), and `one_sided_supersession` compares the two declarations in the
+//!   walk.
 //! * **Graph checks** read the published generation. A link lives in the
 //!   snapshot, so cycles, dangling rows, inert edges and windows are resolved
 //!   from `Snapshot::edges`, `Snapshot::dangling_links` and the snapshot's own
@@ -259,7 +261,7 @@ fn duplicate_checks(documents: &[Document]) -> Vec<Check> {
             } else {
                 format!("identity key `{key}` is shared by {}", paths.join(", "))
             };
-            Check::new("duplicate_identity", ERROR, paths[0], key, message)
+            Check::new("duplicate_identity", WARNING, paths[0], key, message)
         })
         .collect()
 }
