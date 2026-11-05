@@ -44,9 +44,9 @@ pub use lexical::{LexicalIndex, squash};
 /// adds `DocMeta::date_source`. Version 4 (M5 P1) adds `Snapshot::path_history`,
 /// `Snapshot::identity` and `Snapshot::tombstones`. Version 5 (M5 P2) adds
 /// `Snapshot::edges`, `Snapshot::dangling_links` and `DocMeta::effective_to`.
-/// An older index is refused by `Expected::check` and rebuilt with one warning,
-/// never misread.
-pub const FORMAT_VERSION: u16 = 5;
+/// Version 6 (M5 P6) adds `DocMeta::hint`. An older index is refused by
+/// `Expected::check` and rebuilt with one warning, never misread.
+pub const FORMAT_VERSION: u16 = 6;
 
 /// The compact persisted status (§3.2); the resolver's `Status` is reused.
 pub use crate::document::Status as StatusCode;
@@ -219,6 +219,27 @@ pub struct TombstoneMeta {
     pub shared_with: Vec<String>,
 }
 
+/// A display-only guess that a new document continues a vanished one (M5 §3.11).
+///
+/// The four components are stored beside the confidence so `janus moves` can
+/// show the arithmetic. A tombstoned candidate has no `DocMeta` row, so the
+/// reader cannot recompute them from the generation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Hint {
+    /// The vanished document this one probably continues.
+    pub id: DocId,
+    /// The weighted score. Never applied to anything.
+    pub confidence: f32,
+    /// `jaccard` of the two chunk-id sets, a weight of `0.50`.
+    pub chunk_jaccard: f32,
+    /// `1.0` when the normalised titles are equal, a weight of `0.20`.
+    pub title_match: f32,
+    /// `1.0` when the date-stripped file stems are equal, a weight of `0.15`.
+    pub basename_match: f32,
+    /// `jaccard` of `tags ∪ shared_with`, a weight of `0.15`.
+    pub tag_jaccard: f32,
+}
+
 /// Persisted document metadata. Metadata is always rebuilt, never reused (§3.4).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DocMeta {
@@ -261,6 +282,8 @@ pub struct DocMeta {
     pub lex_key: [u8; 32],
     /// Half-open range of this document's chunk occurrences.
     pub chunk_range: (u32, u32),
+    /// The best display-only continuation guess for this build, if any (M5 §3.11).
+    pub hint: Option<Hint>,
 }
 
 /// Persisted chunk occurrence metadata (§2, §3.4).

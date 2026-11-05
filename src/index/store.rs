@@ -1604,6 +1604,7 @@ mod tests {
             body_hash: Blake3Hash::of_bytes(b"body"),
             lex_key: [0; 32],
             chunk_range: (0, 2),
+            hint: None,
         };
         let chunks = vec![
             ChunkMeta {
@@ -1772,7 +1773,7 @@ mod tests {
         cases.push((
             patched,
             MismatchField::FormatVersion,
-            "format_version 6 != 5",
+            "format_version 7 != 6",
         ));
 
         let mut patched = manifest.clone();
@@ -1898,6 +1899,7 @@ mod tests {
                 body_hash: Blake3Hash::of_bytes(b"body"),
                 lex_key: [0; 32],
                 chunk_range: (0, index.len() as u32),
+                hint: None,
             }];
             let chunks_meta = (0..index.len())
                 .map(|chunk| ChunkMeta {

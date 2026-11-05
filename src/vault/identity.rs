@@ -765,6 +765,7 @@ mod tests {
                 body_hash: document.content_hash,
                 lex_key: [0; 32],
                 chunk_range: (0, 0),
+                hint: None,
             });
         }
         let index = LexicalIndex::from_parts(pool, Vec::new(), Vec::new(), Vec::new(), 0.0);

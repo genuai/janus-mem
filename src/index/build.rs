@@ -17,17 +17,19 @@ use chrono::NaiveDate;
 use crate::chunk::{Chunk, chunk_body};
 use crate::config::Config;
 use crate::document::Document;
+use crate::graph::jaccard;
 use crate::id::{Blake3Hash, ChunkId, DocId};
 use crate::link;
 use crate::tokenize::{Stemmer, Tokenizer, TokenizerFingerprint, Tokens};
 use crate::vault::identity;
+use crate::vault::resolve::strip_leading_date;
 
 use super::embed::{Embedder, EmbedderId};
 use super::store::{Corrupt, Manifest, Payloads, VectorSet};
 use super::vectors::{Vectors, normalize};
 use super::{
-    ChunkMeta, ChunkingFingerprint, DocMeta, LexicalIndex, Posting, Snapshot, StringId, StringPool,
-    TermMeta,
+    ChunkMeta, ChunkingFingerprint, DocMeta, Hint, LexicalIndex, Posting, Snapshot, StringId,
+    StringPool, TermMeta,
 };
 
 /// One callback, the seam the progress printer and the tests use (§3.6).
@@ -456,6 +458,7 @@ fn plan_inner(
         lengths.iter().map(|&length| u64::from(length)).sum::<u64>() as f64 / lengths.len() as f64
     };
 
+    let hints = continuation_hints(basis, &resolution, &drafts);
     let mut docs_meta = Vec::with_capacity(drafts.len());
     let mut chunks_meta = Vec::with_capacity(lengths.len());
     for (index, draft) in drafts.iter().enumerate() {
@@ -507,6 +510,7 @@ fn plan_inner(
             body_hash: draft.body_hash,
             lex_key: draft.lex_key,
             chunk_range: (start, end),
+            hint: hints.get(&doc.id).copied(),
         });
     }
 
@@ -727,6 +731,185 @@ fn embed_all(
 
     let rows = Vectors::new(id.dim, flat)?;
     VectorSet::new(id.clone(), rows)
+}
+
+/// The four §3.11 weights. Named because every hint test derives its number from
+/// them, and a silent edit here must be a visible edit in the formula.
+const CHUNK_WEIGHT: f64 = 0.50;
+const TITLE_WEIGHT: f64 = 0.20;
+const BASENAME_WEIGHT: f64 = 0.15;
+const TAG_WEIGHT: f64 = 0.15;
+/// A score below this is not a hint.
+const HINT_FLOOR: f32 = 0.50;
+
+/// One vanished candidate's evidence, read from the basis generation alone.
+struct HintEvidence {
+    id: DocId,
+    chunks: BTreeSet<ChunkId>,
+    title: String,
+    stem: String,
+    tags: BTreeSet<String>,
+}
+
+/// Computes one hint per new document from the basis, never from `Previous`
+/// (M5-15). `--rebuild` has no reuse source but still has a basis.
+fn continuation_hints(
+    basis: Option<&Snapshot>,
+    resolution: &identity::Resolution,
+    drafts: &[DocDraft<'_>],
+) -> BTreeMap<DocId, Hint> {
+    let Some(basis) = basis else {
+        return BTreeMap::new();
+    };
+    let tombstoned: BTreeSet<DocId> = resolution.tombstones.iter().map(|meta| meta.id).collect();
+    if tombstoned.is_empty() {
+        return BTreeMap::new();
+    }
+    let evidence = hint_evidence(basis, &tombstoned);
+    let mut hints = BTreeMap::new();
+    for draft in drafts {
+        // A document that kept an id is not a new document, so it gets no guess.
+        if resolution.inherited.contains(&draft.doc.id) {
+            continue;
+        }
+        let chunks: BTreeSet<ChunkId> = draft.chunks.iter().map(|chunk| chunk.id).collect();
+        let title = normalise_title(&draft.doc.title);
+        let stem = stem_key(&draft.doc.rel_path);
+        let tags = document_tags(draft.doc);
+        let mut best: Option<Hint> = None;
+        for candidate in evidence.values() {
+            let hint = score_hint(candidate, &chunks, &title, &stem, &tags);
+            if hint.confidence < HINT_FLOOR {
+                continue;
+            }
+            let replace = match best {
+                None => true,
+                Some(current) => {
+                    hint.confidence > current.confidence
+                        || (hint.confidence == current.confidence && hint.id < current.id)
+                }
+            };
+            if replace {
+                best = Some(hint);
+            }
+        }
+        if let Some(hint) = best {
+            hints.insert(draft.doc.id, hint);
+        }
+    }
+    // A candidate that retired before this build has no `DocMeta` row to score
+    // again. Its still-live continuation carries the answer the basis recorded,
+    // so a rebuild does not erase a hint whose pair has not changed.
+    for doc in &basis.docs {
+        let Some(hint) = doc.hint else {
+            continue;
+        };
+        if !tombstoned.contains(&hint.id) || evidence.contains_key(&hint.id) {
+            continue;
+        }
+        if resolution.inherited.contains(&doc.id) {
+            hints.entry(doc.id).or_insert(hint);
+        }
+    }
+    hints
+}
+
+/// The tombstoned candidates that still have a basis `DocMeta` row and chunks.
+fn hint_evidence(basis: &Snapshot, tombstoned: &BTreeSet<DocId>) -> BTreeMap<DocId, HintEvidence> {
+    let mut chunk_sets: BTreeMap<DocId, BTreeSet<ChunkId>> = BTreeMap::new();
+    for chunk in &basis.chunks {
+        if let Some(doc) = basis.docs.get(chunk.doc as usize) {
+            chunk_sets.entry(doc.id).or_default().insert(chunk.id);
+        }
+    }
+    let mut evidence = BTreeMap::new();
+    for doc in &basis.docs {
+        if !tombstoned.contains(&doc.id) {
+            continue;
+        }
+        let (Some(title), Some(rel_path)) = (
+            basis.strings.get(doc.title),
+            basis.strings.get(doc.rel_path),
+        ) else {
+            continue;
+        };
+        let mut tags: BTreeSet<String> = doc
+            .shared_with
+            .iter()
+            .filter_map(|id| basis.strings.get(*id))
+            .map(str::to_owned)
+            .collect();
+        tags.extend(
+            doc.tags
+                .iter()
+                .filter_map(|id| basis.strings.get(*id))
+                .map(str::to_owned),
+        );
+        evidence.insert(
+            doc.id,
+            HintEvidence {
+                id: doc.id,
+                chunks: chunk_sets.get(&doc.id).cloned().unwrap_or_default(),
+                title: normalise_title(title),
+                stem: stem_key(rel_path),
+                tags,
+            },
+        );
+    }
+    evidence
+}
+
+/// The weighted score of one candidate, and the components that produced it.
+fn score_hint(
+    candidate: &HintEvidence,
+    chunks: &BTreeSet<ChunkId>,
+    title: &str,
+    stem: &str,
+    tags: &BTreeSet<String>,
+) -> Hint {
+    let chunk_jaccard = jaccard(chunks, &candidate.chunks);
+    let title_match = f64::from(title == candidate.title);
+    let basename_match = f64::from(stem == candidate.stem);
+    let tag_jaccard = jaccard(tags, &candidate.tags);
+    let confidence = CHUNK_WEIGHT * chunk_jaccard
+        + TITLE_WEIGHT * title_match
+        + BASENAME_WEIGHT * basename_match
+        + TAG_WEIGHT * tag_jaccard;
+    Hint {
+        id: candidate.id,
+        confidence: confidence as f32,
+        chunk_jaccard: chunk_jaccard as f32,
+        title_match: title_match as f32,
+        basename_match: basename_match as f32,
+        tag_jaccard: tag_jaccard as f32,
+    }
+}
+
+/// Trims and collapses internal whitespace. Case is kept, as the identity key
+/// keeps it.
+fn normalise_title(title: &str) -> String {
+    title.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A file stem with any leading date token removed, so a rename that only moves
+/// the date still counts as the same base name.
+fn stem_key(rel_path: &str) -> String {
+    let stem = Path::new(rel_path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(rel_path);
+    strip_leading_date(stem).to_owned()
+}
+
+/// `tags ∪ shared_with`, the set the tag component compares.
+fn document_tags(document: &Document) -> BTreeSet<String> {
+    document
+        .frontmatter
+        .tags
+        .iter()
+        .chain(document.shared_with.iter())
+        .cloned()
+        .collect()
 }
 
 /// One document being assembled, before term ids and the string pool exist.
@@ -969,6 +1152,36 @@ mod tests {
             &no_progress,
         )
         .expect("a build without an embedder cannot fail")
+    }
+
+    /// A plan built from a basis with no reuse source, the `--rebuild` shape.
+    fn rebuilt_from(docs: &[Document], basis: &Snapshot) -> BuildPlan {
+        plan(
+            &config(),
+            &mut docs.to_vec(),
+            None,
+            Some(basis),
+            today(),
+            None,
+            &no_progress,
+        )
+        .expect("a build without an embedder cannot fail")
+    }
+
+    /// A body with `count` sections that keep their chunk ids across a move.
+    fn parts(prefix: &str, count: usize) -> String {
+        (1..=count)
+            .map(|index| format!("## {prefix} {index}\n\n{prefix} body {index}.\n\n"))
+            .collect()
+    }
+
+    /// A document whose date and title are explicit, so identity can change.
+    fn dated(rel_path: &str, title: &str, date: NaiveDate, body: &str) -> Document {
+        let mut doc = document(rel_path, title, body);
+        doc.date = Some(date);
+        doc.date_source = DateSource::Frontmatter;
+        doc.frontmatter.date = Some(date);
+        doc
     }
 
     fn embedder(dim: u32) -> HashEmbedder {
@@ -1609,5 +1822,63 @@ mod tests {
                 prop_assert_eq!(rows.row(index), Some(expected.as_slice()));
             }
         }
+    }
+
+    #[test]
+    fn a_move_with_a_new_title_and_date_gets_the_hand_derived_hint() {
+        // Eight old chunks and ten new, all eight old ids reappearing:
+        //   0.50 * 8/10 + 0.20 * 0 (titles differ) + 0.15 * 1 (stems equal)
+        //   + 0.15 * 0 (no tags) = 0.55. The basis, not `Previous`, supplies
+        // the evidence, which is the `--rebuild` shape.
+        let old = dated(
+            "notes/2024-01-01-plan.md",
+            "Old plan",
+            NaiveDate::from_ymd_opt(2024, 1, 1).expect("date"),
+            &parts("shared", 8),
+        );
+        let first = built(std::slice::from_ref(&old), None);
+
+        let new = dated(
+            "notes/2025-02-02-plan.md",
+            "New plan",
+            NaiveDate::from_ymd_opt(2025, 2, 2).expect("date"),
+            &parts("shared", 10),
+        );
+        let second = rebuilt_from(std::slice::from_ref(&new), &first.snapshot);
+
+        let hint = second.snapshot.docs[0].hint.expect("one hint");
+        assert_eq!(hint.id, first.snapshot.docs[0].id);
+        assert!((hint.chunk_jaccard - 0.8).abs() < 1e-6, "{hint:?}");
+        assert!((hint.title_match - 0.0).abs() < 1e-6, "{hint:?}");
+        assert!((hint.basename_match - 1.0).abs() < 1e-6, "{hint:?}");
+        assert!((hint.tag_jaccard - 0.0).abs() < 1e-6, "{hint:?}");
+        assert!((hint.confidence - 0.55).abs() < 1e-6, "{hint:?}");
+
+        // A second rebuild reads the hint's own generation. The candidate has
+        // no `DocMeta` row left, so the recorded pair must survive.
+        let third = rebuilt_from(&[new], &second.snapshot);
+        let carried = third.snapshot.docs[0].hint.expect("the hint survived");
+        assert_eq!(carried, hint);
+    }
+
+    #[test]
+    fn a_move_below_the_floor_stores_no_hint() {
+        // Ten old chunks and two new, both known: 0.50 * 2/10 + 0.15 = 0.25.
+        let old = dated(
+            "notes/2024-01-01-plan.md",
+            "Old plan",
+            NaiveDate::from_ymd_opt(2024, 1, 1).expect("date"),
+            &parts("shared", 10),
+        );
+        let first = built(&[old], None);
+
+        let new = dated(
+            "notes/2025-02-02-plan.md",
+            "New plan",
+            NaiveDate::from_ymd_opt(2025, 2, 2).expect("date"),
+            &parts("shared", 2),
+        );
+        let second = rebuilt_from(&[new], &first.snapshot);
+        assert!(second.snapshot.docs[0].hint.is_none());
     }
 }
