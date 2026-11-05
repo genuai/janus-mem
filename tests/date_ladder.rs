@@ -422,28 +422,28 @@ fn case_13_6_a_corpus_with_no_dated_document_decays_by_one_and_says_so() {
         "---\ntype: decision\nstatus: active\n---\ncache\n",
     )]);
     index(vault.path());
-
-    let config = Config::load(vault.path()).expect("load config");
-    let outcome = search::query(
+    let report = search_json(
         vault.path(),
-        &config,
-        &p8_clock(),
-        None,
-        &p8_options("cache"),
-    )
-    .expect("the corpus queries");
-    let hit = outcome.hits.first().expect("the undated document matches");
-    assert_eq!(hit.breakdown.decay, 1.0, "no dated document means no age");
-    assert_eq!(
-        outcome
-            .notes
-            .iter()
-            .filter(|note| note.contains("no dated document"))
-            .count(),
-        1,
-        "one note explains the missing median: {:?}",
-        outcome.notes
+        &["cache", "--intent", "current", "--no-embeddings"],
     );
+
+    assert_eq!(
+        report["results"][0]["scores"]["decay"], 1.0,
+        "no dated document means no age"
+    );
+    let notes: Vec<&str> = report["notes"]
+        .as_array()
+        .expect("notes")
+        .iter()
+        .map(|note| note.as_str().expect("note"))
+        .collect();
+    assert_eq!(
+        notes.len(),
+        1,
+        "one note explains the missing median: {notes:?}"
+    );
+    assert!(notes[0].contains("no dated document"), "{notes:?}");
+    assert!(!notes[0].contains("corpus median"), "{notes:?}");
 }
 
 #[test]
@@ -478,5 +478,34 @@ fn case_13_7b_a_scope_filter_does_not_move_the_median() {
     assert!(
         (filtered - expected).abs() < 1e-12,
         "--scope moved the undated decay to {filtered}, expected {expected}"
+    );
+}
+
+#[test]
+fn case_13_8_a_history_query_has_no_median_note() {
+    // `history` turns decay off, so the median is not used and must not be
+    // named. The undated document is in the result set beside that rule.
+    let vault = median_corpus();
+    index(vault.path());
+    let report = search_json(
+        vault.path(),
+        &["cache", "--intent", "history", "--no-embeddings"],
+    );
+
+    assert!(
+        result_paths(&report)
+            .iter()
+            .any(|path| path == "undated-decision.md"),
+        "the undated document must be in the results: {report}"
+    );
+    let notes: Vec<&str> = report["notes"]
+        .as_array()
+        .expect("notes")
+        .iter()
+        .map(|note| note.as_str().expect("note"))
+        .collect();
+    assert!(
+        !notes.iter().any(|note| note.contains("corpus median")),
+        "history does not decay, so it must not name the median: {notes:?}"
     );
 }

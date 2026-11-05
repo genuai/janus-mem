@@ -115,6 +115,7 @@ pub fn run(
         alpha: outcome.alpha,
         degraded: outcome.degraded,
         notes: outcome.notes,
+        median_decay: outcome.median_decay,
         stale: outcome.stale,
     })
 }
@@ -135,6 +136,9 @@ pub struct Outcome {
     pub degraded: Vec<String>,
     /// The query intent the caller named.
     pub intent: Intent,
+    /// True when this query decays an undated document by the corpus median.
+    /// False when decay is off or when the generation has no dated document.
+    pub(crate) median_decay: bool,
     /// The valid-time date this outcome answered for, when `--as-of` was given.
     pub as_of: Option<NaiveDate>,
     /// The eligibility gate this outcome was computed with, maps included.
@@ -380,6 +384,9 @@ pub fn query(
         notes.push("--scope-only: global and shared-only matches excluded".to_owned());
     }
 
+    let median_decay = score::policy(scoring_intent, options.include_superseded).decay
+        && decay_basis.undated_age_days.is_some();
+
     Ok(Outcome {
         rows,
         selected,
@@ -388,6 +395,7 @@ pub fn query(
         alpha,
         degraded,
         intent,
+        median_decay,
         as_of: options.as_of,
         filter,
         title_tokenizations,
@@ -1038,6 +1046,8 @@ pub(crate) struct Render<'a> {
     pub(crate) intent: Option<Intent>,
     /// The expanded `--as-of` date, when the query asked for one (§3.8).
     pub(crate) as_of: Option<NaiveDate>,
+    /// True when the answer decays an undated document by the corpus median.
+    pub(crate) median_decay: bool,
     /// The gate this answer passed; it holds the window and status maps.
     pub(crate) filter: &'a Filter,
     pub(crate) limit: usize,
@@ -1078,7 +1088,7 @@ fn notes_with_provenance(render: &Render<'_>) -> Vec<String> {
         .iter()
         .filter(|hit| render.rows[render.selected[hit.doc_index]].date_source == DateSource::None)
         .count();
-    if undated > 0 {
+    if undated > 0 && render.median_decay {
         notes.push(undated_note(undated));
     }
     notes

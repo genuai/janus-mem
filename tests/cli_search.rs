@@ -1070,7 +1070,7 @@ fn the_undated_note_counts_only_returned_results() {
 
     let all = search_json(
         vault.path(),
-        &["probe", "--intent", "history", "--limit", "20"],
+        &["probe", "--intent", "current", "--limit", "20"],
     );
     let notes: Vec<&str> = all["notes"]
         .as_array()

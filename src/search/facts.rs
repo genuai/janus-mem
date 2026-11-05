@@ -192,6 +192,7 @@ pub fn run(
         alpha: 0.0,
         degraded,
         notes,
+        median_decay: order == Order::Newest && decay_basis.undated_age_days.is_some(),
         stale: prepared.stale,
     })
 }

@@ -1015,6 +1015,7 @@ in the corpus, instead of by `1.0`.
 | M5-54 | A quarter in a file name is stripped from the title for the boost, using its own token length | The token is 6 to 8 bytes, so the day, month and year lengths cannot slice it. The stored title keeps the token; only the query-time boost strips it. |
 | M5-55 | `score` takes `DecayBasis { today, undated_age_days }` inside `ScoreInput` and no longer takes a `Clock` | One source of `today`. A dated age and the undated median must measure from the same date, or one score can disagree with itself. The basis is pure data, so `score` stays pure. |
 | M5-56 | Case 7.8 asserts that the undated document stays in `current`, not that it ranks first | Rank 1 depended on decay `1.0`. Under §3.13 the undated decay moves with the corpus median, so the old assertion would pass or fail with the wall clock. The P3 contract is the window, not the rank. |
+| M5-57 | The median note appears only when the result set has an undated document, the generation has a median, and the query's row decays | A note that names a median that does not exist, or that a `history` query never uses, contradicts the score beside it. The no-dated-corpus note is the only line in that case (M5-17). |
 
 ## 5. Phases
 
@@ -1616,8 +1617,10 @@ _(empty)_
 - **No golden moved.** All three search goldens pass `--intent history`, which
   turns decay off, so the undated rule cannot reach them.
 - **The provenance note changed.** It said an undated result does not decay. It
-  now says its decay uses the corpus median. A corpus with no dated document adds
-  one note and decays an undated document by `1.0`.
+  now says its decay uses the corpus median, but only when the result set has an
+  undated document, the generation has a median, and the query's row decays
+  (M5-57). A corpus with no dated document adds one note and decays an undated
+  document by `1.0`. A `history` or `--as-of` query names no median.
 - **Case 7.8 keeps its window claim.** Rank 1 was a side effect of decay `1.0`;
   the test now asserts that the document is present in `current` with no window
   (M5-56).
@@ -1625,5 +1628,5 @@ _(empty)_
   `exp(-ln2 · 20 / 180) = 0.9259` and the lower-middle rule for `[10, 30]`.
 - **Not in this part.** No `format_version` change, no write to a vault, no new
   dependency.
-- **Size.** 188 logic lines and 284 test lines against
+- **Size.** 201 logic lines and 315 test lines against
   `m5-phase8-dates`.
