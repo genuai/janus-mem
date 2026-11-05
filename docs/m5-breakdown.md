@@ -788,7 +788,7 @@ line per check and the summary last.
 | `cross_corpus_link_unsupported` | error | a link names another corpus |
 | `cross_scope_supersession` | error | an edge is inert because its two sides' scopes are disjoint |
 | `invalid_validity` | error | `valid_to <= valid_from` |
-| `duplicate_identity` | error | two documents share a match key (promoted from a note) |
+| `duplicate_identity` | warning | two documents share a match key; both fall through to `rel_path` (M5-58) |
 | `one_sided_supersession` | warning | a link exists on one side only |
 | `status_mismatch` | warning | declared status differs from `effective_status` |
 | `unknown_type` | warning | the document's type is not in the registry |
@@ -811,7 +811,7 @@ vault with one unknown type.
 | 10.3 | graph fixture as committed | one check per seeded defect, one line each; no duplicates. Six rows: three errors, three warnings |
 | 10.4 | a vault with no `.janus/` | exit 0, one `index_absent` warning, no `.janus/` created |
 | 10.5 | only an unknown type is wrong | exit 0, one warning |
-| 10.6 | two documents with the same title+date | exit 1, `duplicate_identity` names both paths |
+| 10.6 | two documents with the same title+date | exit 0, one `duplicate_identity` warning naming both paths (M5-58) |
 | 10.7 | `--json` twice on the same vault | byte-identical output |
 | 10.8 | a vault holding `status-lies.md` and a later successor that declares `supersedes` back | one `status_mismatch` warning, no error, exit 0 |
 
@@ -972,7 +972,7 @@ in the corpus, instead of by `1.0`.
 | M5-11 | `facts` switches to `effective_status` in P3 | M3 deferred it with a `todo`; leaving it on declared status would make `facts` disagree with `search`. |
 | M5-12 | `doctor` scans and never builds | A diagnostic must not mutate the thing it diagnoses. A stale index is a warning, not a reason to write. |
 | M5-13 | `doctor` warnings never set a non-zero exit | M8's CI gate must survive one unknown type. |
-| M5-14 | `duplicate_identity` is promoted from note to error | It is the one condition that can make an answer wrong rather than merely sorted oddly. |
+| M5-14 | ~~`duplicate_identity` is promoted from note to error~~ **Superseded by M5-58**: it is a warning | The claim was that an ambiguous key can make an answer wrong. A real vault disproved it: 464 ambiguous keys on 2 249 documents, and not one shared id, because the fall-through is to `rel_path`. The severity made `doctor` useless as a gate. |
 | M5-15 | Hints are recomputed from the basis on every build; a carried hint is a stored annotation, refreshed whenever the candidate still has evidence and never invented | A hint that outlives a basis it did not see is a guess wearing a fact's clothes. The carried case exists because a retired candidate has no chunk evidence left (M5-47). |
 | M5-16 | Quarter dates append two `DateSource` variants; no format bump | bincode encodes the variant index, so appending keeps every existing value valid. |
 | M5-17 | The undated decay median is corpus-wide and filter-independent | A median that moved with `--types` would make one filter change another document's score. |
@@ -1016,6 +1016,7 @@ in the corpus, instead of by `1.0`.
 | M5-55 | `score` takes `DecayBasis { today, undated_age_days }` inside `ScoreInput` and no longer takes a `Clock` | One source of `today`. A dated age and the undated median must measure from the same date, or one score can disagree with itself. The basis is pure data, so `score` stays pure. |
 | M5-56 | Case 7.8 asserts that the undated document stays in `current`, not that it ranks first | Rank 1 depended on decay `1.0`. Under §3.13 the undated decay moves with the corpus median, so the old assertion would pass or fail with the wall clock. The P3 contract is the window, not the rank. |
 | M5-57 | The median note appears only when the result set has an undated document, the generation has a median, and the query's row decays | A note that names a median that does not exist, or that a `history` query never uses, contradicts the score beside it. The no-dated-corpus note is the only line in that case (M5-17). |
+| M5-58 | `duplicate_identity` is a **warning**, not an error | Measured on a 2 249-document vault: 464 ambiguous match keys and zero shared ids, because an ambiguous rung falls through to `rel_path`. Most of those keys are files named `README.md` or `index.md`, which any real vault has. As an error they were 97% of `doctor`'s 479 findings and buried the 14 `dangling_link` errors. A warning keeps the fact visible and leaves the exit code for defects. |
 
 ## 5. Phases
 

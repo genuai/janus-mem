@@ -303,10 +303,12 @@ fn case_10_5_one_unknown_type_exits_zero() {
 }
 
 #[test]
-fn case_10_6_duplicate_identity_is_an_error_that_names_both_paths() {
+fn case_10_6_duplicate_identity_is_a_warning_that_names_both_paths() {
     // Two documents with the same title and date carry the same rung-3 key. The
-    // note is promoted to an error, and the one row names both paths. The index
-    // is built first to prove the check survives a published generation (M5-44).
+    // note is aggregated into one warning row that names both paths, and it
+    // leaves the exit code at 0: the key is ambiguous, so both documents fall
+    // through to `rel_path` and keep distinct ids (M5-57). The index is built
+    // first to prove the check survives a published generation (M5-44).
     let vault = vault(&[
         (
             "notes/a.md",
@@ -322,12 +324,13 @@ fn case_10_6_duplicate_identity_is_an_error_that_names_both_paths() {
 
     let (output, report) = doctor(root);
 
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(report["ok"], false, "{report}");
-    assert_eq!(report["summary"]["errors"], 1, "{report}");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(report["ok"], true, "{report}");
+    assert_eq!(report["summary"]["errors"], 0, "{report}");
+    assert_eq!(report["summary"]["warnings"], 1, "{report}");
     assert_eq!(codes(&report), ["duplicate_identity"], "{report}");
     let check = &report["checks"][0];
-    assert_eq!(check["severity"], "error", "{check}");
+    assert_eq!(check["severity"], "warning", "{check}");
     let message = check["message"].as_str().expect("message");
     assert!(message.contains("notes/a.md"), "{message}");
     assert!(message.contains("notes/b.md"), "{message}");
