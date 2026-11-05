@@ -663,7 +663,7 @@ outside it is not hidden, it is simply not the answer (M5-35).
 |---|---|---|
 | 7.1 | `bad/status-lies.md` (`status: active`, superseded by a link) | `effective_status: "superseded"`; absent from `current`; absent from `facts` |
 | 7.2 | `bad/quiet-expiry.md` (`status: superseded`, no successor) | `effective_status: "superseded"`; present in `history`; `lineage` shows the terminal state |
-| 7.3 | `bad/expired.md` (`status: active`, `effective_to: 2020-01-01`) | `effective_status: "active"`; absent from `current`; present in `history` |
+| 7.3 | `bad/expired.md` (`status: active`, `effective_from: 2019-01-01`, `effective_to: 2020-01-01`) | `effective_status: "active"`; the window is valid and over; absent from `current`; present in `history` |
 | 7.4 | `--include-superseded` | all of the above appear under `current` |
 | 7.5 | the chain, default query | only E |
 | 7.6 | a document with no successor and no `effective_to` | present in `current` |
@@ -803,7 +803,7 @@ vault with one unknown type.
 |---|---|---|
 | 10.1 | main fixture | errors ≥ 2, including `dangling_link` and `supersession_cycle`; exit 1 |
 | 10.2 | graph fixture, clean subset (`bad/` and `scopes/acme-vs-beta.md` removed in a temp copy) | exit 0, `ok: true`, no checks |
-| 10.3 | graph fixture as committed | one check per seeded defect, one line each; no duplicates. Eight rows: five errors, three warnings |
+| 10.3 | graph fixture as committed | one check per seeded defect, one line each; no duplicates. Seven rows: three errors, three warnings |
 | 10.4 | a vault with no `.janus/` | exit 0, one `index_absent` warning, no `.janus/` created |
 | 10.5 | only an unknown type is wrong | exit 0, one warning |
 | 10.6 | two documents with the same title+date | exit 1, `duplicate_identity` names both paths |
@@ -979,7 +979,7 @@ in the corpus, instead of by `1.0`.
 | M5-40 | `Graph::by_path` prefers a live endpoint and answers for a retired one only when no live document holds the path | A path can be held twice: by the file on disk and by the tombstone whose last path it was (§2.1). The path names the live document, and the endpoints iterate in id order, so without the rule the answer depends on which id hashes lower. Two rules cannot disagree: `ids` already prefers the live document. |
 | M5-41 | Case 10.2's clean subset removes `scopes/acme-vs-beta.md` as well as `bad/` | That file is a seeded inert edge (`cross_scope_supersession`), so the old subset could not exit 0. The clean subset is every seeded defect removed, not one directory. |
 | M5-42 | `one_sided_supersession` reads the replaced side: a `superseded_by` declaration is one-sided when its target declares no `supersedes` back. A `supersedes` declaration is complete on its own | The successor's `supersedes` is the claim that creates the relation. The five-link chain declares every link that way and stays silent, while `bad/one-sided.md` names a target that declares nothing and is reported. |
-| M5-43 | Case 10.8 uses a temp vault with a later reciprocal successor, not the committed `status-lies.md` alone | The committed target is older than `status-lies.md`, so that document also has an invalid window. It cannot be the only finding, and the case needs a vault where the warning really is alone. |
+| M5-43 | Case 10.8 uses a temp vault with a later reciprocal successor, not the committed `status-lies.md` alone | The committed document also has a one-sided warning, because its target declares nothing back. It cannot be the only finding, and the case needs a vault where the warning really is alone. |
 | M5-44 | `doctor` derives the scan half's identity without a basis | A published generation carries both paths forward and suppresses the duplicate note. The scan half is one walk, so it derives the current keys and reports a duplicate that still exists. |
 
 ## 5. Phases
@@ -1075,7 +1075,7 @@ matches; a link follows a move.
 | `bad/one-sided-new.md` | the target of `one-sided.md`, no declaration of its own |
 | `bad/quiet-expiry.md` | `status: superseded`, no successor |
 | `bad/status-lies.md` | `status: active`, `type: decision`, superseded by a link |
-| `bad/expired.md` | `status: active`, `type: decision`, `effective_to` 2020-01-01 |
+| `bad/expired.md` | `status: active`, `type: decision`, `effective_from` 2019-01-01, `effective_to` 2020-01-01 |
 | `bad/deprecated.md` | `status: deprecated`, `type: decision` |
 | `bad/dangling.md` | `supersedes` a path that does not exist |
 | `similar/alpha.md`, `similar/beta.md` | near-identical bodies, no link; the `suggest-links` pair |
@@ -1507,6 +1507,17 @@ derivation, then the eligibility gate and the flag.
   `bad/one-sided.md` and `bad/status-lies.md` are reported.
 - **Deviations.** Cases 10.2, 10.3 and 10.8 were recomputed against the committed
   fixtures (M5-41, M5-43). The code table and the exit rule are unchanged.
+- **Review round 1.** `bad/expired.md` started after its end, so it exercised an
+  invalid window instead of an expired one. It now starts in 2019: the window is
+  valid and simply over, and the document keeps `effective_status: active`.
+  `bad/status-lies.md` is dated before its successor, so its only defects are its
+  status lie and its one-sided warning. `bad/invalid-window.md` is the only
+  inverted window. Case 10.3 is seven rows: three errors, three warnings.
+- **Size and split.** Measured as one change, the phase is 567 logic lines, over
+  the 420-line split threshold. It ships as two PRs at the seam of §5: part 1 is
+  the report and scan half (357 logic, 115 test lines against `main`); part 2 is
+  the graph half (210 logic, 327 test lines against part 1). Each is under the
+  ceiling.
 - **Not included.** `moves`, `suggest-links`, quarter dates, the undated decay,
   and any repair or write. No golden moved, no dependency was added, and
   `format_version` stays 5.
