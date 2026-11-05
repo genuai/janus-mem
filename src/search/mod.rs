@@ -35,7 +35,9 @@ use crate::index::vectors::{Vectors, dot};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
 use crate::progress::Printer;
 use crate::scan::API_VERSION;
-use crate::score::{self, Breakdown, Intent, IntentPolicy, ScopeFilter, ScoreDoc, ScoreInput};
+use crate::score::{
+    self, Breakdown, DecayBasis, Intent, IntentPolicy, ScopeFilter, ScoreDoc, ScoreInput,
+};
 use crate::tokenize::{Tokenizer, Tokens};
 use crate::vault::resolve::strip_leading_date;
 use crate::vault::{self, WalkOptions};
@@ -113,6 +115,7 @@ pub fn run(
         alpha: outcome.alpha,
         degraded: outcome.degraded,
         notes: outcome.notes,
+        median_decay: outcome.median_decay,
         stale: outcome.stale,
     })
 }
@@ -133,6 +136,9 @@ pub struct Outcome {
     pub degraded: Vec<String>,
     /// The query intent the caller named.
     pub intent: Intent,
+    /// True when this query decays an undated document by the corpus median.
+    /// False when decay is off or when the generation has no dated document.
+    pub(crate) median_decay: bool,
     /// The valid-time date this outcome answered for, when `--as-of` was given.
     pub as_of: Option<NaiveDate>,
     /// The eligibility gate this outcome was computed with, maps included.
@@ -230,6 +236,9 @@ pub fn query(
     );
 
     let rows = doc_rows(&prepared.snapshot, config);
+    // The undated median is corpus-wide. Build it from the generation, before
+    // `--types`, `--tags` or `--scope` narrows the rows (§3.13, M5-17).
+    let decay_basis = DecayBasis::new(clock.today(), rows.iter().map(DocRow::decay_anchor));
     let scopes = ScopeFilter::new(&options.scopes, options.scope_only);
     // One graph and one pair of maps per query, never per row: the gate must
     // not walk the successors again for every document (P3 scope 10).
@@ -274,20 +283,18 @@ pub fn query(
         // Compute the score once, then use the quantity that decides the
         // ranking: `relevance > 0` admits a semantic-only match, and at α = 0
         // it is exactly M3's `lexical > 0` (V-9).
-        let breakdown = score::score(
-            clock,
-            &ScoreInput {
-                doc,
-                lexical: crate::index::squash(raw, reference),
-                semantic: semantics.get(index).copied().unwrap_or(0.0),
-                intent: scoring_intent,
-                effective_status: filter.effective_status(doc.id),
-                alpha,
-                title_boost: title_boosts.get(*doc_index).copied().unwrap_or(1.0),
-                half_life_days: options.decay_half_life,
-                include_superseded: options.include_superseded,
-            },
-        );
+        let breakdown = score::score(&ScoreInput {
+            doc,
+            lexical: crate::index::squash(raw, reference),
+            semantic: semantics.get(index).copied().unwrap_or(0.0),
+            intent: scoring_intent,
+            effective_status: filter.effective_status(doc.id),
+            alpha,
+            title_boost: title_boosts.get(*doc_index).copied().unwrap_or(1.0),
+            half_life_days: options.decay_half_life,
+            include_superseded: options.include_superseded,
+            decay_basis,
+        });
         if breakdown.relevance <= 0.0 {
             continue;
         }
@@ -351,6 +358,11 @@ pub fn query(
             selection.no_validity
         ));
     }
+    if score::policy(scoring_intent, options.include_superseded).decay
+        && decay_basis.undated_age_days.is_none()
+    {
+        notes.push("the corpus has no dated document; an undated document decays 1.0".to_owned());
+    }
     if let Some(as_of) = options.as_of
         && options
             .intent
@@ -372,6 +384,9 @@ pub fn query(
         notes.push("--scope-only: global and shared-only matches excluded".to_owned());
     }
 
+    let median_decay = score::policy(scoring_intent, options.include_superseded).decay
+        && decay_basis.undated_age_days.is_some();
+
     Ok(Outcome {
         rows,
         selected,
@@ -380,6 +395,7 @@ pub fn query(
         alpha,
         degraded,
         intent,
+        median_decay,
         as_of: options.as_of,
         filter,
         title_tokenizations,
@@ -711,6 +727,11 @@ pub struct DocRow {
 }
 
 impl DocRow {
+    /// The anchor the decay formula and the corpus median both use (§3.13).
+    pub(crate) fn decay_anchor(&self) -> Option<NaiveDate> {
+        self.effective_from.or(self.date)
+    }
+
     pub(crate) fn score_doc(&self) -> ScoreDoc<'_> {
         ScoreDoc {
             id: self.id,
@@ -1025,6 +1046,8 @@ pub(crate) struct Render<'a> {
     pub(crate) intent: Option<Intent>,
     /// The expanded `--as-of` date, when the query asked for one (§3.8).
     pub(crate) as_of: Option<NaiveDate>,
+    /// True when the answer decays an undated document by the corpus median.
+    pub(crate) median_decay: bool,
     /// The gate this answer passed; it holds the window and status maps.
     pub(crate) filter: &'a Filter,
     pub(crate) limit: usize,
@@ -1065,7 +1088,7 @@ fn notes_with_provenance(render: &Render<'_>) -> Vec<String> {
         .iter()
         .filter(|hit| render.rows[render.selected[hit.doc_index]].date_source == DateSource::None)
         .count();
-    if undated > 0 {
+    if undated > 0 && render.median_decay {
         notes.push(undated_note(undated));
     }
     notes
@@ -1073,7 +1096,7 @@ fn notes_with_provenance(render: &Render<'_>) -> Vec<String> {
 
 /// The `notes` line for `undated` returned results.
 fn undated_note(undated: usize) -> String {
-    format!("{undated} result(s) have no date and do not decay")
+    format!("{undated} result(s) have no date; decay uses the corpus median")
 }
 
 /// The `index` block of the JSON report: what the answer came from (M4D §3.1).
@@ -1411,8 +1434,14 @@ mod tests {
 
     #[test]
     fn the_undated_note_names_the_count() {
-        assert_eq!(undated_note(1), "1 result(s) have no date and do not decay");
-        assert_eq!(undated_note(3), "3 result(s) have no date and do not decay");
+        assert_eq!(
+            undated_note(1),
+            "1 result(s) have no date; decay uses the corpus median"
+        );
+        assert_eq!(
+            undated_note(3),
+            "3 result(s) have no date; decay uses the corpus median"
+        );
     }
 
     #[test]
