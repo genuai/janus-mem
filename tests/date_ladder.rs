@@ -181,3 +181,102 @@ fn no_doc_id_changes_over_the_fixture_vault() {
 
     assert_eq!(actual, expected);
 }
+
+// ───────────────────── M5 P8 part 1: quarter dates ─────────────────────────
+
+/// A vault written from literal files, so a P8 case owns its whole corpus.
+fn written(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fs::write(
+        dir.path().join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"p8\"\n[decay]\ntimeless_types = []\n",
+    )
+    .expect("write config");
+    for (rel, text) in files {
+        let path = dir.path().join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create folder");
+        }
+        fs::write(path, text).expect("write document");
+    }
+    dir
+}
+
+#[test]
+fn case_13_1_a_quarter_in_a_file_name_is_a_filename_quarter() {
+    let vault = written(&[("notes/2026-q4-plan.md", "x")]);
+    let report = scan_json(vault.path(), &[]);
+    let document = &report["docs"].as_array().expect("docs")[0];
+
+    assert_eq!(document["date"].as_str(), Some("2026-10-01"), "{report}");
+    assert_eq!(
+        document["date_source"].as_str(),
+        Some("filename_quarter"),
+        "{report}"
+    );
+}
+
+#[test]
+fn case_13_2_every_quarter_separator_parses_to_the_first_day() {
+    let vault = written(&[
+        ("q2-2026.md", "x"),
+        ("2026.q3.md", "x"),
+        ("2026_q1.md", "x"),
+        ("q4_2026.md", "x"),
+        ("2026q2.md", "x"),
+        ("q3.2026.md", "x"),
+        ("2026-q4.md", "x"),
+        ("q1-2026.md", "x"),
+    ]);
+    let report = scan_json(vault.path(), &[]);
+    let mut actual: Vec<(String, String, String)> = report["docs"]
+        .as_array()
+        .expect("docs")
+        .iter()
+        .map(|document| {
+            (
+                document["rel_path"].as_str().expect("path").to_owned(),
+                document["date"].as_str().expect("date").to_owned(),
+                document["date_source"].as_str().expect("source").to_owned(),
+            )
+        })
+        .collect();
+    actual.sort();
+
+    let expected: Vec<(String, String, String)> = [
+        ("q2-2026.md", "2026-04-01", "filename_quarter"),
+        ("2026.q3.md", "2026-07-01", "filename_quarter"),
+        ("2026_q1.md", "2026-01-01", "filename_quarter"),
+        ("q4_2026.md", "2026-10-01", "filename_quarter"),
+        ("2026q2.md", "2026-04-01", "filename_quarter"),
+        ("q3.2026.md", "2026-07-01", "filename_quarter"),
+        ("2026-q4.md", "2026-10-01", "filename_quarter"),
+        ("q1-2026.md", "2026-01-01", "filename_quarter"),
+    ]
+    .into_iter()
+    .map(|(path, date, source)| (path.to_owned(), date.to_owned(), source.to_owned()))
+    .collect();
+    let mut expected = expected;
+    expected.sort();
+    assert_eq!(actual, expected, "{report}");
+}
+
+#[test]
+fn case_13_3_an_impossible_quarter_stays_a_near_miss() {
+    let vault = written(&[
+        ("2026-q5.md", "x"),
+        ("2026-q0.md", "x"),
+        ("2026-q04.md", "x"),
+        ("q4.md", "x"),
+    ]);
+    let report = scan_json(vault.path(), &[]);
+    assert_eq!(
+        report["date_near_misses"],
+        serde_json::json!(["2026-q0.md", "2026-q04.md", "2026-q5.md", "q4.md"]),
+        "{report}"
+    );
+    for document in report["docs"].as_array().expect("docs") {
+        assert_eq!(document["date"], Value::Null, "{document}");
+        assert_eq!(document["date_source"], "absent", "{document}");
+    }
+}
