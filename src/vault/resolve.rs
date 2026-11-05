@@ -293,6 +293,11 @@ enum Precision {
     Day,
     Month,
     Year,
+    /// A quarter token, whose length varies with its separators and its order.
+    /// The date is the first day of the quarter, at day precision.
+    Quarter {
+        token_len: usize,
+    },
 }
 
 /// Parses a date token from the start of `name`.
@@ -307,6 +312,11 @@ enum Precision {
 /// fall back to a month. So `2024-11-0-post` and `2026-08-1_notes` produce no
 /// date, and `2026_08_notes` stays at month precision.
 fn parse_prefix(name: &str) -> Option<(NaiveDate, Precision)> {
+    // A quarter shape is handled before the ISO shapes. Otherwise an invalid
+    // quarter such as `2026-q5` would fall back to the year token `2026`.
+    if is_quarter_shape(name) {
+        return parse_quarter(name);
+    }
     let year = first_four_digits(name)?;
     let bytes = name.as_bytes();
 
@@ -326,6 +336,78 @@ fn parse_prefix(name: &str) -> Option<(NaiveDate, Precision)> {
 
     let date = year_at(year)?;
     is_boundary(name, 4).then_some((date, Precision::Year))
+}
+
+/// Whether `name` starts with a quarter shape, valid or not.
+///
+/// The year-first shape is four digits, an optional separator, then `q` or `Q`.
+/// The quarter-first shape is `q` or `Q` then a digit. The shape decides which
+/// parser runs; validity is [`parse_quarter`]'s job.
+fn is_quarter_shape(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if first_four_digits(name).is_some() {
+        return match bytes.get(4) {
+            Some(b'q' | b'Q') => true,
+            Some(byte) if is_separator(byte) => {
+                matches!(bytes.get(5), Some(b'q' | b'Q'))
+            }
+            _ => false,
+        };
+    }
+    matches!(bytes.first(), Some(b'q' | b'Q')) && bytes.get(1).is_some_and(u8::is_ascii_digit)
+}
+
+/// Parses `YYYY-qN`, `YYYYQN`, `YYYY.qN`, `YYYY_qN`, `qN-YYYY`, `qN_YYYY`,
+/// `qN.YYYY` or `qNYYYY` into the first day of that quarter.
+///
+/// `N` is 1-4 and must be one digit. The token must end at a separator or the
+/// end of the name. `2026-q5`, `2026-q0`, `2026-q04` and `q4` are not quarters.
+fn parse_quarter(name: &str) -> Option<(NaiveDate, Precision)> {
+    let (year, quarter, token_len) = quarter_token(name)?;
+    let date = quarter_start(year, quarter)?;
+    is_boundary(name, token_len).then_some((date, Precision::Quarter { token_len }))
+}
+
+/// Reads the year, the quarter number and the token length from a quarter shape.
+fn quarter_token(name: &str) -> Option<(i32, u32, usize)> {
+    let bytes = name.as_bytes();
+    if let Some(year) = first_four_digits(name) {
+        let q_at = if matches!(bytes.get(4), Some(b'q' | b'Q')) {
+            4
+        } else {
+            5
+        };
+        let quarter = digit_at(name, q_at + 1)?;
+        return Some((year, quarter, q_at + 2));
+    }
+    if !matches!(bytes.first(), Some(b'q' | b'Q')) {
+        return None;
+    }
+    let quarter = digit_at(name, 1)?;
+    let separator = usize::from(bytes.get(2).is_some_and(is_separator));
+    let year_start = 2 + separator;
+    let year = name.get(year_start..year_start + 4)?;
+    if !year.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((year.parse().ok()?, quarter, year_start + 4))
+}
+
+/// The first day of `quarter` in `year`, or `None` when either is invalid.
+fn quarter_start(year: i32, quarter: u32) -> Option<NaiveDate> {
+    if !(1..=4).contains(&quarter) || !in_range(year) {
+        return None;
+    }
+    NaiveDate::from_ymd_opt(year, (quarter - 1) * 3 + 1, 1)
+}
+
+/// Reads one ASCII digit at `index`.
+fn digit_at(name: &str, index: usize) -> Option<u32> {
+    name.as_bytes()
+        .get(index)?
+        .checked_sub(b'0')
+        .filter(|digit| *digit <= 9)
+        .map(u32::from)
 }
 
 /// Whether a byte is one of the three date separators.
@@ -395,6 +477,7 @@ fn date_prefix(name: &str) -> Option<(NaiveDate, DateSource)> {
         Precision::Day => DateSource::Filename,
         Precision::Month => DateSource::FilenameMonth,
         Precision::Year => DateSource::FilenameYear,
+        Precision::Quarter { .. } => DateSource::FilenameQuarter,
     };
     Some((date, source))
 }
@@ -415,6 +498,7 @@ pub(crate) fn strip_leading_date(title: &str) -> &str {
         Precision::Day => 10,
         Precision::Month => 7,
         Precision::Year => 4,
+        Precision::Quarter { token_len } => token_len,
     };
     // `parse_prefix` only accepts ASCII digits and separators, so this offset is
     // always a character boundary.
@@ -439,6 +523,7 @@ fn folder_date(rel_path: &str) -> Option<(NaiveDate, DateSource)> {
                 Precision::Day => DateSource::Folder,
                 Precision::Month => DateSource::FolderMonth,
                 Precision::Year => DateSource::FolderYear,
+                Precision::Quarter { .. } => DateSource::FolderQuarter,
             };
             return Some((date, source));
         }
@@ -455,10 +540,65 @@ fn folder_date(rel_path: &str) -> Option<(NaiveDate, DateSource)> {
 /// second only the boundary fails. A name that does not start with four digits,
 /// such as `22-08-2026`, is not counted: it is not the year-first shape.
 ///
+/// A quarter shape joins the count when the quarter is not valid or has no year.
+/// `2026-q5`, `2026-q0`, `2026-q04` and `q4` count. A valid quarter such as
+/// `2026-q4` or `q4-2026` does not, and neither does a quarter whose only fault
+/// is the boundary, such as `2026-q4x`.
+///
 /// A year outside the accepted range is not a near miss. The line that this
 /// count feeds tells a user that their names are not in ISO order; an implausible
 /// year is a different problem.
 pub(crate) fn is_date_near_miss(name: &str) -> bool {
+    is_quarter_near_miss(name) || is_iso_near_miss(name)
+}
+
+/// Whether a quarter shape is invalid or lacks a year.
+fn is_quarter_near_miss(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if let Some(year) = first_four_digits(name) {
+        if !in_range(year) {
+            return false;
+        }
+        let q_at = match bytes.get(4) {
+            Some(b'q' | b'Q') => Some(4),
+            Some(byte) if is_separator(byte) && matches!(bytes.get(5), Some(b'q' | b'Q')) => {
+                Some(5)
+            }
+            _ => None,
+        };
+        let Some(q_at) = q_at else {
+            return false;
+        };
+        let Some(quarter) = digit_at(name, q_at + 1) else {
+            return false;
+        };
+        if !(1..=4).contains(&quarter) {
+            return true;
+        }
+        // A second digit means the quarter field is not one digit, as in `q04`.
+        return bytes.get(q_at + 2).is_some_and(u8::is_ascii_digit);
+    }
+
+    if !matches!(bytes.first(), Some(b'q' | b'Q')) {
+        return false;
+    }
+    let Some(quarter) = digit_at(name, 1) else {
+        return false;
+    };
+    if !(1..=4).contains(&quarter) {
+        return true;
+    }
+    // A token glued to text is not a token: only a boundary starts a year.
+    if !is_boundary(name, 2) {
+        return false;
+    }
+    let separator = usize::from(bytes.get(2).is_some_and(is_separator));
+    let year_start = 2 + separator;
+    !has_digits(name, year_start..year_start + 4)
+}
+
+/// Whether an ISO date shape is invalid.
+fn is_iso_near_miss(name: &str) -> bool {
     let Some(year) = first_four_digits(name) else {
         return false;
     };
@@ -894,6 +1034,8 @@ mod tests {
         for (title, expected) in [
             ("2024-12-01-redis-cache", "redis-cache"),
             ("2024-11-postgres", "postgres"),
+            ("2026-q4-plan", "plan"),
+            ("q2-2026-plan", "plan"),
             ("2024_notes", "notes"),
             ("2024.11.02_notes", "notes"),
             ("2024", ""),
@@ -1040,6 +1182,55 @@ mod tests {
 
         assert_eq!(document.date, None);
         assert_eq!(document.date_source, DateSource::None);
+    }
+
+    #[test]
+    fn a_quarter_is_a_date_in_a_file_or_a_folder_name() {
+        let quarter = NaiveDate::from_ymd_opt(2026, 10, 1).expect("date");
+        for rel in [
+            "2026-q4.md",
+            "2026Q4.md",
+            "2026.q4.md",
+            "2026_q4.md",
+            "q4-2026.md",
+            "q4_2026.md",
+            "q4.2026.md",
+            "q42026.md",
+        ] {
+            let document = doc(rel, "x");
+            assert_eq!(document.date, Some(quarter), "{rel}");
+            assert_eq!(document.date_source, DateSource::FilenameQuarter, "{rel}");
+        }
+
+        let folder = doc("2026-q1/plain.md", "x");
+        assert_eq!(
+            folder.date,
+            NaiveDate::from_ymd_opt(2026, 1, 1),
+            "a folder quarter is day precision"
+        );
+        assert_eq!(folder.date_source, DateSource::FolderQuarter);
+    }
+
+    #[test]
+    fn a_quarter_shape_is_a_near_miss_only_when_it_is_not_a_quarter() {
+        for (expected, name) in [
+            (true, "2026-q5.md"),
+            (true, "2026-q0.md"),
+            (true, "2026-q04.md"),
+            (true, "2026-q44.md"),
+            (true, "q5.md"),
+            (true, "q04.md"),
+            (true, "q4.md"),
+            (true, "q4-plan.md"),
+            (false, "2026-q4.md"),
+            (false, "2026q4.md"),
+            (false, "q4-2026.md"),
+            (false, "q42026.md"),
+            (false, "2026-q4x.md"),
+            (false, "Q4 plan draft.md"),
+        ] {
+            assert_eq!(is_date_near_miss(name), expected, "{name}");
+        }
     }
 
     #[test]

@@ -636,16 +636,20 @@ fn doc_version(document: &Document) -> Option<&str> {
 
 /// The date identity may use: frontmatter or a day-precision file name only.
 ///
-/// §6.4 excludes values that copies churn. A month, year or folder date is also
-/// excluded here, so this milestone moves no existing `DocId` (§3.4).
+/// §6.4 excludes values that copies churn. A month, year, quarter-in-a-folder or
+/// folder date is also excluded here. A quarter in a file name is day precision
+/// (the first day of the quarter), so it is a match key like any other day date.
 fn usable_date(document: &Document) -> Option<NaiveDate> {
     match document.date_source {
-        DateSource::Frontmatter | DateSource::Filename => document.date,
+        DateSource::Frontmatter | DateSource::Filename | DateSource::FilenameQuarter => {
+            document.date
+        }
         DateSource::FilenameMonth
         | DateSource::FilenameYear
         | DateSource::Folder
         | DateSource::FolderMonth
         | DateSource::FolderYear
+        | DateSource::FolderQuarter
         | DateSource::None => None,
     }
 }

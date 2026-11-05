@@ -191,10 +191,14 @@ pub enum DateSource {
     FolderMonth,
     /// Parsed from a folder name, year precision.
     FolderYear,
-    /// No authored or name-derived date. The document is always current, so it
-    /// never decays (§6.10 rule 9, B-5).
+    /// No authored or name-derived date. The document decays by the corpus
+    /// median age (§6.3, §6.10 rule 9, M5-17).
     #[default]
     None,
+    /// Parsed from a quarter token in the file name, first day of the quarter.
+    FilenameQuarter,
+    /// Parsed from a quarter token in a folder name, first day of the quarter.
+    FolderQuarter,
 }
 
 impl DateSource {
@@ -210,6 +214,8 @@ impl DateSource {
             Self::FolderMonth => "folder_month",
             Self::FolderYear => "folder_year",
             Self::None => "absent",
+            Self::FilenameQuarter => "filename_quarter",
+            Self::FolderQuarter => "folder_quarter",
         }
     }
 }

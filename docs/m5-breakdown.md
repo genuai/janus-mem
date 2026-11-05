@@ -1010,6 +1010,9 @@ in the corpus, instead of by `1.0`.
 | M5-49 | A document's representative vector is the mean of its chunk rows, renormalised | §3.12's "best chunk of each pair" costs `O(n²·m²·d)`: about `7×10⁸` dot products on a 2 119-document vault. Mean pooling makes the pair loop `O(n²·d)`, which is the cost §3.12 assumed. |
 | M5-50 | Case 12.1 uses a temp pair whose cosine is `12/13`, not the committed `similar/` pair | The committed pair's cosine depends on bucket collisions across about eighty tokens, so no hand-derived value exists for it and the case would assert only what the code says. The temp pair shares 12 of 13 tokens in distinct buckets. |
 | M5-51 | `suggest-links` separates "no embedder" from "no vectors", and a refused generation exits 1 | One message for three causes sends a reader to the wrong fix. A missing model and a generation with no rows are different facts, and an index that does not validate cannot answer at all: an empty list at exit 0 would hide a rebuildable failure behind a correct-looking report. |
+| M5-52 | A valid quarter in a file name is a day-precision identity key; a quarter in a folder name is not | A quarter date is the first day of the quarter, so §6.4 treats it as a day date. Folder dates are still excluded from identity, for the reason M1 already gives. |
+| M5-53 | An invalid quarter shape does not fall back to the year token | Before P8, `2026-q5` parsed as `2026-01-01` by the year rule. The shape check runs before the ISO shapes, so the name reports no date and joins the near-miss count (case 13.3). |
+| M5-54 | A quarter in a file name is stripped from the title for the boost, using its own token length | The token is 6 to 8 bytes, so the day, month and year lengths cannot slice it. The stored title keeps the token; only the query-time boost strips it. |
 
 ## 5. Phases
 
@@ -1575,4 +1578,22 @@ _(empty)_
 
 ### Phase 8 — quarter dates and the undated decay
 
-_(empty)_
+**Part 1 — quarter dates.**
+
+- **Quarter parsing runs before the ISO shapes.** `2026-q5` used to read as
+  `2026-01-01` through the year rule. The shape check stops that fallback, so an
+  invalid quarter has no date and counts as a near miss. `2026-q4x` does not
+  count: only its boundary fails. `Precision::Quarter { token_len }` carries the
+  token length for `strip_leading_date`; the date source stays one variant per
+  rung, so `format_version` stays 6 (M5-53, M5-54).
+- **Identity takes a file-name quarter as a day date.** `FilenameQuarter` joins
+  `Filename` in `usable_date`; `FolderQuarter` stays out, as every folder date
+  does (M5-52).
+- **Tests.** Cases 13.1–13.3 are named. The accepted separators are checked in
+  both orders, and `2026-q5`, `2026-q0`, `2026-q04` and a bare `q4` count as
+  near misses.
+- **No golden moved.** The fixture has no quarter-named file, so no date or
+  identity field moved.
+- **Not in this part.** No decay change, no `format_version` change, no write to
+  a vault, no dependency. Part 2 adds the corpus-relative undated decay.
+- **Size.** 160 logic lines and 150 test lines against `main`.
