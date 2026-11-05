@@ -1079,7 +1079,7 @@ fn the_undated_note_counts_only_returned_results() {
         .map(|note| note.as_str().expect("note"))
         .collect();
     assert!(
-        notes.contains(&"1 result(s) have no date and do not decay"),
+        notes.contains(&"1 result(s) have no date; decay uses the corpus median"),
         "{all}"
     );
 
@@ -1207,10 +1207,9 @@ fn facts_explains_a_corpus_without_fact_types() {
     );
     for hit in report["results"].as_array().unwrap() {
         assert_eq!(hit["type"], "note", "{hit}");
-        if hit["date_source"] == "absent" {
-            // No anchor means no age, whatever today is.
-            assert_eq!(hit["scores"]["decay"], 1.0, "{hit}");
-        }
+        // An undated document now decays by the corpus median (§3.13). The
+        // fallback list is ordered by date, so its decay cannot move this order.
+        assert!(hit["scores"]["decay"].as_f64().unwrap() <= 1.0, "{hit}");
     }
 }
 
@@ -1488,8 +1487,16 @@ fn case_7_8_an_undated_document_stays_in_current() {
         vault.path(),
         &["undated note declared id identity", "--intent", "current"],
     );
-    assert_eq!(result_paths(&report)[0], "notes/undated.md", "{report}");
-    assert_eq!(report["results"][0]["valid_from"], Value::Null);
+    // Rank 1 is not asserted: an undated document decays by the corpus median
+    // (§3.13), so its place moves with the wall clock. Its presence under
+    // `current`, with no window, is the §6.10 rule 9 contract.
+    let found = report["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .find(|hit| hit["rel_path"] == "notes/undated.md")
+        .unwrap_or_else(|| panic!("the undated document left current: {report}"));
+    assert_eq!(found["valid_from"], Value::Null);
 }
 
 #[test]

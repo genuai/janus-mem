@@ -1013,6 +1013,8 @@ in the corpus, instead of by `1.0`.
 | M5-52 | A valid quarter in a file name is a day-precision identity key; a quarter in a folder name is not | A quarter date is the first day of the quarter, so §6.4 treats it as a day date. Folder dates are still excluded from identity, for the reason M1 already gives. |
 | M5-53 | An invalid quarter shape does not fall back to the year token | Before P8, `2026-q5` parsed as `2026-01-01` by the year rule. The shape check runs before the ISO shapes, so the name reports no date and joins the near-miss count (case 13.3). |
 | M5-54 | A quarter in a file name is stripped from the title for the boost, using its own token length | The token is 6 to 8 bytes, so the day, month and year lengths cannot slice it. The stored title keeps the token; only the query-time boost strips it. |
+| M5-55 | `score` takes `DecayBasis { today, undated_age_days }` inside `ScoreInput` and no longer takes a `Clock` | One source of `today`. A dated age and the undated median must measure from the same date, or one score can disagree with itself. The basis is pure data, so `score` stays pure. |
+| M5-56 | Case 7.8 asserts that the undated document stays in `current`, not that it ranks first | Rank 1 depended on decay `1.0`. Under §3.13 the undated decay moves with the corpus median, so the old assertion would pass or fail with the wall clock. The P3 contract is the window, not the rank. |
 
 ## 5. Phases
 
@@ -1597,3 +1599,31 @@ _(empty)_
 - **Not in this part.** No decay change, no `format_version` change, no write to
   a vault, no dependency. Part 2 adds the corpus-relative undated decay.
 - **Size.** 160 logic lines and 150 test lines against `main`.
+
+**Part 2 — the undated decay.**
+
+- **The median is built from the generation, before any filter.**
+  `DecayBasis::new` reads every `effective_from ?? date`, clamps each age at 0,
+  sorts, and takes the middle or the lower middle. `search` and `facts` build it
+  once per query. Cases 13.7 and 13.7b pin `--types` and `--scope` (M5-17).
+- **`score` lost its `Clock`.** `DecayBasis` carries `today`, so the dated age and
+  the undated median cannot use two different dates (M5-55).
+- **The main fixture's median is 27 days at the eval clock `2025-04-01`.** It has
+  18 dated documents; the sorted ages are 18, 19, 20, 21, 22, 23, 25, 26, 27, 28,
+  29, 30, 31, 46, 59, 86, 121 and 150. The lower middle of an even count is the
+  ninth value, 27. An undated document decays
+  `exp(-ln2 · 27 / 180) = 0.9013`.
+- **No golden moved.** All three search goldens pass `--intent history`, which
+  turns decay off, so the undated rule cannot reach them.
+- **The provenance note changed.** It said an undated result does not decay. It
+  now says its decay uses the corpus median. A corpus with no dated document adds
+  one note and decays an undated document by `1.0`.
+- **Case 7.8 keeps its window claim.** Rank 1 was a side effect of decay `1.0`;
+  the test now asserts that the document is present in `current` with no window
+  (M5-56).
+- **Tests.** Cases 13.4–13.7 and 13.7b are named. 13.4 and 13.5 show
+  `exp(-ln2 · 20 / 180) = 0.9259` and the lower-middle rule for `[10, 30]`.
+- **Not in this part.** No `format_version` change, no write to a vault, no new
+  dependency.
+- **Size.** 188 logic lines and 284 test lines against
+  `m5-phase8-dates`.

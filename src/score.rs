@@ -2,7 +2,7 @@
 //!
 //! Pure: no I/O, no wall clock, no config read. The caller resolves metadata
 //! once ([`ScoreDoc`]), supplies the lexical value phase 2 produced, and injects
-//! a [`Clock`].
+//! a [`DecayBasis`] that carries `today` and the corpus median.
 //!
 //! ```text
 //! lexical   = squash(s, s_ref)                          §3.3, phase 2
@@ -37,7 +37,6 @@ use std::cmp::Ordering;
 use chrono::NaiveDate;
 use serde::Serialize;
 
-use crate::clock::Clock;
 use crate::config::TypeSpec;
 use crate::document::{Document, Status};
 use crate::graph::EffectiveStatus;
@@ -251,6 +250,48 @@ pub struct Breakdown {
     pub final_score: f64,
 }
 
+/// The corpus-relative facts an undated document's decay needs (§3.13, M5-17).
+///
+/// Build it once per query from the whole generation, before any filter. A
+/// median built after `--types` or `--scope` would let one filter change another
+/// document's score.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecayBasis {
+    /// The date the query asks about.
+    pub today: NaiveDate,
+    /// The median age in days of every document with a decay anchor, or `None`
+    /// when the generation has no dated document.
+    pub undated_age_days: Option<f64>,
+}
+
+impl DecayBasis {
+    /// Builds the basis from every `effective_from ?? date` anchor.
+    ///
+    /// The age is `today - anchor` in days, clamped at 0. A missing anchor is
+    /// skipped. The median is the middle value, or the lower middle for an even
+    /// count.
+    #[must_use]
+    pub fn new(today: NaiveDate, anchors: impl IntoIterator<Item = Option<NaiveDate>>) -> Self {
+        let mut ages: Vec<i64> = anchors
+            .into_iter()
+            .flatten()
+            .map(|anchor| (today - anchor).num_days().max(0))
+            .collect();
+        if ages.is_empty() {
+            return Self {
+                today,
+                undated_age_days: None,
+            };
+        }
+        ages.sort_unstable();
+        let middle = (ages.len() - 1) / 2;
+        Self {
+            today,
+            undated_age_days: Some(ages[middle] as f64),
+        }
+    }
+}
+
 /// Everything one chunk's score needs (§3.2).
 #[derive(Debug, Clone, Copy)]
 pub struct ScoreInput<'a> {
@@ -274,6 +315,8 @@ pub struct ScoreInput<'a> {
     pub half_life_days: Option<f64>,
     /// `--include-superseded`; only widens `current` (S-19).
     pub include_superseded: bool,
+    /// The corpus-relative decay facts, built once per query (M5-17).
+    pub decay_basis: DecayBasis,
 }
 
 /// Scores one chunk against one document (§3.2, §7.2).
@@ -286,7 +329,7 @@ pub struct ScoreInput<'a> {
 /// must drop the document with [`IntentPolicy::includes`] instead of relying on
 /// that zero (§3.2).
 #[must_use]
-pub fn score(clock: &dyn Clock, input: &ScoreInput<'_>) -> Breakdown {
+pub fn score(input: &ScoreInput<'_>) -> Breakdown {
     let doc = input.doc;
     let policy = policy(input.intent, input.include_superseded);
     let status_factor = policy
@@ -295,7 +338,7 @@ pub fn score(clock: &dyn Clock, input: &ScoreInput<'_>) -> Breakdown {
     let blended = input.alpha * input.semantic + (1.0 - input.alpha) * input.lexical;
     let relevance = blended * input.title_boost;
     let authority = doc.type_spec.authority * status_factor;
-    let decay = decay(clock, input, policy.decay);
+    let decay = decay(input, policy.decay);
 
     Breakdown {
         semantic: input.semantic,
@@ -313,10 +356,11 @@ pub fn score(clock: &dyn Clock, input: &ScoreInput<'_>) -> Breakdown {
 /// `exp(-ln2 * age_days / half_life_days)`, or `1.0` when decay does not apply.
 ///
 /// Decay is off when the intent disables it, the type is `timeless`, the
-/// half-life is `<= 0` (or `NaN`), or the document has no date. The age is
-/// `today - (effective_from ?? date)`, clamped at `0`, so a future-dated
-/// document decays `1.0` (§3.2, §7.2).
-fn decay(clock: &dyn Clock, input: &ScoreInput<'_>, enabled: bool) -> f64 {
+/// half-life is `<= 0` (or `NaN`), or an undated document has no corpus median.
+/// A dated document's age is `today - (effective_from ?? date)`, clamped at `0`,
+/// so a future-dated document decays `1.0`. An undated document's age is the
+/// corpus median (§3.13, §6.10 rule 9).
+fn decay(input: &ScoreInput<'_>, enabled: bool) -> f64 {
     let doc = input.doc;
     if !enabled || doc.type_spec.timeless {
         return 1.0;
@@ -329,10 +373,15 @@ fn decay(clock: &dyn Clock, input: &ScoreInput<'_>, enabled: bool) -> f64 {
         return 1.0;
     }
 
-    let Some(anchor) = doc.effective_from.or(doc.date) else {
+    let age_days = doc
+        .effective_from
+        .or(doc.date)
+        .map_or(input.decay_basis.undated_age_days, |anchor| {
+            Some((input.decay_basis.today - anchor).num_days().max(0) as f64)
+        });
+    let Some(age_days) = age_days else {
         return 1.0;
     };
-    let age_days = (clock.today() - anchor).num_days().max(0) as f64;
     (-std::f64::consts::LN_2 * age_days / half_life).exp()
 }
 
@@ -593,7 +642,6 @@ pub fn normalise_scope(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::FixedClock;
     use chrono::Days;
 
     /// The eval clock from §3.8: every test is frozen in time.
@@ -617,8 +665,9 @@ mod tests {
         NaiveDate::from_ymd_opt(TODAY.0, TODAY.1, TODAY.2).expect("valid test date")
     }
 
-    fn clock() -> FixedClock {
-        FixedClock(today())
+    /// The basis for a corpus with no dated document: no median age.
+    fn basis() -> DecayBasis {
+        DecayBasis::new(today(), [])
     }
 
     /// `TODAY` minus `days`; `days_ago(180)` is one half-life of [`DECISION`].
@@ -664,12 +713,13 @@ mod tests {
             title_boost: 1.0,
             half_life_days: None,
             include_superseded: superseded,
+            decay_basis: basis(),
         }
     }
 
     /// Scores under `current`: relevance `0.5`, and decay `0.5` for [`doc`].
     fn score_doc(doc: &ScoreDoc<'_>) -> Breakdown {
-        score(&clock(), &input(doc, Intent::Current, false))
+        score(&input(doc, Intent::Current, false))
     }
 
     fn scoped(scopes: &[&str], scope_only: bool) -> ScopeFilter {
@@ -734,7 +784,7 @@ mod tests {
                     "{cell}: factor"
                 );
 
-                let scored = score(&clock(), &input(&doc(1, *status), intent, flag));
+                let scored = score(&input(&doc(1, *status), intent, flag));
                 match expected_factor {
                     Some(factor) => {
                         assert_eq!(scored.status_factor, factor, "{cell}: applied");
@@ -791,10 +841,7 @@ mod tests {
     fn a_breakdown_reports_every_factor_as_exact_values() {
         // lexical 0.5, alpha 0, decision authority 1.5, and `history` flattens
         // both the status factor and the decay, so every value is exact.
-        let scored = score(
-            &clock(),
-            &input(&doc(1, Status::Draft), Intent::History, false),
-        );
+        let scored = score(&input(&doc(1, Status::Draft), Intent::History, false));
         let expected = Breakdown {
             semantic: 0.0,
             lexical: 0.5,
@@ -832,7 +879,7 @@ mod tests {
         input.semantic = 0.25;
         for (alpha, expected) in [(0.0, 0.5), (1.0, 0.25), (0.5, 0.375)] {
             input.alpha = alpha;
-            assert_eq!(score(&clock(), &input).relevance, expected);
+            assert_eq!(score(&input).relevance, expected);
         }
     }
 
@@ -854,7 +901,7 @@ mod tests {
         ] {
             input.semantic = semantic;
             input.lexical = lexical;
-            let relevance = score(&clock(), &input).relevance;
+            let relevance = score(&input).relevance;
             assert!(
                 (relevance - expected).abs() < 1e-12,
                 "semantic {semantic}, lexical {lexical}: expected {expected}, got {relevance}"
@@ -868,7 +915,7 @@ mod tests {
             input.semantic = semantic;
             input.lexical = lexical;
             let expected = alpha * semantic + (1.0 - alpha) * lexical;
-            let relevance = score(&clock(), &input).relevance;
+            let relevance = score(&input).relevance;
             assert!(
                 (relevance - expected).abs() < 1e-12,
                 "alpha {alpha}: expected {expected}, got {relevance}"
@@ -879,15 +926,12 @@ mod tests {
     #[test]
     fn the_title_boost_multiplies_relevance_and_nothing_else() {
         let doc = doc(1, Status::Active);
-        let base = score(&clock(), &input(&doc, Intent::History, false));
+        let base = score(&input(&doc, Intent::History, false));
         for boost in [1.0, 1.25, 1.5, 2.0] {
-            let boosted = score(
-                &clock(),
-                &ScoreInput {
-                    title_boost: boost,
-                    ..input(&doc, Intent::History, false)
-                },
-            );
+            let boosted = score(&ScoreInput {
+                title_boost: boost,
+                ..input(&doc, Intent::History, false)
+            });
             // semantic, lexical, authority and decay keep their values.
             assert_eq!(boosted.semantic, base.semantic, "boost {boost}");
             assert_eq!(boosted.lexical, base.lexical, "boost {boost}");
@@ -907,7 +951,7 @@ mod tests {
         let ids: Vec<ChunkId> = (0..docs.len()).map(|i| chunk_id(i as u8)).collect();
         let scores: Vec<Breakdown> = docs
             .iter()
-            .map(|d| score(&clock(), &input(d, intent, flag)))
+            .map(|d| score(&input(d, intent, flag)))
             .collect();
         rank_documents(docs, &mapping, &ids, &scores)
             .iter()
@@ -978,7 +1022,7 @@ mod tests {
             let row = policy(intent, false);
             for status in STATUSES {
                 let doc = with_date(doc(1, status), Some(ancient));
-                let scored = score(&clock(), &input(&doc, intent, false));
+                let scored = score(&input(&doc, intent, false));
                 assert_eq!(scored.decay, 1.0, "{intent:?}/{status}: decay");
                 if row.includes(status) {
                     assert_eq!(scored.status_factor, 1.0, "{intent:?}/{status}: factor");
@@ -1005,6 +1049,32 @@ mod tests {
         assert!((score_doc(&doc(1, Status::Active)).decay - 0.5).abs() < 1e-12);
         let two = with_date(doc(1, Status::Active), Some(days_ago(360)));
         assert!((score_doc(&two).decay - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn an_undated_document_decays_by_the_corpus_median_age() {
+        // Ages 10, 20 and 30 days: the median is 20. Half-life 180:
+        // exp(-ln2 · 20 / 180) = 0.9258747.
+        let corpus = DecayBasis::new(
+            today(),
+            [Some(days_ago(10)), Some(days_ago(20)), Some(days_ago(30))],
+        );
+        assert_eq!(corpus.undated_age_days, Some(20.0));
+
+        let undated = with_date(doc(1, Status::Active), None);
+        let scored = score(&ScoreInput {
+            decay_basis: corpus,
+            ..input(&undated, Intent::Current, false)
+        });
+        assert!(
+            (scored.decay - 0.925_874_7).abs() < 1e-7,
+            "{}",
+            scored.decay
+        );
+
+        // The lower middle of an even count: [10, 30] takes 10.
+        let even = DecayBasis::new(today(), [Some(days_ago(10)), Some(days_ago(30))]);
+        assert_eq!(even.undated_age_days, Some(10.0));
     }
 
     #[test]
@@ -1038,9 +1108,9 @@ mod tests {
             half_life_days: Some(0.0),
             ..input(&active, Intent::Current, false)
         };
-        assert_eq!(score(&clock(), &overridden).decay, 1.0);
+        assert_eq!(score(&overridden).decay, 1.0);
 
-        // 3. no date at all.
+        // 3. an undated document when the corpus has no dated document.
         assert_eq!(
             score_doc(&with_date(doc(1, Status::Active), None)).decay,
             1.0
@@ -1053,7 +1123,7 @@ mod tests {
         // 5. an intent that disables decay, on a 35-year-old document.
         let old = with_date(doc(1, Status::Active), Some(ancient));
         for intent in [Intent::History, Intent::Evolution, Intent::Exhaustive] {
-            assert_eq!(score(&clock(), &input(&old, intent, false)).decay, 1.0);
+            assert_eq!(score(&input(&old, intent, false)).decay, 1.0);
         }
     }
 
@@ -1220,15 +1290,15 @@ mod tests {
         // status does, and the override row admits it at 1.0.
         let lying = doc(1, Status::Active);
         let mut input = input(&lying, Intent::Current, false);
-        assert_eq!(score(&clock(), &input).status_factor, 1.0, "declared");
+        assert_eq!(score(&input).status_factor, 1.0, "declared");
 
         input.effective_status = EffectiveStatus::Superseded;
-        let scored = score(&clock(), &input);
+        let scored = score(&input);
         assert_eq!(scored.status_factor, 0.0);
         assert_eq!(scored.final_score, 0.0);
 
         input.include_superseded = true;
-        assert_eq!(score(&clock(), &input).status_factor, 1.0, "overridden");
+        assert_eq!(score(&input).status_factor, 1.0, "overridden");
     }
 
     // ─────────────────────────────── ordering ────────────────────────────────
@@ -1451,11 +1521,11 @@ mod tests {
     }
 
     #[test]
-    fn an_undated_document_does_not_decay_and_sorts_after_a_dated_tie() {
+    fn an_undated_document_with_no_dated_corpus_does_not_decay() {
         let undated = with_date(doc(1, Status::Active), None);
         let dated = with_date(doc(1, Status::Active), Some(days_ago(3650)));
 
-        // No date means no age, so no decay. Janus does not invent one.
+        // An empty basis has no median, so there is no age to invent.
         assert_eq!(score_doc(&undated).decay, 1.0);
         assert!(score_doc(&dated).decay < 1.0);
 
@@ -1492,7 +1562,7 @@ mod tests {
                 type_spec: TypeSpec { authority, half_life_days: half_life, ..DECISION },
                 ..doc(1, status)
             };
-            let breakdown = score(&clock(), &ScoreInput {
+            let breakdown = score(&ScoreInput {
                 doc: &dated,
                 lexical,
                 semantic,
@@ -1502,6 +1572,7 @@ mod tests {
                 effective_status: EffectiveStatus::from(dated.status),
                 half_life_days: None,
                 include_superseded: superseded,
+                decay_basis: basis(),
             });
 
             prop_assert!(breakdown.final_score >= 0.0);

@@ -36,7 +36,7 @@ use crate::document::Status;
 use crate::error::JanusError;
 use crate::graph::Graph;
 use crate::index::embed::Embedder;
-use crate::score::{self, Intent, ScopeFilter, ScoreDoc, ScoreInput, ScoredDoc};
+use crate::score::{self, DecayBasis, Intent, ScopeFilter, ScoreDoc, ScoreInput, ScoredDoc};
 
 // One loader, one filter, one renderer: only the predicate and the order differ.
 use super::{Filter, Gate, Hit, Render, prepare, query_scores, render, require_scope, select};
@@ -119,6 +119,8 @@ pub fn run(
     let scopes = ScopeFilter::new(&options.scopes, options.scope_only);
     let graph = Graph::for_snapshot(&prepared.snapshot, config);
     let today = clock.today();
+    // The undated median is corpus-wide and filter-independent (§3.13, M5-17).
+    let decay_basis = DecayBasis::new(today, rows.iter().map(super::DocRow::decay_anchor));
     // The trigger is corpus-wide and is about types only: a vault whose one
     // `decision` is still a draft does declare a fact type, so it keeps the
     // fact list (and an empty result) rather than a fallback list.
@@ -148,13 +150,13 @@ pub fn run(
         .as_deref()
         .map(|query| query_scores(&prepared.index, query));
     let mut hits = rank(
-        clock,
         &prepared.snapshot,
         &docs,
         &map,
         scores.as_ref(),
         order,
         &filter,
+        decay_basis,
     );
     hits.truncate(options.limit);
 
@@ -168,6 +170,9 @@ pub fn run(
     }
     if options.query.is_none() && !fallback {
         notes.push("no --query: ordered by type authority, not by relevance".to_owned());
+    }
+    if order == Order::Newest && decay_basis.undated_age_days.is_none() {
+        notes.push("the corpus has no dated document; an undated document decays 1.0".to_owned());
     }
 
     render(&Render {
@@ -193,13 +198,13 @@ pub fn run(
 
 /// Picks each document's representative chunk and orders documents.
 fn rank(
-    clock: &dyn Clock,
     snapshot: &crate::index::Snapshot,
     docs: &[ScoreDoc<'_>],
     map: &[Option<usize>],
     scores: Option<&(Vec<f64>, f64)>,
     order: Order,
     filter: &Filter,
+    decay_basis: DecayBasis,
 ) -> Vec<Hit> {
     // `history` is the fact list's scoring row because it is exactly the §3.6
     // shape: no decay, every status at factor 1.0. Only `active` documents reach
@@ -247,22 +252,20 @@ fn rank(
             if scores.is_some() && lexical <= 0.0 {
                 return None;
             }
-            let breakdown = score::score(
-                clock,
-                &ScoreInput {
-                    doc: &docs[doc_index],
-                    lexical,
-                    semantic: 0.0,
-                    intent,
-                    effective_status: filter.effective_status(docs[doc_index].id),
-                    alpha: 0.0,
-                    // A boost cannot change an authority-ordered list, so
-                    // reporting one would only inflate `relevance` (§3.2).
-                    title_boost: 1.0,
-                    half_life_days: None,
-                    include_superseded: false,
-                },
-            );
+            let breakdown = score::score(&ScoreInput {
+                doc: &docs[doc_index],
+                lexical,
+                semantic: 0.0,
+                intent,
+                effective_status: filter.effective_status(docs[doc_index].id),
+                alpha: 0.0,
+                // A boost cannot change an authority-ordered list, so
+                // reporting one would only inflate `relevance` (§3.2).
+                title_boost: 1.0,
+                half_life_days: None,
+                include_superseded: false,
+                decay_basis,
+            });
             Some(Hit {
                 doc_index,
                 chunk_index,

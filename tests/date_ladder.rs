@@ -182,7 +182,12 @@ fn no_doc_id_changes_over_the_fixture_vault() {
     assert_eq!(actual, expected);
 }
 
-// ───────────────────── M5 P8 part 1: quarter dates ─────────────────────────
+// ───────────────────── M5 P8: quarter dates and undated decay ─────────────────
+
+use chrono::NaiveDate;
+use janus_mem::clock::FixedClock;
+use janus_mem::config::Config;
+use janus_mem::search::{self, Options};
 
 /// A vault written from literal files, so a P8 case owns its whole corpus.
 fn written(files: &[(&str, &str)]) -> tempfile::TempDir {
@@ -200,6 +205,82 @@ fn written(files: &[(&str, &str)]) -> tempfile::TempDir {
         fs::write(path, text).expect("write document");
     }
     dir
+}
+
+/// The P8 clock: all P8 ages are measured from this date.
+fn p8_clock() -> FixedClock {
+    FixedClock(NaiveDate::from_ymd_opt(2025, 4, 1).expect("valid date"))
+}
+
+/// A `current` query over the whole corpus, with no embeddings.
+fn p8_options(query: &str) -> Options {
+    Options {
+        query: query.to_owned(),
+        intent: Some("current".to_owned()),
+        scopes: Vec::new(),
+        scope_only: false,
+        limit: 20,
+        types: Vec::new(),
+        tags: Vec::new(),
+        decay_half_life: None,
+        include_superseded: false,
+        as_of: None,
+        no_rebuild: false,
+        no_embeddings: true,
+        embedding_reason: None,
+        progress: false,
+        json: false,
+    }
+}
+
+/// Runs one query and returns `(rel_path, decay)` for every hit.
+fn decays(root: &Path, options: &Options) -> Vec<(String, f64)> {
+    let config = Config::load(root).expect("load config");
+    let outcome = search::query(root, &config, &p8_clock(), None, options)
+        .expect("the P8 corpus indexes and queries");
+    outcome
+        .hits
+        .iter()
+        .map(|hit| {
+            (
+                outcome.rows[outcome.selected[hit.doc_index]]
+                    .rel_path
+                    .clone(),
+                hit.breakdown.decay,
+            )
+        })
+        .collect()
+}
+
+/// The decay the undated document received.
+fn undated_decay(root: &Path, options: &Options) -> f64 {
+    decays(root, options)
+        .into_iter()
+        .find(|(path, _)| path == "undated-decision.md")
+        .map(|(_, decay)| decay)
+        .expect("the undated document matches the query")
+}
+
+/// Three dated documents plus one undated: ages 10, 20 and 30 days.
+fn median_corpus() -> tempfile::TempDir {
+    written(&[
+        (
+            "ten-decision.md",
+            "---\ntype: decision\nstatus: active\ndate: 2025-03-22\n---\ncache\n",
+        ),
+        (
+            "twenty-note.md",
+            "---\ntype: note\nstatus: active\ndate: 2025-03-12\nscope: org:acme\n---\ncache\n",
+        ),
+        (
+            "thirty-decision.md",
+            "---\ntype: decision\nstatus: active\ndate: 2025-03-02\n---\ncache\n",
+        ),
+        (
+            "undated-decision.md",
+            "---\ntype: decision\nstatus: active\n---\ncache\n",
+        ),
+    ])
 }
 
 #[test]
@@ -279,4 +360,123 @@ fn case_13_3_an_impossible_quarter_stays_a_near_miss() {
         assert_eq!(document["date"], Value::Null, "{document}");
         assert_eq!(document["date_source"], "absent", "{document}");
     }
+}
+
+#[test]
+fn case_13_4_an_undated_document_decays_by_the_median_age() {
+    // Dated ages 10, 20, 30 days. Sorted, the middle is 20.
+    // 2025-04-01 is `today`; 2025-03-22 is 10 days ago, 2025-03-12 is 20,
+    // 2025-03-02 is 30. A decision half-life is 180 days:
+    // exp(-ln2 · 20 / 180) = exp(-0.077016) = 0.9258747 → 0.9259 at 4 dp.
+    let vault = median_corpus();
+    index(vault.path());
+    let expected = (-std::f64::consts::LN_2 * 20.0 / 180.0).exp();
+    assert!(
+        (expected - 0.9258747).abs() < 1e-7,
+        "the constant is 0.9259"
+    );
+
+    let actual = undated_decay(vault.path(), &p8_options("cache"));
+    assert!(
+        (actual - expected).abs() < 1e-12,
+        "undated decay {actual} != exp(-ln2·20/180) = {expected}"
+    );
+}
+
+#[test]
+fn case_13_5_an_even_count_takes_the_lower_middle() {
+    // Dated ages 10 and 30 days. The lower middle of [10, 30] is 10:
+    // exp(-ln2 · 10 / 180) = exp(-0.0385082) = 0.9622238 → 0.9622 at 4 dp.
+    let vault = written(&[
+        (
+            "ten-decision.md",
+            "---\ntype: decision\nstatus: active\ndate: 2025-03-22\n---\ncache\n",
+        ),
+        (
+            "thirty-decision.md",
+            "---\ntype: decision\nstatus: active\ndate: 2025-03-02\n---\ncache\n",
+        ),
+        (
+            "undated-decision.md",
+            "---\ntype: decision\nstatus: active\n---\ncache\n",
+        ),
+    ]);
+    index(vault.path());
+    let expected = (-std::f64::consts::LN_2 * 10.0 / 180.0).exp();
+    assert!(
+        (expected - 0.9622238).abs() < 1e-7,
+        "the constant is 0.9622"
+    );
+
+    let actual = undated_decay(vault.path(), &p8_options("cache"));
+    assert!(
+        (actual - expected).abs() < 1e-12,
+        "lower-middle decay {actual} != exp(-ln2·10/180) = {expected}"
+    );
+}
+
+#[test]
+fn case_13_6_a_corpus_with_no_dated_document_decays_by_one_and_says_so() {
+    let vault = written(&[(
+        "undated-decision.md",
+        "---\ntype: decision\nstatus: active\n---\ncache\n",
+    )]);
+    index(vault.path());
+
+    let config = Config::load(vault.path()).expect("load config");
+    let outcome = search::query(
+        vault.path(),
+        &config,
+        &p8_clock(),
+        None,
+        &p8_options("cache"),
+    )
+    .expect("the corpus queries");
+    let hit = outcome.hits.first().expect("the undated document matches");
+    assert_eq!(hit.breakdown.decay, 1.0, "no dated document means no age");
+    assert_eq!(
+        outcome
+            .notes
+            .iter()
+            .filter(|note| note.contains("no dated document"))
+            .count(),
+        1,
+        "one note explains the missing median: {:?}",
+        outcome.notes
+    );
+}
+
+#[test]
+fn case_13_7_a_type_filter_does_not_move_the_median() {
+    // The corpus is case 13.4. `--types decision` drops the 20-day note, so a
+    // median built after the filter would be the lower middle of [10, 30] = 10
+    // and decay 0.9622. The generation median stays 20 and decay stays 0.9259.
+    let vault = median_corpus();
+    index(vault.path());
+    let mut options = p8_options("cache");
+    options.types = vec!["decision".to_owned()];
+    let filtered = undated_decay(vault.path(), &options);
+
+    let expected = (-std::f64::consts::LN_2 * 20.0 / 180.0).exp();
+    assert!(
+        (filtered - expected).abs() < 1e-12,
+        "--types decision moved the undated decay to {filtered}, expected {expected}"
+    );
+}
+
+#[test]
+fn case_13_7b_a_scope_filter_does_not_move_the_median() {
+    // The 20-day note is `org:acme`; `--scope org:beta` drops it from the rows.
+    // A median built after the filter would be 10. The generation median is 20.
+    let vault = median_corpus();
+    index(vault.path());
+    let mut options = p8_options("cache");
+    options.scopes = vec!["org:beta".to_owned()];
+    let filtered = undated_decay(vault.path(), &options);
+
+    let expected = (-std::f64::consts::LN_2 * 20.0 / 180.0).exp();
+    assert!(
+        (filtered - expected).abs() < 1e-12,
+        "--scope moved the undated decay to {filtered}, expected {expected}"
+    );
 }
