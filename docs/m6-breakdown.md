@@ -140,7 +140,7 @@ code is copied from `JanusError::exit_code` (`src/error.rs:207`), not invented:
 | `vault_resolve` | `VaultResolve` | 1 |
 | `vault_not_found` | `VaultNotFound` | 1 |
 | `path_resolve` | `PathResolve` | 1 |
-| `not_found` | `DocumentNotInCorpus`, `TopicNotFound` | 1 |
+| `not_found` | `DocumentNotInCorpus`, `DocumentChanged`, `TopicNotFound` | 1 |
 | `index_missing` | `IndexMissing` | 1 |
 | `index_unstable` | `IndexUnstable` | 1 |
 | `index_needs_full_build` | `IndexNeedsFullBuild` | 1 |
@@ -150,6 +150,10 @@ code is copied from `JanusError::exit_code` (`src/error.rs:207`), not invented:
 | `create_dir` | `CreateDir` | 1 |
 | `io` | `Io` | 1 |
 | `refused` | (no variant; the adapter's policy answer) | 4 |
+
+`DocumentChanged` reuses `not_found` because the caller's remedy is the same:
+re-read after `janus index`. It exists so the message can name the document that
+moved.
 
 `conflict` and `precondition_required` arrive with M7, which adds the variants.
 `refused` is shared by every surface and comes from the core (§3.8), not from one
