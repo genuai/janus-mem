@@ -8,7 +8,7 @@
 //! no partial answer, and an object that sometimes holds a list invites a reader
 //! to read an empty one.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::api::error::ApiCode;
 use crate::error::JanusError;
@@ -70,4 +70,62 @@ impl Failure {
             hint: None,
         }
     }
+}
+
+// ─────────────────────────── the tool parameters ────────────────────────────
+//
+// One struct per tool, with `deny_unknown_fields`: a parameter the schema does
+// not list is a usage failure, never a silent ignore (M6 §2.5, case 7.6). The
+// names are the wire names §9.2 states, in `snake_case`, with no camelCase pass.
+
+/// The parameters of one `search` call (M6 §2.5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SearchParams {
+    /// The query text; required.
+    pub query: String,
+    /// Maximum documents returned; the default is [`crate::search::DEFAULT_LIMIT`].
+    pub limit: Option<usize>,
+    /// `current`, `history`, `evolution` or `exhaustive`.
+    pub intent: Option<String>,
+    /// The valid-time date: `YYYY-MM-DD`, `YYYY-MM` or `YYYY`.
+    pub as_of: Option<String>,
+    /// The scope set; a document matches any one of them.
+    pub scope: Option<Vec<String>>,
+    /// Exclude global and shared-only matches; requires `scope`.
+    pub scope_only: Option<bool>,
+    /// Canonical type names or configured aliases.
+    pub types: Option<Vec<String>>,
+    /// Frontmatter tags; a document matches any one of them.
+    pub tags: Option<Vec<String>>,
+    /// Admit declared-superseded documents under `current`.
+    pub include_superseded: Option<bool>,
+    /// Override the per-type decay half-life, in days.
+    pub decay_half_life_days: Option<f64>,
+}
+
+/// The parameters of one `get_authoritative_facts` call (M6 §2.5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FactsParams {
+    /// Narrows the listing by relevance and reports the score.
+    pub query: Option<String>,
+    /// Frontmatter tags; a document matches any one of them.
+    pub tags: Option<Vec<String>>,
+    /// Canonical type names or configured aliases.
+    pub types: Option<Vec<String>>,
+    /// The scope set; a document matches any one of them.
+    pub scope: Option<Vec<String>>,
+    /// Maximum facts returned.
+    pub limit: Option<usize>,
+}
+
+/// The parameters of one `get_lineage` call (M6 §2.5): exactly one is required.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LineageParams {
+    /// The corpus path of the document whose chain to report.
+    pub path: Option<String>,
+    /// A `current` query whose top result the chain is reported for.
+    pub topic: Option<String>,
 }

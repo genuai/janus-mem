@@ -19,6 +19,7 @@
 //! * [`clock`] — the injected clock, so scoring never reads the wall clock.
 //! * [`config`] — `janus.toml`, alias resolution, type registry, globs, decay.
 //! * [`document`] — the parsed shape of a document and its resolved metadata.
+//! * [`engine`] — the sync core one adapter calls: compute, never print (M6).
 //! * [`doctor`] — `janus doctor`: one report of every visible problem (M5).
 //! * [`graph`] — the supersession graph at query time: closure, cycles, scopes.
 //! * [`id`] — `DocId`, `Blake3Hash`, `ChunkId` newtypes.
@@ -52,6 +53,7 @@ pub mod clock;
 pub mod config;
 pub mod doctor;
 pub mod document;
+pub mod engine;
 pub mod error;
 pub mod graph;
 pub mod id;
