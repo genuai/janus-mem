@@ -1086,7 +1086,7 @@ janus search <QUERY> [--intent current|history|evolution|exhaustive]
                      [--decay-half-life DAYS] [--include-superseded]
                      [--no-rebuild] [--no-embeddings] [--json] [--no-color]
 janus lineage <PATH|--topic QUERY> [--json]
-janus facts [--tags T,..] [--query Q] [--scope S]... [--no-rebuild] [--no-embeddings] [--json]   # authoritative_facts
+janus facts [--types T,..] [--tags T,..] [--query Q] [--scope S]... [--no-rebuild] [--no-embeddings] [--json]   # authoritative_facts
 janus read <PATH> [--json]
 janus set <PATH> --expect-hash H --key status=superseded [--key k=v ...] [--dry-run]
 janus write <PATH> --frontmatter f.yaml (--body -|f.md)
@@ -1108,7 +1108,11 @@ Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash,
 
 `--no-embeddings` is accepted by `index`, `search` and `facts`, and means two different things on purpose: on `index` it is a statement about the generation being published (vectors are carried forward, or dropped when a document's embedded text changed, §8.3), and on `search`/`facts` it is a statement about the query (`degraded`, §9.4).
 
-`search` and `facts` refresh the index when the corpus changed since the build (§8.3), and print exactly one `refresh:` line on stderr that says what they did. `--no-rebuild` makes both refuse to write; it reads a validated generation and says it skipped. When only a cold build can cure the manifest, both exit 1 with `index needs a full build: run janus index` and the mismatch.
+`search` and `facts` refresh the index when the corpus changed since the build (§8.3), and print exactly one `refresh:` line on stderr that says what they did. `--no-rebuild` makes both refuse to write; it reads a validated generation and says it skipped. When only a cold build can cure the manifest, both exit 1 with `index needs a full build: run janus index` and the mismatch. A missing index is built on the first read; a cold mismatch is never built.
+
+A process may cache one loaded generation, and only one: the payload of `index.bin` and `vectors.f32`, never an answer. Freshness is decided on every call. The cached load is reused only when the on-disk `manifest.json` equals the cached manifest field for field and the walk digest of this call equals its `corpus_sig`. A load that declined a refresh is never cached, so a busy writer cannot be hidden.
+
+`janus facts --types` and the `types` parameter of `get_authoritative_facts` are one predicate: canonical type names or configured aliases, resolved through the type registry before the filter runs.
 
 ### 9.2 MCP read tools
 

@@ -188,8 +188,8 @@ pub struct Engine {
     clock: Box<dyn Clock>,
     embedder: Option<Box<dyn Embedder>>,
     cache: RwLock<Option<Cached>>,
-    loads: AtomicU64,
     hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 impl Engine {
@@ -198,7 +198,9 @@ impl Engine {
 ```
 
 `Response { ok: bool, json: serde_json::Value, code: Option<&'static str> }`.
-`call` never prints, never exits, and never panics on a recoverable error.
+`call` never prints, never exits, and never panics on a recoverable error. It
+writes nothing to stdout; the one `refresh:` line a declined refresh produces is
+a stderr diagnostic, which case 7.8 requires (M6-19).
 
 `Clock` gains `Send + Sync` (`src/clock.rs:12`), because the cache and the
 `RwLock` make the engine shared across threads.
@@ -218,6 +220,23 @@ vector-only rewrite keeps `index_sha` and changes only `vectors_sha`
 (`src/index/store.rs:104`, `src/index/store.rs:220`). A stale
 generation is never served from cache: its digest differs from `corpus_sig`, so
 the call falls through to `prepare()`, which retries the busy lock.
+
+**One load serves every tool** (M6-18). The load asks for the vector rows when
+the configuration weights them and an embedder exists, whichever tool asked, so
+a `get_authoritative_facts` call cannot leave a load that a later `search` call
+would answer with zero semantics. A lexical-only tool ignores the rows it did
+not need.
+
+**Two counters, `hits` and `misses`** (M6-19). A hit answers from the load; a
+miss reads the payload from disk. `janus_status` reports both.
+
+**The key compares nine fields** (M6-17): `format_version`, `schema_version`,
+`corpus_id`, `index_sha`, `vectors_sha`, `tokenizer`, `chunker`, `embedder` and
+`corpus_sig`. Every other manifest field is a diagnostic (`built_at`,
+`built_root`) or a number derived from a payload hash (`docs`, `chunks`, `terms`,
+`postings`, `avgdl`, `index_len`, `vectors_len`). Two further rules keep the
+cache honest: a load that declined a refresh is never cached, and neither is a
+load whose manifest names another root, so a pending repair is never skipped.
 
 ### 2.5 Tool parameters (`src/api/dto.rs`)
 
@@ -409,11 +428,11 @@ the decay factor and not the cached generation.
 
 **Case 4.6.** The cache key compares the manifest field by field. A unit test in
 `src/engine.rs` holds two manifests that differ in exactly one field and asserts
-the cached load is not reusable. The table is exhaustive: `index_sha`,
-`vectors_sha`, `corpus_sig`, `format_version`, `schema_version`, `corpus_id`,
-`tokenizer`, `chunker`, `embedder`. Adding a field to `Manifest` without adding a
-row must fail a second test that lists the compared fields and compares the
-count with the struct's.
+the cached load is not reusable, in both directions: a cached manifest that moved
+and an on-disk one that moved. The rows are the nine compared fields of §2.4. A
+second test lists the compared fields and the deliberately ignored ones, and
+compares that union with the keys of `serde_json::to_value(Manifest)`, so a new
+field fails a test instead of silently missing the key (M6-17).
 
 The case cannot be driven end to end through one `Engine`: the engine keeps the
 embedder it was built with, so a corpus re-indexed under another model is a
@@ -652,6 +671,10 @@ supplies one rather than asserting an empty list.
 | M6-14 | The envelope covers the five tool surfaces and their CLI counterparts, not the whole program | `janus index --json` is a receipt, not an answer. Widening the envelope there would move goldens for no agent benefit. |
 | M6-15 | Case 2.3's CLI half belongs to the `read` phase (P2b) | No tool command of P1 raises `path_escape`: `lineage` answers `not_found` for an escaping path today, and `janus read` is the first command that refuses one (cases 3.2 and 3.3). |
 | M6-16 | The SPEC §9.4 amendment ships in P5, not in P1 | The P1 file list has no `SPEC.md`. One phase must own that paragraph, so all §9 text lands together. |
+| M6-17 | The cache key compares nine manifest fields; a second test names the compared and the ignored fields | `built_at` and `built_root` are diagnostics, and the counts derive from a payload hash. An exhaustive field table would cache on a wall-clock string. The test fails when `Manifest` gains a field, so the key cannot silently miss one. |
+| M6-18 | One load serves all three tools, so it asks for vector rows whenever the configuration weights them and an embedder exists | A load chosen by the tool would leave a vectorless cache that a later `search` answers with zero semantics. Reading rows a lexical tool ignores costs one file read per process. |
+| M6-19 | The counters are `hits` and `misses`; a declined refresh still prints its one `refresh:` line to stderr | A hit and a miss are the two things a caller can observe, and `janus_status` reports both. `stderr` is a diagnostic stream, not the answer stream: case 7.8 and §9.4 require the line, and case 10.1 keeps it off stdout. |
+| M6-20 | Phase 2a ships as two pull requests: the compute/render split, then the engine | The phase is 1149 logic lines, and its named seam put 736 on one side, over the 600 ceiling. The split chosen keeps part one free of behaviour change, so its diff can be reviewed against an unmoved golden. |
 
 ## 5. Phases
 
@@ -690,7 +713,8 @@ P2a merges.
 `src/clock.rs` (`Clock: Send + Sync`), `src/search/mod.rs` (split compute from
 `render`), `src/search/facts.rs` (compute + the `types` filter),
 `src/lineage.rs`, `src/cli.rs` (`facts --types`), `src/main.rs`,
-`tests/engine_cache.rs` (new), `tests/api_hashes.rs` (new).
+`tests/engine_cache.rs` (new), `tests/api_hashes.rs` (new),
+`tests/cli_search.rs`, `tests/common/mod.rs`.
 
 **Build.** `Engine::call` for `search`, `get_authoritative_facts` and
 `get_lineage`, plus the cache of M6-5 and its counters. `facts` and `lineage`
@@ -704,9 +728,16 @@ gain a `compute` that returns a DTO; `run` becomes `compute` + a renderer.
 **Accept.** The `search`, `facts` and `lineage` human tables and JSON are
 unchanged apart from `content_hash`. `Clock` compiles with the bounds.
 
-**Split seam if still over ceiling.** Part 1: `search` compute extraction and the
-engine. Part 2: `facts` + `lineage` extraction. The `types` filter moves with
-`facts`.
+**Split, as delivered.** The seam below was drawn the other way round and did not
+fit the ceiling: extracted compute plus the engine is 736 logic lines, not 520.
+The phase ships as two stacked pull requests instead (M6-20):
+
+| part | contents | logic | tests |
+|---|---|---|---|
+| 2a-i | the compute/render split of `search`, `facts` and `lineage`, the owned report, and `facts --types` | 591 | 41 |
+| 2a-ii | the engine, its cache, `Tool`/`Call`/parameters, and `Clock: Send + Sync` | 558 | 665 |
+
+Part 2a-i changes no output: no golden moves. Part 2a-ii adds the second caller.
 
 #### Phase 2b — `read`, `status`, and the two CLI commands
 
@@ -824,7 +855,7 @@ valid and names `janus mcp`.
 | phase | logic ceiling | estimate | test ceiling | estimate | base |
 |---|---|---|---|---|---|
 | P1 envelope + codes + matrix | 400 | ~320 | 600 | ~380 | `main` |
-| P2a engine + 3 query tools | 600 | ~520 | 900 | ~650 | `main` |
+| P2a engine + 3 query tools | 600 | ~520, actual 1149 in two PRs | 900 | ~650, actual 706 | `main` |
 | P2b read + status + engine wiring | 350 | ~280 | 550 | ~400 | `main` |
 | P3 rpc | 350 | ~250 | 500 | ~300 | `main` |
 | P4 mcp | 550 | ~450 | 800 | ~550 | `main` |
@@ -834,9 +865,11 @@ The P2 split is mandatory, not a contingency: three compute extractions, a cache
 a concurrency bound and two commands are not one reviewable unit. M5's lineage
 phase alone took 652 logic lines.
 
-Estimates run low by a factor of two to three in this repository. Both P2 parts
-carry a named split seam; split before the ceiling, never shave a comment or drop
-a test.
+Estimates run low by a factor of two to three in this repository, and P2a proved
+it: the phase is 1149 logic lines against a 520 estimate, and its named seam put
+736 on one side. Both P2 parts carry a named split seam; split before the
+ceiling, never shave a comment or drop a test. No phase ceiling moves: a phase
+that does not fit becomes two pull requests.
 
 ## 9. SPEC corrections
 
@@ -1021,7 +1054,59 @@ and no exit code moved.
 
 ### Phase 2a — the engine and the three query tools
 
-_(empty)_
+**Sizes.** Two pull requests, both under the ceiling: the compute/render split is
+591 logic and 41 test lines, the engine is 558 logic and 665 test lines. No
+dependency was added.
+
+**What landed.** `search`, `facts` and `lineage` each compute an answer and then
+render it. The report is owned, the human table reads the same value the JSON
+does, and the undated provenance note is part of the answer, so the two renderers
+cannot disagree about a row. `Engine::call` answers `search`,
+`get_authoritative_facts` and `get_lineage` as one `Response` with no stdout, and
+the cache of M6-5 saves the payload read while freshness runs on every call.
+`Clock` is `Send + Sync`, and `get_authoritative_facts` honours `types` through
+the same predicate the new `janus facts --types` uses.
+
+**Deviations.**
+
+1. The phase ships in two pull requests (M6-20). The phase is 1149 logic lines
+   against a 520 estimate, and the named seam put 736 on one side, which is over
+   the ceiling on its own. The seam moved to the compute/render split, so part
+   one changes no output and part two adds the second caller.
+2. Case 4.6's "one row per field" cannot mean every manifest field: a cache key
+   on `built_at` would never hit. The rows are the nine compared fields, and a
+   second test names those nine plus the nine ignored fields and compares the
+   union with the struct's own keys (M6-17).
+3. Case 4.6 also asserts both directions of the comparison: a cached manifest
+   that moved and an on-disk manifest that moved. One direction alone would pass
+   for a predicate that ignores its second argument.
+4. The cache asks for vector rows for every tool, not for the rows the calling
+   tool needs (M6-18). Without that, a `facts` call could leave a load that a
+   later `search` would answer lexically while the configuration weights
+   semantics.
+5. Case 4.7's stderr half is not asserted in `tests/engine_cache.rs`: a process
+   cannot capture its own stderr without a new dependency, which §1 forbids. The
+   case asserts the observable answer (`index.stale` is true, the new document is
+   absent) and the counters, and `tests/cli_search.rs` pins the exact
+   `refresh: skipped, index busy` line for the CLI.
+6. `get_authoritative_facts` keeps its fallback trigger corpus-wide. `types`
+   narrows the fact list; it does not decide whether the corpus declares a fact
+   type, so a filter that hides every fact still gets the fact list and an empty
+   answer rather than the newest-documents fallback.
+7. The SPEC amendments of §9 items 7 and 8 ship in the second pull request with
+   this log, not in the first, because both describe the phase as a whole.
+
+**Test budget.** The engine's cases sit under the ceiling: 665 of 900 test lines
+cover the whole engine, including the two-thread case and the manifest table.
+
+**Golden diff.** None. `git diff --stat tests/snapshots` is empty: the split of
+compute from rendering moved no score, no order, and no field. `format_version`
+stays 6 and `api` stays 1.
+
+**Handoff to 2b.** `Engine::call` serves three tools; `read_document` and
+`janus_status` are the two remaining variants of `Tool`, and `Engine::cache`
+already answers the `cache` block of §2.6. `src/engine.rs` is the only place a
+tool is added, and `src/api/mod.rs` is the only place a wire name is decided.
 
 ### Phase 2b — `read`, `status`, and the two CLI commands
 
