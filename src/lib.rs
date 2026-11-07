@@ -29,6 +29,7 @@
 //! * [`link`] — build-time resolution of declared supersession links (M5).
 //! * [`moves`] — `janus moves`: confirmed path changes and continuation hints (M5).
 //! * [`progress`] — the stderr progress printer for a long build (M4D).
+//! * [`read`] — `read_document`: the one path that returns document text (M6).
 //! * [`search`] — `janus search` and `janus facts`: the M3 command surface.
 //! * [`score`] — authority, status gating, decay and scope: pure scoring (M3).
 //! * [`suggest`] — candidate pairs of unlinked similar documents (M5).
@@ -63,6 +64,7 @@ pub mod lineage;
 pub mod link;
 pub mod moves;
 pub mod progress;
+pub mod read;
 pub mod scan;
 pub mod score;
 pub mod search;

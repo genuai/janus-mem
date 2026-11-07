@@ -152,7 +152,7 @@ fn select(
 /// of a report must work from anywhere). Both are confined, so neither is a way
 /// out. Each spelling contributes two candidates: its own (how a symlinked
 /// document is identified) and the resolved target's (`a/../b.md`).
-fn resolve_argument(root: &Path, given: &Path) -> Result<Vec<String>, JanusError> {
+pub(crate) fn resolve_argument(root: &Path, given: &Path) -> Result<Vec<String>, JanusError> {
     let cwd = std::env::current_dir()?;
     let spellings: Vec<PathBuf> = if given.is_absolute() {
         vec![given.to_path_buf()]

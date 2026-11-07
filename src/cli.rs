@@ -134,6 +134,17 @@ pub enum Command {
         json: bool,
     },
 
+    /// Print one document's text (§9.2)
+    Read {
+        /// The corpus path of the document to print
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+
+        /// Emit one JSON object on stdout instead of the text
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Report the chunks the corpus produces, without building an index
     Chunks {
         /// Emit one JSON object on stdout instead of the table

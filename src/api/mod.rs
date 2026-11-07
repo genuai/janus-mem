@@ -32,11 +32,18 @@ pub enum Tool {
     AuthoritativeFacts,
     /// `get_lineage`: the supersession chain around one document.
     Lineage,
+    /// `read_document`: the text of one document, or of one chunk of it.
+    ReadDocument,
 }
 
 impl Tool {
     /// Every tool this phase serves, in the order a surface lists them.
-    pub const ALL: &'static [Self] = &[Self::Search, Self::AuthoritativeFacts, Self::Lineage];
+    pub const ALL: &'static [Self] = &[
+        Self::Search,
+        Self::AuthoritativeFacts,
+        Self::Lineage,
+        Self::ReadDocument,
+    ];
 
     /// The wire name an agent sends and reads (§9.2).
     #[must_use]
@@ -45,6 +52,7 @@ impl Tool {
             Self::Search => "search",
             Self::AuthoritativeFacts => "get_authoritative_facts",
             Self::Lineage => "get_lineage",
+            Self::ReadDocument => "read_document",
         }
     }
 

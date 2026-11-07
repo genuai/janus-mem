@@ -4,18 +4,19 @@
 //! the same operations can be exposed over MCP and JSON-RPC without duplicating
 //! decisions (§9.5).
 
-use std::io::{IsTerminal as _, Write as _};
+use std::io::{IsTerminal as _, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use janus_mem::api::Failure;
+use janus_mem::api::{Call, Failure, Tool};
 use janus_mem::cli::{Cli, Command, Progress};
 use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
+use janus_mem::engine::Engine;
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
-use janus_mem::{chunk, doctor, ids, index, lineage, moves, scan, search, suggest, vault};
+use janus_mem::{chunk, doctor, ids, index, lineage, moves, read, scan, search, suggest, vault};
 use tracing_subscriber::EnvFilter;
 
 /// The directories a model may be read from, highest precedence first (V-25).
@@ -226,6 +227,15 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             )
         }
 
+        // A read answers through the engine, so the CLI tests the function the
+        // rpc loop and the MCP server call (§3.3).
+        Command::Read { path, json } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+            let params = serde_json::json!({ "path": path.to_string_lossy() });
+            call_tool(root, Tool::ReadDocument, params, json, read::render)
+        }
+
         // Chunking is a read command too: it shares the discovery, resolution and
         // identity pipeline with `scan` and stops one step later (M2 phase 3).
         Command::Chunks {
@@ -392,6 +402,41 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
     result.map(|()| ExitCode::SUCCESS)
 }
 
+/// Answers one tool call as the CLI does: the envelope as JSON, or the human
+/// form. A failure comes back as an error, so `main` maps it to an exit code.
+///
+/// The engine is built here, at the edge, with the clock and the embedder this
+/// process resolved, so a rebuild a call triggers publishes this process's
+/// generation (V-21 row 5).
+fn call_tool(
+    root: PathBuf,
+    tool: Tool,
+    params: serde_json::Value,
+    json: bool,
+    render: fn(&serde_json::Value, &mut dyn Write) -> std::io::Result<()>,
+) -> Result<(), JanusError> {
+    let config = Config::load(&root)?;
+    let (embedder, _reason) = read_embedder(&config, false);
+    let engine = Engine::new(root, config, Box::new(SystemClock), embedder);
+    let answer = engine.answer(&Call::new(tool, params))?;
+    if json {
+        emit_json(&answer);
+        return Ok(());
+    }
+    // A closed pipe is not a failure (`janus read | head`).
+    let _ = render(&answer, &mut std::io::stdout().lock());
+    Ok(())
+}
+
+/// Writes one object to stdout as pretty JSON. A closed pipe is not a command
+/// failure (`… --json | head`).
+fn emit_json(value: &impl serde::Serialize) {
+    let Ok(text) = serde_json::to_string_pretty(value) else {
+        return;
+    };
+    let _ = writeln!(std::io::stdout().lock(), "{text}");
+}
+
 /// Whether a failure of this command carries the envelope on stdout.
 ///
 /// Only the tool commands do (§2.7). A receipt such as `janus scan --json`
@@ -403,15 +448,12 @@ fn failure_envelope_wanted(cli: &Cli) -> bool {
         Command::Search { json: true, .. }
             | Command::Facts { json: true, .. }
             | Command::Lineage { json: true, .. }
+            | Command::Read { json: true, .. }
     )
 }
 
 fn print_failure(err: &JanusError) {
-    let Ok(json) = serde_json::to_string_pretty(&Failure::from_error(err)) else {
-        return;
-    };
-    // A closed pipe is not a command failure (`… --json | head`).
-    let _ = writeln!(std::io::stdout().lock(), "{json}");
+    emit_json(&Failure::from_error(err));
 }
 
 fn main() -> ExitCode {
