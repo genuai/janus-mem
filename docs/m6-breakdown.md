@@ -21,9 +21,9 @@ server. **Generation**: one validated index, as `src/index/store.rs` loads it.
 **Decision: M6 adds one read-only controller surface. It adds no corpus
 federation and no write.**
 
-Today the engine is reachable only through `janus` subcommands. Two of the five
-tool bodies already compute without printing; three render inside their own
-`run`. Measured against the code:
+Today the engine is reachable only through `janus` subcommands. Search already
+separates computation from rendering. Facts and lineage render inside `run`. Read
+and status are absent. Measured against the code:
 
 | M6 item | state today | evidence |
 |---|---|---|
@@ -279,6 +279,16 @@ contract, and P1 adds it to §9.4.
 (`src/index/mod.rs:273`), because M7's `expected_hash` is that value. No format
 bump: the value is already stored.
 
+Two rules keep the hash honest:
+
+1. **`read_document` hashes the bytes it returns.** It takes `content_hash` from
+the same file read that supplies `body` and `frontmatter`
+(`Document::content_hash`, `src/document.rs:39`), not from `DocMeta`. A stale
+generation or a skipped refresh must not label old bytes with a new hash.
+2. **A retired lineage node has `content_hash: null`.** A retired document has a
+`TombstoneMeta` row, and that row stores no hash
+(`src/index/mod.rs:207`). A live node carries the indexed hash.
+
 ## 3. Contracts
 
 Every case below is a test. A case number names one test function.
@@ -335,8 +345,14 @@ file outside the corpus.
 **Case 3.1.** `janus read decisions/2024-11-02-postgres-cache.md --json` returns
 `frontmatter` as a JSON object with `title: "Postgres cache"` and
 `status: "superseded"`, `body` equal to the file bytes after the closing fence,
-and `content_hash` equal to the document's `DocMeta::content_hash`. The expected
-body is written out by hand in the test.
+and `content_hash` equal to the blake3 of the whole file. The test computes that
+hash from the file, so the assertion is about the bytes, not about the index. The
+expected body is written out by hand.
+
+**Case 3.1b.** With another process holding `.janus/lock`, edit only the
+frontmatter, then call `read_document`. The response's `content_hash` matches the
+edited file and differs from `DocMeta::content_hash`, because the refresh was
+skipped. The body is unchanged. This case is the reason rule 1 exists.
 
 **Case 3.2.** `read` of `.janus/manifest.json` gives `path_escape`.
 
@@ -345,11 +361,11 @@ body is written out by hand in the test.
 **Case 3.4.** `read` of a path that does not exist gives `not_found`, and the
 message names the path.
 
-**Case 3.5.** `max_chars` truncates on a character boundary. The test body is
-`"ééééé"` (ten bytes, five characters), `max_chars: 5` returns `"éé"` (two
-characters, four bytes) and `truncated: true`, because the sixth byte starts
-inside the third `é`. A byte slice at offset 5 would panic or corrupt. Expected
-text is the literal, not a length.
+**Case 3.5.** `max_chars` counts characters, not bytes. The test body is
+`"éééééé"` (six characters, twelve bytes). `max_chars: 5` returns `"ééééé"`
+(five characters) and `truncated: true`; `max_chars: 6` returns the whole body
+and `truncated: false`. A byte counter would return `"ééé"` for the first call,
+so the two implementations disagree on a value the test states literally.
 
 **Case 3.6.** `max_chars` defaults to `config.mcp.max_chars` (4000,
 `src/config.rs:479`). An explicit request value overrides it; `0` means no limit
@@ -392,14 +408,25 @@ the decay factor and not the cached generation.
 **Case 4.5.** A cache hit writes nothing: every `.janus/` mtime is unchanged.
 
 **Case 4.6.** A generation whose `index_sha` is unchanged but whose `vectors_sha`
-changed is not reused. The test makes that state with `janus index
---no-embeddings` after a cached vector build, then calls `search` again and
-asserts `cache.misses` is `2`.
+changed is not reused. Setup: build the temp corpus with `model = "hash-64"`,
+call `search` to fill the cache, then change `[embedding] model` to `"hash-32"`
+and run `janus index`. Changing the model rewrites `vectors.f32` only, because
+`index.bin` holds text and postings and no vectors, so `index_sha` is unchanged.
+The test asserts that pair before querying: same `index_sha`, different
+`vectors_sha`. The next `search` then asserts `cache.misses` is `2` and
+`embeddings.model` is `hash-32`.
 
-**Case 4.7.** A busy lock is a skip, and the next call retries. While another
-process holds `.janus/lock`, call one answers from the loaded generation with
-`refresh: skipped, index busy`. After the lock is released and the corpus
-changed, call two refreshes and `cache.misses` is `2`.
+Case 4.6 must not use `janus index --no-embeddings`: that path carries unchanged
+vectors forward and keeps `vectors_sha` (`src/index/build.rs:579`,
+`tests/cli_index.rs:286`), so it creates no change to detect.
+
+**Case 4.7.** A busy lock is a skip, and the next call retries. Setup: edit the
+corpus first, then take `.janus/lock` in another process, then call `search`.
+Call one answers from the loaded generation, prints
+`refresh: skipped, index busy` on stderr, and reports `stale: true`. Release the
+lock and call `search` again with no further edit: the digest still differs from
+`corpus_sig`, so call two refreshes. `cache.misses` is `2`, and the answer
+reflects the edit.
 
 ### 3.5 `janus rpc`
 
@@ -425,12 +452,15 @@ stderr only. `stdout` holds responses only (case 10.1).
 **Case 5.6.** `{"tool": "janus_status"}` is answered without a build and without
 a lock.
 
-**Case 5.7.** The same five calls over rpc and over MCP return equal JSON, after
-one normalization: `taken_ms` is replaced by `0`. The field is `taken_ms` in both
-DTOs (`src/search/mod.rs:1122`, `src/lineage.rs:384`).
+**Case 5.7.** The same five calls over rpc and over the CLI `--json` commands
+return equal JSON, after one normalization: `taken_ms` is replaced by `0`. The
+field is `taken_ms` in both DTOs (`src/search/mod.rs:1122`, `src/lineage.rs:384`).
+This is the adapter-parity test that can run before MCP exists. The MCP parity
+case is 7.9.
 
-**Case 5.8.** A write tool name over rpc gives the same refusal as over MCP
-(case 8.2), because the refusal comes from the core.
+**Case 5.8.** A write tool name over rpc returns the core's refusal row
+(case 8.2): `ok: false`, `code: "refused"`. The refusal is decided in
+`src/api/mod.rs`, so this call proves rpc did not re-implement it.
 
 ### 3.6 The MCP handshake
 
@@ -497,6 +527,15 @@ schema does not list it. The caller reads text with `read_document`.
 **Case 7.8.** A busy writer (another process holds `.janus/lock`) is a skip, not
 an error: the call answers from the generation it loaded, and one
 `refresh: skipped, index busy` line goes to stderr.
+
+**Case 7.9.** The five calls over MCP equal the five calls over rpc, after
+`taken_ms` is replaced by `0`. Both adapters call `Engine::call`, so a difference
+is a defect in an adapter and nowhere else.
+
+**Case 7.10.** A lineage chain that contains one live node and one retired node
+returns `content_hash` as a hex string on the live node and `null` on the
+retired one. The fixture chain and one deleted document give both states in one
+call.
 
 ### 3.8 The write refusal
 
@@ -692,7 +731,8 @@ to decide.
 line answered, then the loop continues. Startup failures (no corpus, no config)
 exit `1` before the loop; every later failure is a response line.
 
-**Tests.** Cases 5.1–5.8, 10.1.
+**Tests.** Cases 5.1–5.8, 10.1. Case 5.7 compares rpc with the CLI, which exists;
+cross-adapter parity is case 7.9 in P4.
 
 **Handoff.** A language-agnostic surface exists. The MCP adapter reuses
 `Engine::call` and nothing else.
@@ -712,7 +752,7 @@ every stdout line. No test sleeps.
 `tools/call`. Schemas are `serde_json::Value` literals with
 `additionalProperties: false`, so an extra param is `-32602` (case 7.6).
 
-**Tests.** Cases 6.1–6.7, 7.1–7.8, 8.1–8.2, 10.2, 11.1–11.3.
+**Tests.** Cases 6.1–6.7, 7.1–7.10, 8.1–8.2, 10.2, 11.1–11.3.
 
 **Handoff.** The server answers W1–W3. The write refusal exists.
 
@@ -877,6 +917,32 @@ a real `types` filter, `max_chars` follows `[mcp] max_chars`
 feature flag, four JSON-RPC conformance cases were added, the P2 split became
 mandatory and `Clock` gained `Send + Sync`, the `é` truncation case was replaced
 with an exact character count, and four evidence citations were corrected.
+
+### Review round 2 — six findings, all accepted
+
+The re-check found six defects, five of them introduced by the round-1 fixes.
+All six were verified and accepted.
+
+1. The Unicode case still counted bytes: `"ééééé"` is five characters, so a
+   five-character limit truncates nothing. The case now uses six characters and
+   asserts `"ééééé"` for a limit of five.
+2. `read_document` was told to copy `DocMeta::content_hash` while returning the
+   file's own bytes. A skipped refresh would then label old bytes with a new
+   hash. The hash now comes from `Document::content_hash`
+   (`src/document.rs:39`), and case 3.1b edits the frontmatter under a held lock.
+3. A retired lineage node has no hash to offer: `TombstoneMeta` stores none
+   (`src/index/mod.rs:207`). The rule is now `null` on a retired node, with case
+   7.10.
+4. Case 4.6 could not create its own state: `janus index --no-embeddings` keeps
+   `vectors_sha` (`src/index/build.rs:579`). The case now changes the embedder
+   model, and the test asserts the same `index_sha` with a different
+   `vectors_sha` before it queries.
+5. Case 4.7 now edits before the locked call, so the retry is what refreshes.
+6. P3 compared rpc with MCP, which P4 builds. Case 5.7 now compares rpc with the
+   CLI, and cross-adapter parity is case 7.9 in P4.
+
+The round-2 re-check also caught a wrong count in the introduction: only `search`
+already separated compute from rendering. The text now says so.
 
 ### Phase 1 — the envelope, the codes, the response matrix
 
