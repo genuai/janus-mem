@@ -30,7 +30,7 @@ use crate::graph::{EffectiveStatus, Graph, Window};
 use crate::id::{Blake3Hash, ChunkId, DocId};
 use crate::index::embed::Embedder;
 use crate::index::refresh;
-use crate::index::store::{self, LoadOptions, Policy};
+use crate::index::store::{self, LoadOptions, Manifest, Policy};
 use crate::index::vectors::{Vectors, dot};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
 use crate::progress::Printer;
@@ -98,26 +98,8 @@ pub fn run(
     let started = Instant::now();
     check(&options)?;
     let prepared = load(root, config, clock, embedder, &options)?;
-    let ranked = rank(config, clock, embedder, &prepared, &options)?;
-    let answer = Answer {
-        root,
-        config,
-        snapshot: &prepared.snapshot,
-        rows: &ranked.rows,
-        selected: &ranked.selected,
-        hits: &ranked.hits,
-        query: Some(&options.query),
-        intent: ranked.reported_intent(),
-        as_of: ranked.as_of,
-        filter: &ranked.filter,
-        limit: options.limit,
-        alpha: ranked.alpha,
-        degraded: &ranked.degraded,
-        notes: &ranked.notes,
-        stale: ranked.stale,
-        started,
-    };
-    render(&Report::new(&answer), options.json)
+    let report = report(root, config, clock, embedder, &prepared, &options, started)?;
+    render(&report, options.json)
 }
 
 /// The usage checks of one query, before anything is read (§9.1 code 2).
@@ -489,6 +471,41 @@ pub(crate) fn rank(
     })
 }
 
+/// Ranks one query and builds the answer both renderers read (M6 §2.4).
+///
+/// # Errors
+///
+/// Exactly [`run`]'s.
+pub(crate) fn report(
+    root: &Path,
+    config: &Config,
+    clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
+    prepared: &Prepared,
+    options: &Options,
+    started: Instant,
+) -> Result<Report, JanusError> {
+    let ranked = rank(config, clock, embedder, prepared, options)?;
+    Ok(Report::new(&Answer {
+        root,
+        config,
+        snapshot: &prepared.snapshot,
+        rows: &ranked.rows,
+        selected: &ranked.selected,
+        hits: &ranked.hits,
+        query: Some(&options.query),
+        intent: ranked.reported_intent(),
+        as_of: ranked.as_of,
+        filter: &ranked.filter,
+        limit: options.limit,
+        alpha: ranked.alpha,
+        degraded: &ranked.degraded,
+        notes: &ranked.notes,
+        stale: ranked.stale,
+        started,
+    }))
+}
+
 // ────────────────────────────── load or build ──────────────────────────────
 
 /// A validated generation, plus the index rebuilt from it.
@@ -499,6 +516,12 @@ pub(crate) struct Prepared {
     /// True when the corpus changed after the generation was built (M4D §3.1).
     /// True only when this read declined to refresh.
     pub(crate) stale: bool,
+    /// The manifest these bytes validated against. A cache key compares it with
+    /// the manifest on disk (M6-5).
+    pub(crate) manifest: Manifest,
+    /// True when the manifest names another root, so a caller that caches must
+    /// repair the manifest before it may answer from a cache (M4D §3.3 row 6).
+    pub(crate) repair_pending: bool,
 }
 
 /// Loads a validated generation, refreshes it when the corpus changed, and
@@ -566,6 +589,8 @@ pub(crate) fn prepare(
         index,
         vectors: read.load.vectors,
         stale: read.stale,
+        repair_pending: read.load.refresh_request.is_some(),
+        manifest: read.load.manifest,
     })
 }
 

@@ -24,6 +24,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use chrono::NaiveDate;
+use janus_mem::clock::FixedClock;
+use janus_mem::config::Config;
+use janus_mem::engine::{Engine, Response};
 use serde_json::{Value, json};
 
 /// The committed fixture vault, relative to the crate root.
@@ -48,6 +52,57 @@ pub const NON_UTF8_REL: &str = "notes/non-utf8.md";
 /// supposed to change the goldens and this number, not to fail three tests with
 /// the same assertion.
 pub const FIXTURE_DOCUMENTS: usize = 19;
+
+/// The date every engine test reads as today, so no test reads the wall clock.
+pub fn today() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 1, 1).expect("a real date")
+}
+
+/// An engine over `root` with a fixed clock and no embedder: lexical only.
+///
+/// The engine is the second caller of the same compute the CLI runs, so a test
+/// that asserts one answer asserts both surfaces (§5 case 1.1).
+pub fn engine(root: &Path) -> Engine {
+    Engine::new(
+        root.to_path_buf(),
+        Config::load(root).expect("the corpus config"),
+        Box::new(FixedClock(today())),
+        None,
+    )
+}
+
+/// Writes one document, creating its directories.
+pub fn write_document(root: &Path, rel_path: &str, text: &str) {
+    let path = root.join(rel_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create the document's directory");
+    }
+    fs::write(path, text).expect("write the document");
+}
+
+/// Moves one file's mtime forward, because the corpus signature reads it.
+///
+/// The signature encodes path, size and mtime only, so an edit that must be
+/// visible has to move the mtime (M6 §3.4 case 4.2).
+pub fn advance_mtime(path: &Path) {
+    let when = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("open the document to move its mtime")
+        .set_modified(when)
+        .expect("set the mtime");
+}
+
+/// The `rel_path` of every result of one engine answer, in order.
+pub fn engine_paths(response: &Response) -> Vec<String> {
+    response.json["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .map(|row| row["rel_path"].as_str().expect("rel_path").to_owned())
+        .collect()
+}
 
 /// A `janus` command ready to configure.
 pub fn janus() -> Command {

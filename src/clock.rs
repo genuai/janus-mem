@@ -9,7 +9,11 @@
 use chrono::{NaiveDate, Utc};
 
 /// A source of "today", injected wherever a decision depends on the date.
-pub trait Clock {
+///
+/// The bounds are what let one engine answer from two threads (M6 §2.4): a shared
+/// engine owns its clock, and an `RwLock` around the cached load is only `Sync`
+/// when everything beside it is.
+pub trait Clock: Send + Sync {
     /// The current calendar date, in UTC.
     fn today(&self) -> NaiveDate;
 }
