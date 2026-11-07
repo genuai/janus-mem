@@ -96,27 +96,69 @@ pub fn run(
     options: Options,
 ) -> Result<(), JanusError> {
     let started = Instant::now();
-    let outcome = query(root, config, clock, embedder, &options)?;
-    render(&Render {
+    check(&options)?;
+    let prepared = load(root, config, clock, embedder, &options)?;
+    let ranked = rank(config, clock, embedder, &prepared, &options)?;
+    let answer = Answer {
         root,
         config,
-        snapshot: &outcome.snapshot,
-        rows: &outcome.rows,
-        selected: &outcome.selected,
-        hits: &outcome.hits,
-        json: options.json,
-        started,
+        snapshot: &prepared.snapshot,
+        rows: &ranked.rows,
+        selected: &ranked.selected,
+        hits: &ranked.hits,
         query: Some(&options.query),
-        intent: outcome.reported_intent(),
-        as_of: outcome.as_of,
-        filter: &outcome.filter,
+        intent: ranked.reported_intent(),
+        as_of: ranked.as_of,
+        filter: &ranked.filter,
         limit: options.limit,
-        alpha: outcome.alpha,
-        degraded: outcome.degraded,
-        notes: outcome.notes,
-        median_decay: outcome.median_decay,
-        stale: outcome.stale,
-    })
+        alpha: ranked.alpha,
+        degraded: &ranked.degraded,
+        notes: &ranked.notes,
+        stale: ranked.stale,
+        started,
+    };
+    render(&Report::new(&answer), options.json)
+}
+
+/// The usage checks of one query, before anything is read (§9.1 code 2).
+///
+/// A caller that loads first would build an index for a query it must reject,
+/// so this runs first and [`rank`] repeats it for the callers that skip it.
+pub(crate) fn check(options: &Options) -> Result<(), JanusError> {
+    parse_intent(options.intent.as_deref())?;
+    require_scope(options.scope_only, &options.scopes)
+}
+
+/// Loads the generation a query answers from, with the embedder this query uses.
+///
+/// A lexical-only query resolves no embedder and asks for no rows, so a machine
+/// without the model pays nothing (V-4, V-14).
+pub(crate) fn load(
+    root: &Path,
+    config: &Config,
+    clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
+    options: &Options,
+) -> Result<Prepared, JanusError> {
+    let load_embedder = if options.no_embeddings {
+        None
+    } else {
+        embedder
+    };
+    let alpha = if load_embedder.is_some() {
+        config.embedding.alpha
+    } else {
+        0.0
+    };
+    prepare(
+        root,
+        config,
+        clock,
+        load_embedder,
+        alpha > 0.0,
+        options.no_rebuild,
+        options.progress,
+    )
 }
 
 /// A ranked query result, owned so a caller can measure it without rendering.
@@ -135,13 +177,8 @@ pub struct Outcome {
     pub degraded: Vec<String>,
     /// The query intent the caller named.
     pub intent: Intent,
-    /// True when this query decays an undated document by the corpus median.
-    /// False when decay is off or when the generation has no dated document.
-    pub(crate) median_decay: bool,
     /// The valid-time date this outcome answered for, when `--as-of` was given.
     pub as_of: Option<NaiveDate>,
-    /// The eligibility gate this outcome was computed with, maps included.
-    pub(crate) filter: Filter,
     /// Title tokenizations this query performed: one per selected document
     /// (M4C §3.1). An empty query still tokenizes each title once.
     pub title_tokenizations: usize,
@@ -152,6 +189,43 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    /// Joins one loaded generation to what a query computed from it.
+    fn assemble(prepared: Prepared, ranked: Ranked) -> Self {
+        Self {
+            rows: ranked.rows,
+            selected: ranked.selected,
+            hits: ranked.hits,
+            notes: ranked.notes,
+            alpha: ranked.alpha,
+            degraded: ranked.degraded,
+            intent: ranked.intent,
+            as_of: ranked.as_of,
+            title_tokenizations: ranked.title_tokenizations,
+            stale: ranked.stale,
+            snapshot: prepared.snapshot,
+        }
+    }
+}
+
+/// What one query computed, borrowing the generation it answered from.
+///
+/// The snapshot is absent on purpose: a caller that keeps the load in a cache
+/// answers from it by reference, so no call pays a copy of it (M6 §11).
+pub(crate) struct Ranked {
+    pub(crate) rows: Vec<DocRow>,
+    pub(crate) selected: Vec<usize>,
+    pub(crate) hits: Vec<Hit>,
+    pub(crate) notes: Vec<String>,
+    pub(crate) alpha: f64,
+    pub(crate) degraded: Vec<String>,
+    pub(crate) intent: Intent,
+    pub(crate) as_of: Option<NaiveDate>,
+    pub(crate) filter: Filter,
+    pub(crate) title_tokenizations: usize,
+    pub(crate) stale: bool,
+}
+
+impl Ranked {
     /// The intent the envelope reports: the row that ranked the answer.
     ///
     /// An `--as-of` query ranks with the `history` row, so that is what it
@@ -181,8 +255,29 @@ pub fn query(
     embedder: Option<&dyn Embedder>,
     options: &Options,
 ) -> Result<Outcome, JanusError> {
+    check(options)?;
+    let prepared = load(root, config, clock, embedder, options)?;
+    let ranked = rank(config, clock, embedder, &prepared, options)?;
+    Ok(Outcome::assemble(prepared, ranked))
+}
+
+/// Ranks one query against a generation it only borrows.
+///
+/// Borrowing is what lets a caller keep the load in a cache: nothing here takes
+/// the snapshot, so no call pays a copy of it (M6 §11).
+///
+/// # Errors
+///
+/// Exactly [`run`]'s.
+pub(crate) fn rank(
+    config: &Config,
+    clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
+    prepared: &Prepared,
+    options: &Options,
+) -> Result<Ranked, JanusError> {
+    check(options)?;
     let intent = parse_intent(options.intent.as_deref())?;
-    require_scope(options.scope_only, &options.scopes)?;
     // `--as-of` selects the valid-time window and nothing else, so it scores
     // with the `history` row: no decay, and every status at factor 1.0. The
     // gate below is what turns the status off, not this row (§3.8, M5-34).
@@ -204,16 +299,6 @@ pub fn query(
     } else {
         0.0
     };
-    let prefetch = configured_alpha > 0.0 && load_embedder.is_some();
-    let prepared = prepare(
-        root,
-        config,
-        clock,
-        load_embedder,
-        prefetch,
-        options.no_rebuild,
-        options.progress,
-    )?;
 
     let mut alpha = configured_alpha;
     let mut degraded = degraded_reasons(
@@ -385,8 +470,11 @@ pub fn query(
 
     let median_decay = score::policy(scoring_intent, options.include_superseded).decay
         && decay_basis.undated_age_days.is_some();
+    // §3.5's provenance line. It lives in the answer, not in a renderer, so the
+    // table and the JSON cannot disagree about the notes.
+    add_provenance(&rows, &selected, &hits, median_decay, &mut notes);
 
-    Ok(Outcome {
+    Ok(Ranked {
         rows,
         selected,
         hits,
@@ -394,12 +482,10 @@ pub fn query(
         alpha,
         degraded,
         intent,
-        median_decay,
         as_of: options.as_of,
         filter,
         title_tokenizations,
         stale: prepared.stale,
-        snapshot: prepared.snapshot,
     })
 }
 
@@ -1034,46 +1120,43 @@ pub struct Hit {
     pub breakdown: Breakdown,
 }
 
-/// Everything a renderer needs to turn hits into output.
-pub(crate) struct Render<'a> {
+/// Everything the one report is built from: a computed answer and its sources.
+///
+/// The report is owned (see [`Report`]); this view exists so the builder takes
+/// one argument instead of seventeen. It borrows, and it does not outlive the
+/// call that builds the report.
+pub(crate) struct Answer<'a> {
     pub(crate) root: &'a Path,
     pub(crate) config: &'a Config,
     pub(crate) snapshot: &'a Snapshot,
     pub(crate) rows: &'a [DocRow],
     pub(crate) selected: &'a [usize],
     pub(crate) hits: &'a [Hit],
-    pub(crate) json: bool,
     pub(crate) started: Instant,
     pub(crate) query: Option<&'a str>,
     pub(crate) intent: Option<Intent>,
     /// The expanded `--as-of` date, when the query asked for one (§3.8).
     pub(crate) as_of: Option<NaiveDate>,
-    /// True when the answer decays an undated document by the corpus median.
-    pub(crate) median_decay: bool,
     /// The gate this answer passed; it holds the window and status maps.
     pub(crate) filter: &'a Filter,
     pub(crate) limit: usize,
     pub(crate) alpha: f64,
-    pub(crate) degraded: Vec<String>,
-    pub(crate) notes: Vec<String>,
+    pub(crate) degraded: &'a [String],
+    pub(crate) notes: &'a [String],
     /// True when the corpus changed after the index was built (M4D §3.1).
     pub(crate) stale: bool,
 }
 
-/// Renders the hits in the command's selected mode.
-pub(crate) fn render(render: &Render<'_>) -> Result<(), JanusError> {
-    // §3.5's provenance line is built here, not by a caller, so `search` and
-    // `facts` cannot disagree about when it appears.
-    let notes = notes_with_provenance(render);
+/// Writes one report in the command's selected mode.
+pub(crate) fn render(report: &Report, json: bool) -> Result<(), JanusError> {
     let mut out = io::stdout().lock();
-    if render.json {
-        let report = Report::new(render, &notes);
+    if json {
         let json = serde_json::to_string_pretty(&crate::api::Ok::new(report))
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         // A closed pipe is not a command failure (`… --json | head`).
         let _ = writeln!(out, "{json}");
     } else {
-        write_human(&mut out, render, &notes);
+        write_human(&mut out, report);
     }
     Ok(())
 }
@@ -1082,18 +1165,22 @@ pub(crate) fn render(render: &Render<'_>) -> Result<(), JanusError> {
 ///
 /// The count is over the documents that were actually returned, after `--limit`
 /// and the status gates: the line states a fact about these results, not about
-/// the corpus. It never asks the user to edit a file.
-fn notes_with_provenance(render: &Render<'_>) -> Vec<String> {
-    let mut notes = render.notes.clone();
-    let undated = render
-        .hits
+/// the corpus. It never asks the user to edit a file. `search` and `facts` both
+/// call this, so neither can omit the line the other prints.
+fn add_provenance(
+    rows: &[DocRow],
+    selected: &[usize],
+    hits: &[Hit],
+    median_decay: bool,
+    notes: &mut Vec<String>,
+) {
+    let undated = hits
         .iter()
-        .filter(|hit| render.rows[render.selected[hit.doc_index]].date_source == DateSource::None)
+        .filter(|hit| rows[selected[hit.doc_index]].date_source == DateSource::None)
         .count();
-    if undated > 0 && render.median_decay {
+    if undated > 0 && median_decay {
         notes.push(undated_note(undated));
     }
-    notes
 }
 
 /// The `notes` line for `undated` returned results.
@@ -1102,18 +1189,23 @@ fn undated_note(undated: usize) -> String {
 }
 
 /// The `index` block of the JSON report: what the answer came from (M4D §3.1).
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct IndexDto {
     /// True when the corpus changed after the index was built.
     stale: bool,
 }
 
-#[derive(Serialize)]
-struct Report<'a> {
+/// The one answer of `search` and `facts`, owned, so a caller can render it or
+/// hand it to an adapter (M6 §2.4).
+///
+/// Two renderers read this value: the human table and the JSON envelope. Neither
+/// reads the generation, so the table and the JSON cannot disagree about a row.
+#[derive(Debug, Serialize)]
+pub(crate) struct Report {
     vault: String,
-    corpus_id: &'a str,
+    corpus_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    query: Option<&'a str>,
+    query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     intent: Option<&'static str>,
     /// The expanded valid-time date (§3.8). Additive: `api` stays 1.
@@ -1122,51 +1214,52 @@ struct Report<'a> {
     limit: usize,
     taken_ms: u64,
     alpha: f64,
-    degraded: &'a [String],
-    notes: &'a [String],
+    degraded: Vec<String>,
+    notes: Vec<String>,
     /// The index this answer came from (M4D §3.1). Additive: `api` stays 1.
     index: IndexDto,
-    results: Vec<HitDto<'a>>,
+    results: Vec<HitDto>,
 }
 
-impl<'a> Report<'a> {
-    fn new(render: &'a Render<'_>, notes: &'a [String]) -> Self {
+impl Report {
+    fn new(answer: &Answer<'_>) -> Self {
         Self {
-            vault: render.root.display().to_string(),
-            corpus_id: &render.config.corpus_id,
-            query: render.query,
-            intent: render.intent.map(intent_name),
-            as_of: render.as_of.map(|date| date.to_string()),
-            limit: render.limit,
-            taken_ms: u64::try_from(render.started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            alpha: render.alpha,
-            degraded: &render.degraded,
-            notes,
+            vault: answer.root.display().to_string(),
+            corpus_id: answer.config.corpus_id.clone(),
+            query: answer.query.map(str::to_owned),
+            intent: answer.intent.map(intent_name),
+            as_of: answer.as_of.map(|date| date.to_string()),
+            limit: answer.limit,
+            taken_ms: u64::try_from(answer.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            alpha: answer.alpha,
+            degraded: answer.degraded.to_vec(),
+            notes: answer.notes.to_vec(),
             index: IndexDto {
-                stale: render.stale,
+                stale: answer.stale,
             },
-            results: render
+            results: answer
                 .hits
                 .iter()
                 .enumerate()
-                .map(|(rank, hit)| HitDto::new(render, rank + 1, hit))
+                .map(|(rank, hit)| HitDto::new(answer, rank + 1, hit))
                 .collect(),
         }
     }
 }
 
-#[derive(Serialize)]
-struct HitDto<'a> {
+/// One result row, owned: every field is a value the row printed.
+#[derive(Debug, Serialize)]
+struct HitDto {
     rank: usize,
     id: String,
     /// Hash of the whole file's bytes; `null` is never possible here (M6 §2.7).
     content_hash: String,
     path: String,
-    rel_path: &'a str,
-    title: &'a str,
+    rel_path: String,
+    title: String,
     #[serde(rename = "type")]
-    type_name: &'a str,
-    status: &'a str,
+    type_name: String,
+    status: &'static str,
     date: Option<String>,
     /// Where `date` came from (§6.3, B-6); `absent` means no date at all.
     date_source: &'static str,
@@ -1176,56 +1269,56 @@ struct HitDto<'a> {
     valid_to: Option<String>,
     /// The status a reader must use, next to the declared `status` (§3.7).
     effective_status: &'static str,
-    scope: &'a str,
-    shared_with: &'a [String],
-    tags: &'a [String],
+    scope: String,
+    shared_with: Vec<String>,
+    tags: Vec<String>,
     scores: Breakdown,
     chunk_id: String,
     ordinal: u32,
     /// `(start, end)` byte span into the body; the text is absent (§8.5).
     span: (u32, u32),
-    breadcrumb: Vec<&'a str>,
+    breadcrumb: Vec<String>,
     tokens: u32,
 }
 
-impl<'a> HitDto<'a> {
-    fn new(render: &'a Render<'_>, rank: usize, hit: &Hit) -> Self {
-        let row = &render.rows[render.selected[hit.doc_index]];
-        let chunk = &render.snapshot.chunks[hit.chunk_index];
-        let window = render.filter.window(row.id);
+impl HitDto {
+    fn new(answer: &Answer<'_>, rank: usize, hit: &Hit) -> Self {
+        let row = &answer.rows[answer.selected[hit.doc_index]];
+        let chunk = &answer.snapshot.chunks[hit.chunk_index];
+        let window = answer.filter.window(row.id);
         Self {
             rank,
             id: row.id.to_hex(),
             content_hash: row.content_hash.to_hex(),
-            path: render.root.join(&row.rel_path).display().to_string(),
-            rel_path: &row.rel_path,
-            title: &row.title,
-            type_name: &row.type_name,
+            path: answer.root.join(&row.rel_path).display().to_string(),
+            rel_path: row.rel_path.clone(),
+            title: row.title.clone(),
+            type_name: row.type_name.clone(),
             status: row.status.as_str(),
             date: row.date.map(|date| date.to_string()),
             date_source: row.date_source.as_str(),
             effective_from: row.effective_from.map(|date| date.to_string()),
             valid_from: window.valid_from.map(|date| date.to_string()),
             valid_to: window.valid_to.map(|date| date.to_string()),
-            effective_status: render.filter.effective_status(row.id).as_str(),
-            scope: &row.scope,
-            shared_with: &row.shared_with,
-            tags: &row.tags,
+            effective_status: answer.filter.effective_status(row.id).as_str(),
+            scope: row.scope.clone(),
+            shared_with: row.shared_with.clone(),
+            tags: row.tags.clone(),
             scores: hit.breakdown,
             chunk_id: chunk.id.to_hex(),
             ordinal: hit.ordinal,
             span: chunk.span,
-            breadcrumb: breadcrumb(render.snapshot, chunk),
+            breadcrumb: breadcrumb(answer.snapshot, chunk),
             tokens: chunk.tokens,
         }
     }
 }
 
-fn breadcrumb<'a>(snapshot: &'a Snapshot, chunk: &ChunkMeta) -> Vec<&'a str> {
+fn breadcrumb(snapshot: &Snapshot, chunk: &ChunkMeta) -> Vec<String> {
     chunk
         .heading_path
         .iter()
-        .map(|id| snapshot.strings.get(*id).unwrap_or_default())
+        .map(|id| snapshot.strings.get(*id).unwrap_or_default().to_owned())
         .collect()
 }
 
@@ -1240,14 +1333,13 @@ fn intent_name(intent: Intent) -> &'static str {
 
 // ── human ───────────────────────────────────────────────────────────────────
 
-fn write_human(out: &mut impl io::Write, r: &Render<'_>, notes: &[String]) {
-    let _ = writeln!(out, "corpus:  {}", r.root.display());
-    match (r.query, r.intent, r.as_of) {
+fn write_human(out: &mut impl io::Write, r: &Report) {
+    let _ = writeln!(out, "corpus:  {}", r.vault);
+    match (&r.query, r.intent, &r.as_of) {
         (Some(query), Some(intent), Some(as_of)) => {
             let _ = writeln!(
                 out,
-                "query:   {query:?}  as-of = {as_of}  intent = {}  limit = {}",
-                intent_name(intent),
+                "query:   {query:?}  as-of = {as_of}  intent = {intent}  limit = {}",
                 r.limit
             );
         }
@@ -1261,8 +1353,7 @@ fn write_human(out: &mut impl io::Write, r: &Render<'_>, notes: &[String]) {
         (Some(query), Some(intent), None) => {
             let _ = writeln!(
                 out,
-                "query:   {query:?}  intent = {}  limit = {}",
-                intent_name(intent),
+                "query:   {query:?}  intent = {intent}  limit = {}",
                 r.limit
             );
         }
@@ -1275,7 +1366,7 @@ fn write_human(out: &mut impl io::Write, r: &Render<'_>, notes: &[String]) {
     }
     let _ = writeln!(out);
 
-    if r.hits.is_empty() {
+    if r.results.is_empty() {
         let _ = writeln!(out, "no results");
     } else {
         let mut rows: Vec<[String; 5]> = vec![[
@@ -1285,19 +1376,17 @@ fn write_human(out: &mut impl io::Write, r: &Render<'_>, notes: &[String]) {
             "date".to_owned(),
             "path".to_owned(),
         ]];
-        for hit in r.hits {
-            let row = &r.rows[r.selected[hit.doc_index]];
-            let crumb = breadcrumb(r.snapshot, &r.snapshot.chunks[hit.chunk_index]).join(" > ");
+        for hit in &r.results {
+            let crumb = hit.breadcrumb.join(" > ");
             rows.push([
-                format!("{:.4}", hit.breakdown.final_score),
-                format!("{:.2}", hit.breakdown.authority),
-                row.status.as_str().to_owned(),
-                row.date
-                    .map_or_else(|| "-".to_owned(), |date| date.to_string()),
+                format!("{:.4}", hit.scores.final_score),
+                format!("{:.2}", hit.scores.authority),
+                hit.status.to_owned(),
+                hit.date.clone().unwrap_or_else(|| "-".to_owned()),
                 if crumb.is_empty() {
-                    row.rel_path.clone()
+                    hit.rel_path.clone()
                 } else {
-                    format!("{}  {crumb}", row.rel_path)
+                    format!("{}  {crumb}", hit.rel_path)
                 },
             ]);
         }
@@ -1325,8 +1414,8 @@ fn write_human(out: &mut impl io::Write, r: &Render<'_>, notes: &[String]) {
     }
 
     let _ = writeln!(out);
-    let _ = writeln!(out, "{} result(s)", r.hits.len());
-    for note in notes {
+    let _ = writeln!(out, "{} result(s)", r.results.len());
+    for note in &r.notes {
         let _ = writeln!(out, "note: {note}");
     }
 }

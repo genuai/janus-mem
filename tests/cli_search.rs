@@ -950,6 +950,47 @@ fn facts_lists_active_decisions_specs_and_principles_without_a_query() {
 }
 
 #[test]
+fn case_7_2b_facts_types_returns_only_the_named_types() {
+    // One document of each fact type, so a filter that ignores `--types` would
+    // return three rows instead of two (M6 §3.7 case 7.2b).
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("janus.toml"), "corpus_id = \"types\"\n").unwrap();
+    for (rel_path, kind) in [
+        ("decisions/one.md", "decision"),
+        ("principles/two.md", "principle"),
+        ("specs/three.md", "spec"),
+    ] {
+        let path = root.join(rel_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            format!(
+                "---\ntitle: {kind}\ntype: {kind}\nstatus: active\ndate: 2024-01-01\n---\n\nthe cache\n"
+            ),
+        )
+        .unwrap();
+    }
+    index(root);
+
+    let mut filtered = result_paths(&common::facts_json(
+        root,
+        &["--types", "decision,principle"],
+    ));
+    filtered.sort();
+    assert_eq!(filtered, vec!["decisions/one.md", "principles/two.md"]);
+
+    // Without the flag every fact type is a fact, so the filter is what narrows
+    // the list and not the fallback.
+    assert_eq!(result_paths(&common::facts_json(root, &[])).len(), 3);
+    // An alias resolves through the registry, as `search --types` does.
+    assert_eq!(
+        result_paths(&common::facts_json(root, &["--types", "adhoc"])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn facts_ignores_the_superseded_search_override() {
     let vault = fixture_vault();
     index(vault.path());

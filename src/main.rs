@@ -353,6 +353,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         Command::Facts {
             query,
             tags,
+            types,
             scope,
             scope_only,
             limit,
@@ -375,6 +376,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                 &search::facts::Options {
                     query,
                     tags,
+                    types,
                     scopes: scope,
                     scope_only,
                     limit,
