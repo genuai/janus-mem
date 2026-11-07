@@ -1232,11 +1232,17 @@ stdout when `--json` is set, and then exit with the code of §9.1. A receipt
 command prints its `error:` line on stderr and nothing on stdout, so a caller can
 tell "no report" from "a report with no rows".
 
-**Etag.** Every document row carries `content_hash`: the hash of the bytes the
-call read, never of the indexed row alone, so a skipped refresh cannot label old
-bytes with a new hash. `content_hash` is the etag field name. §9.3's
-`expected_hash` asks for that same value under the name a write request needs;
-there is no second name for it.
+**Etag.** Every document row carries `content_hash`. `read_document` hashes the
+bytes it returned, so the value always describes the text beside it. A `search`,
+`get_authoritative_facts` or `get_lineage` row carries the indexed hash of the
+generation it answered from: those tools read the index and never the file, so
+after a skipped refresh the hash describes the indexed bytes and not the file on
+disk. A caller that needs the current bytes calls `read_document`, or sends the
+indexed hash with a write and accepts a conflict when the file has changed.
+`janus_status` reports `index.stale`, and the refresh decision itself is one
+`refresh:` line on stderr (§9.1). `content_hash` is the etag field name; §9.3's
+`expected_hash` asks for that same value under the name a write request needs,
+and there is no second name for it.
 
 ---
 
