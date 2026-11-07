@@ -407,18 +407,18 @@ the decay factor and not the cached generation.
 
 **Case 4.5.** A cache hit writes nothing: every `.janus/` mtime is unchanged.
 
-**Case 4.6.** A generation whose `index_sha` is unchanged but whose `vectors_sha`
-changed is not reused. Setup: build the temp corpus with `model = "hash-64"`,
-call `search` to fill the cache, then change `[embedding] model` to `"hash-32"`
-and run `janus index`. Changing the model rewrites `vectors.f32` only, because
-`index.bin` holds text and postings and no vectors, so `index_sha` is unchanged.
-The test asserts that pair before querying: same `index_sha`, different
-`vectors_sha`. The next `search` then asserts `cache.misses` is `2` and
-`embeddings.model` is `hash-32`.
+**Case 4.6.** The cache key compares the manifest field by field. A unit test in
+`src/engine.rs` holds two manifests that differ in exactly one field and asserts
+the cached load is not reusable. The table is exhaustive: `index_sha`,
+`vectors_sha`, `corpus_sig`, `format_version`, `schema_version`, `corpus_id`,
+`tokenizer`, `chunker`, `embedder`. Adding a field to `Manifest` without adding a
+row must fail a second test that lists the compared fields and compares the
+count with the struct's.
 
-Case 4.6 must not use `janus index --no-embeddings`: that path carries unchanged
-vectors forward and keeps `vectors_sha` (`src/index/build.rs:579`,
-`tests/cli_index.rs:286`), so it creates no change to detect.
+The case cannot be driven end to end through one `Engine`: the engine keeps the
+embedder it was built with, so a corpus re-indexed under another model is a
+compatibility mismatch, not a cache question. The predicate is the thing that
+must be right, so the predicate is what the test calls.
 
 **Case 4.7.** A busy lock is a skip, and the next call retries. Setup: edit the
 corpus first, then take `.janus/lock` in another process, then call `search`.
@@ -452,10 +452,11 @@ stderr only. `stdout` holds responses only (case 10.1).
 **Case 5.6.** `{"tool": "janus_status"}` is answered without a build and without
 a lock.
 
-**Case 5.7.** The same five calls over rpc and over the CLI `--json` commands
-return equal JSON, after one normalization: `taken_ms` is replaced by `0`. The
-field is `taken_ms` in both DTOs (`src/search/mod.rs:1122`, `src/lineage.rs:384`).
-This is the adapter-parity test that can run before MCP exists. The MCP parity
+**Case 5.7.** The five calls over rpc and over the CLI `--json` commands return
+equal JSON, after two normalizations: `taken_ms` becomes `0`, and for
+`janus_status` the `cache` object becomes `null`. Both are process-local facts:
+one is a duration, the other counts calls in this process. Each process's
+counters are asserted separately against its own call history. The MCP parity
 case is 7.9.
 
 **Case 5.8.** A write tool name over rpc returns the core's refusal row
@@ -943,6 +944,20 @@ All six were verified and accepted.
 
 The round-2 re-check also caught a wrong count in the introduction: only `search`
 already separated compute from rendering. The text now says so.
+
+### Review round 3 — two findings, both accepted
+
+The re-check found two defects, both introduced by round 2.
+
+1. Case 4.6 changed `[embedding] model` to create a vector-only publish. That
+   cannot work: the cached engine keeps the embedder it was built with, so the
+   new manifest is a compatibility mismatch and not a cache question
+   (`src/index/store.rs:865`). The case is now a unit test on the key predicate,
+   with one row per manifest field and a second test that fails when a new field
+   has no row. That covers more fields than the integration test could.
+2. Case 5.7 compared `janus_status` across two processes while its `cache`
+   counters count calls in one. The normalization now also nulls `cache`, and
+   each process's counters are asserted against its own history.
 
 ### Phase 1 — the envelope, the codes, the response matrix
 
