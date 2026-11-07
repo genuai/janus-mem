@@ -15,6 +15,7 @@ expression: snapshot_json(&text)
   "notes": [
     "1 more document(s) have relevance > 0; raise --limit to see them"
   ],
+  "ok": true,
   "query": "cache",
   "results": [
     {
@@ -22,6 +23,7 @@ expression: snapshot_json(&text)
         "Redis cache"
       ],
       "chunk_id": "4a607daa43c0441fe93858621648ca907843e34c3f0c56844f14372a71ef4624",
+      "content_hash": "cb739381d8b33fad95a8b8251836619738547a3fd83b2972f5740a12c7b30ae6",
       "date": "2024-12-01",
       "date_source": "filename",
       "effective_from": null,
@@ -61,6 +63,7 @@ expression: snapshot_json(&text)
         "Postgres cache"
       ],
       "chunk_id": "854fee3dccd0d87d80df9a0f2b11aef4f6d9e2f6edd27ac58de59b7aa2ee01ca",
+      "content_hash": "36a1f68bc637d0414a5bdf215a75a03c89dde3bcb0c7324c921c0296d4930a0f",
       "date": "2024-11-02",
       "date_source": "filename",
       "effective_from": null,
@@ -100,6 +103,7 @@ expression: snapshot_json(&text)
         "Cache revisited"
       ],
       "chunk_id": "c6bcc6719b62c49c66e8dc99fc4c3cf22b6f15c1b3fe3f1f27e5e4d788a75396",
+      "content_hash": "9278b0cfd9cccf91bf4b559fd26e85abf5f7dab3d75f32342a97164d377e0467",
       "date": "2025-02-01",
       "date_source": "filename",
       "effective_from": null,

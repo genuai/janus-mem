@@ -4,11 +4,12 @@
 //! the same operations can be exposed over MCP and JSON-RPC without duplicating
 //! decisions (§9.5).
 
-use std::io::IsTerminal as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
+use janus_mem::api::Failure;
 use janus_mem::cli::{Cli, Command, Progress};
 use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
@@ -389,14 +390,42 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
     result.map(|()| ExitCode::SUCCESS)
 }
 
+/// Whether a failure of this command carries the envelope on stdout.
+///
+/// Only the tool commands do (§2.7). A receipt such as `janus scan --json`
+/// keeps its shape: one `error:` line on stderr and nothing on stdout, so a
+/// caller can tell "no report" from "a report with no rows".
+fn failure_envelope_wanted(cli: &Cli) -> bool {
+    matches!(
+        &cli.command,
+        Command::Search { json: true, .. }
+            | Command::Facts { json: true, .. }
+            | Command::Lineage { json: true, .. }
+    )
+}
+
+fn print_failure(err: &JanusError) {
+    let Ok(json) = serde_json::to_string_pretty(&Failure::from_error(err)) else {
+        return;
+    };
+    // A closed pipe is not a command failure (`… --json | head`).
+    let _ = writeln!(std::io::stdout().lock(), "{json}");
+}
+
 fn main() -> ExitCode {
     init_tracing();
 
     let cli = Cli::parse();
+    // Read before `run` takes ownership: the error type cannot know whether the
+    // caller asked for JSON, and neither can a renderer that never ran.
+    let json = failure_envelope_wanted(&cli);
 
     match run(cli) {
         Ok(code) => code,
         Err(err) => {
+            if json {
+                print_failure(&err);
+            }
             eprintln!("error: {err}");
             ExitCode::from(err.exit_code())
         }

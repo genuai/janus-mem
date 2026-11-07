@@ -650,6 +650,8 @@ supplies one rather than asserting an empty list.
 | M6-12 | `search` returns spans, never text; `read_document` is the one text path | The generation stores spans (§8.5), and one text path cannot disagree with itself about truncation. §9.2's `max_chars` on `search` is corrected in §9. |
 | M6-13 | Wire names and parameter names follow §9.2 exactly | The spec is the public contract. Renaming a tool in an implementation plan is a breaking change nobody asked for. |
 | M6-14 | The envelope covers the five tool surfaces and their CLI counterparts, not the whole program | `janus index --json` is a receipt, not an answer. Widening the envelope there would move goldens for no agent benefit. |
+| M6-15 | Case 2.3's CLI half belongs to the `read` phase (P2b) | No tool command of P1 raises `path_escape`: `lineage` answers `not_found` for an escaping path today, and `janus read` is the first command that refuses one (cases 3.2 and 3.3). |
+| M6-16 | The SPEC §9.4 amendment ships in P5, not in P1 | The P1 file list has no `SPEC.md`. One phase must own that paragraph, so all §9 text lands together. |
 
 ## 5. Phases
 
@@ -844,7 +846,7 @@ These amendments ship in the phase that owns them. Each is in the same PR.
    their five CLI counterparts, that `janus index` and the other reports keep
    their shape, that a failure carries `code`, `message` and optional `hint` with
    no results, that a `--json` failure prints that object on stdout before the
-   exit code, and that `content_hash` is the etag field name. (P1.)
+   exit code, and that `content_hash` is the etag field name. (P5; M6-16.)
 2. **§9.5 rpc shape.** Add the request shape `{id, tool, params}` and state that
    rpc is **not** JSON-RPC, while MCP is. The current text says "same shapes as
    the MCP tools" without saying which layer owns framing. (P3.)
@@ -970,7 +972,52 @@ evidence, with round 4 as a known gap.
 
 ### Phase 1 — the envelope, the codes, the response matrix
 
-_(empty)_
+**Sizes.** logic 269 / 400, tests 599 / 600. No dependency was added.
+
+**What landed.** `src/api/` holds the shared head (`Ok<T>`, `Failure`), the code
+table (`ApiCode`, one row per `JanusError` variant, no `_` arm) and the version
+re-export. `search`, `facts` and `lineage` report `api` and `ok: true`, and every
+document row carries `content_hash` taken from `DocMeta`. A `--json` failure of
+one of those three commands prints the failure object on stdout before the exit
+code. Without `--json` nothing changes.
+
+**The retired node.** A retired lineage node reports `content_hash: null`. A
+`TombstoneMeta` row stores no hash and this phase reads no file from disk, so
+there is nothing to report. Case 1.2 pins the null.
+
+**Deviations.**
+
+1. Case 1.1 names the query `authority`. No fixture document contains that word,
+   so the query would return no row and prove nothing about a row. The test uses
+   the golden's query, `cache`.
+2. Case 2.3's CLI half cannot run in this phase. The only tool command with a
+   path argument is `lineage`, and an escaping path is `not_found` there, which
+   is M5's answer and stays. The test asserts the `path_escape` row of the table
+   and pins `lineage`'s answer. The CLI half moves to `janus read` with cases
+   3.2 and 3.3 (M6-15).
+3. The SPEC §9.4 amendment of §9 item 1 does not ship here. The P1 file list has
+   no `SPEC.md`, and the P5 list has it. One phase must own that paragraph, so
+   the text ships with the other §9 corrections (M6-16).
+4. Case 1.6 asserts the success half only: `scan --json` on a failure is already
+   pinned by `cli_scan::scan_json_errors_stay_on_stderr_with_empty_stdout`. Case
+   2.5 asserts the CLI half only; the server halves arrive with the rpc loop and
+   the MCP server.
+5. Case 10.1 also covers the declined-refresh shape in the same test: a read
+   under `--no-rebuild` puts its `refresh:` line on stderr and says
+   `stale: true` in the object.
+6. The `--json` failure object is printed for the five tool commands, not for
+   every command (§2.7). `scan --json` keeps an empty stdout on failure, which
+   case 1.6 and the existing `scan` test both pin.
+
+**Test budget.** The tests sit one line under the ceiling. Case 2.6 is a table
+of twenty variants and costs most of it. That table is the case, so no assertion
+was dropped for it: one test was folded into the case it belongs to, and four
+short argument lists moved onto one line.
+
+**Golden diff.** The three search snapshots moved by `ok: true` once and one
+`content_hash` per row, and by nothing else. Each hash was checked against the
+blake3 of its own fixture file. `api` is still 1, `format_version` is still 6,
+and no exit code moved.
 
 ### Phase 2a — the engine and the three query tools
 

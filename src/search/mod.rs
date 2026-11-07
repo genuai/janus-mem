@@ -27,14 +27,13 @@ use crate::config::{self, Config, TypeSpec};
 use crate::document::{DateSource, Status};
 use crate::error::JanusError;
 use crate::graph::{EffectiveStatus, Graph, Window};
-use crate::id::{ChunkId, DocId};
+use crate::id::{Blake3Hash, ChunkId, DocId};
 use crate::index::embed::Embedder;
 use crate::index::refresh;
 use crate::index::store::{self, LoadOptions, Policy};
 use crate::index::vectors::{Vectors, dot};
 use crate::index::{ChunkMeta, LexicalIndex, Snapshot, StringId, StringPool};
 use crate::progress::Printer;
-use crate::scan::API_VERSION;
 use crate::score::{
     self, Breakdown, DecayBasis, Intent, IntentPolicy, ScopeFilter, ScoreDoc, ScoreInput,
 };
@@ -702,6 +701,8 @@ pub(crate) fn usage(message: impl Into<String>) -> JanusError {
 pub struct DocRow {
     /// Stable document identity (§6.4).
     pub id: DocId,
+    /// Hash of the whole file's bytes: the etag a write must quote (M6 §2.7).
+    pub content_hash: Blake3Hash,
     /// Vault-relative, `/`-separated path.
     pub rel_path: String,
     /// Effective title.
@@ -757,6 +758,7 @@ pub(crate) fn doc_rows(snapshot: &Snapshot, config: &Config) -> Vec<DocRow> {
             let type_name = text(pool, meta.type_name);
             DocRow {
                 id: meta.id,
+                content_hash: meta.content_hash,
                 rel_path: text(pool, meta.rel_path),
                 title: text(pool, meta.title),
                 type_spec: config.resolve_type(&type_name).spec,
@@ -1066,7 +1068,7 @@ pub(crate) fn render(render: &Render<'_>) -> Result<(), JanusError> {
     let mut out = io::stdout().lock();
     if render.json {
         let report = Report::new(render, &notes);
-        let json = serde_json::to_string_pretty(&report)
+        let json = serde_json::to_string_pretty(&crate::api::Ok::new(report))
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         // A closed pipe is not a command failure (`… --json | head`).
         let _ = writeln!(out, "{json}");
@@ -1108,7 +1110,6 @@ struct IndexDto {
 
 #[derive(Serialize)]
 struct Report<'a> {
-    api: u32,
     vault: String,
     corpus_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1131,7 +1132,6 @@ struct Report<'a> {
 impl<'a> Report<'a> {
     fn new(render: &'a Render<'_>, notes: &'a [String]) -> Self {
         Self {
-            api: API_VERSION,
             vault: render.root.display().to_string(),
             corpus_id: &render.config.corpus_id,
             query: render.query,
@@ -1159,6 +1159,8 @@ impl<'a> Report<'a> {
 struct HitDto<'a> {
     rank: usize,
     id: String,
+    /// Hash of the whole file's bytes; `null` is never possible here (M6 §2.7).
+    content_hash: String,
     path: String,
     rel_path: &'a str,
     title: &'a str,
@@ -1194,6 +1196,7 @@ impl<'a> HitDto<'a> {
         Self {
             rank,
             id: row.id.to_hex(),
+            content_hash: row.content_hash.to_hex(),
             path: render.root.join(&row.rel_path).display().to_string(),
             rel_path: &row.rel_path,
             title: &row.title,
