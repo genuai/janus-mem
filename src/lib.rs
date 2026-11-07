@@ -27,6 +27,7 @@
 //! * [`index`] — the in-memory lexical index and BM25 (M3).
 //! * [`lineage`] — `janus lineage`: the supersession chain of one document (M5).
 //! * [`link`] — build-time resolution of declared supersession links (M5).
+//! * [`mcp`] — `janus mcp`: the read tools over JSON-RPC 2.0 on stdio (M6).
 //! * [`moves`] — `janus moves`: confirmed path changes and continuation hints (M5).
 //! * [`progress`] — the stderr progress printer for a long build (M4D).
 //! * [`read`] — `read_document`: the one path that returns document text (M6).
@@ -64,6 +65,7 @@ pub mod ids;
 pub mod index;
 pub mod lineage;
 pub mod link;
+pub mod mcp;
 pub mod moves;
 pub mod progress;
 pub mod read;

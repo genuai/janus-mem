@@ -17,7 +17,7 @@ use janus_mem::engine::Engine;
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
 use janus_mem::{
-    chunk, doctor, ids, index, lineage, moves, read, rpc, scan, search, status, suggest, vault,
+    chunk, doctor, ids, index, lineage, mcp, moves, read, rpc, scan, search, status, suggest, vault,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -263,6 +263,25 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             let (embedder, degraded) = read_embedder(&config, false);
             let engine = Engine::new(root, config, Box::new(SystemClock), embedder, degraded);
             rpc::run(
+                &engine,
+                allow_write,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout().lock(),
+            );
+            Ok(())
+        }
+
+        // The MCP server is the same engine behind a second protocol. A startup
+        // failure exits before the loop starts; every failure after that is an
+        // answer, so a client never loses its session (§3.6).
+        Command::Mcp { allow_write } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let config = Config::load(&root)?;
+            let (embedder, degraded) = read_embedder(&config, false);
+            let engine = Engine::new(root, config, Box::new(SystemClock), embedder, degraded);
+            mcp::run(
                 &engine,
                 allow_write,
                 &mut std::io::stdin().lock(),

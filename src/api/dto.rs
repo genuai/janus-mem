@@ -77,9 +77,13 @@ impl Failure {
 // One struct per tool, with `deny_unknown_fields`: a parameter the schema does
 // not list is a usage failure, never a silent ignore (M6 §2.5, case 7.6). The
 // names are the wire names §9.2 states, in `snake_case`, with no camelCase pass.
+//
+// The structs are `Serialize` as well as `Deserialize` so the MCP tool schemas
+// and these fields can be compared by one test: an encoded struct names every
+// field it holds, and a field that moves fails that test (§3.7).
 
 /// The parameters of one `search` call (M6 §2.5).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchParams {
     /// The query text; required.
@@ -105,7 +109,7 @@ pub struct SearchParams {
 }
 
 /// The parameters of one `get_authoritative_facts` call (M6 §2.5).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FactsParams {
     /// Narrows the listing by relevance and reports the score.
@@ -121,7 +125,7 @@ pub struct FactsParams {
 }
 
 /// The parameters of one `get_lineage` call (M6 §2.5): exactly one is required.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LineageParams {
     /// The corpus path of the document whose chain to report.
@@ -131,12 +135,12 @@ pub struct LineageParams {
 }
 
 /// The parameters of one `janus_status` call: none (M6 §2.5).
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StatusParams {}
 
 /// The parameters of one `read_document` call (M6 §2.5).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadParams {
     /// The corpus path of the document; required.
