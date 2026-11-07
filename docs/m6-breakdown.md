@@ -1,7 +1,7 @@
 # M6 — The controller surface (read-only)
 
 > Branch: `m6-plan` (this document), then one branch per phase from `main`.
-> Spec: §8.3, §9.1–§9.5, §11 (M6), §16.3. §6.11 is read and deferred (§0.3).
+> Spec: §8.3, §9.1–§9.5, §11 (M6), §16.1–§16.3. §6.11 is read and deferred (§0.3).
 > Evidence: the code as merged at `48c22e7`, and the handoff in
 > `docs/m5-breakdown.md` §10.
 >
@@ -9,42 +9,46 @@
 > same five tools answer over `janus rpc`, and a call naming a write tool is refused
 > in both `--allow-write` modes.
 
-**Words used here.** **Tool**: one named read operation (`search`, `facts`,
-`lineage`, `read`, `status`). **Call**: one tool invocation with parameters.
-**Envelope**: the shared outer JSON object every surface returns. **Adapter**: the
-CLI, the rpc loop, or the MCP server. **Generation**: one validated index, as
-`src/index/store.rs` loads it. **Core**: the sync library below every adapter.
+**Words used here.** **Tool**: one named read operation (`search`,
+`get_lineage`, `get_authoritative_facts`, `read_document`, `janus_status`).
+**Call**: one tool invocation with parameters. **Envelope**: the shared outer JSON
+object every tool surface returns. **Adapter**: the CLI, the rpc loop, or the MCP
+server. **Generation**: one validated index, as `src/index/store.rs` loads it.
+**Core**: the sync library below every adapter.
 
 ## 0. Scope
 
-**Decision: M6 adds one controller surface and one `read` tool. It adds no corpus
+**Decision: M6 adds one read-only controller surface. It adds no corpus
 federation and no write.**
 
-Today the engine is reachable only through `janus` subcommands. Each command owns
-its own JSON report and writes to stdout itself. Measured against the code:
+Today the engine is reachable only through `janus` subcommands. Two of the five
+tool bodies already compute without printing; three render inside their own
+`run`. Measured against the code:
 
 | M6 item | state today | evidence |
 |---|---|---|
-| `janus mcp` | absent | `src/cli.rs:50`–`243`: twelve commands, none named `mcp` |
+| `janus mcp` | absent | `src/cli.rs:50`–`280`: eleven commands, none named `mcp` |
 | `janus rpc` | absent | same list |
 | one shared DTO module | absent; two private, command-local reports | `src/search/mod.rs:1109`, `src/lineage.rs:375` |
-| a core callable without stdout | absent; `run` renders | `src/search/mod.rs:1062`, `src/lineage.rs:98` |
+| a tool body callable without stdout | partial: `search` has one, `facts` and `lineage` render inside `run` | `src/search/mod.rs:178`; `src/search/facts.rs:86`; `src/lineage.rs:56` |
 | `read` tool / `janus read` | absent | no `Read` variant in `src/cli.rs`; the parsed shape exists at `src/document.rs:28` |
 | read refresh and refusal | exists and is reusable | `src/search/mod.rs:424`, `src/index/refresh.rs:311` |
 | busy writer is a skip | exists | `Decision::SkippedBusy` at `src/index/refresh.rs:278` |
+| `content_hash` per document | already stored | `DocMeta::content_hash` at `src/index/mod.rs:273` |
+| `[mcp] allow_write`, `max_chars` | already parsed | `src/config.rs:477`–`480` |
 | write gate | absent | M7 owns every write |
 | `janus_status` / `status` | absent | — |
-| corpora and workspaces | absent; no workspace file is parsed anywhere | `grep -rn workspace src/` returns only prose |
+| corpora and workspaces | absent; no workspace file is parsed anywhere | `grep -rn workspace src/` returns prose only |
 
 ### 0.1 In scope
 
 1. One DTO module: the envelope, the five tool parameter shapes, the stable error
-   codes.
+   codes, the response matrix.
 2. One sync `Engine` with one method, `call`, that returns a DTO and never prints.
 3. `janus read` and `janus status`, so every tool has a CLI test surface.
 4. `janus rpc`: one JSON object per line on stdin, one per line on stdout.
 5. `janus mcp`: JSON-RPC 2.0 over stdio, with the five read tools.
-6. A provable write refusal, and the client configuration snippets.
+6. A provable write refusal, and the client registration snippets.
 
 ### 0.2 Not in scope
 
@@ -53,7 +57,7 @@ its own JSON report and writes to stdout itself. Measured against the code:
 | `update_frontmatter`, `write_document`, `supersede_document`, `promote_document` | M7 | they need the span-preserving patcher and the lock protocol |
 | `--corpus`, `janus corpora`, `workspace.toml`, archived roles | M6b (§0.3) | they change the data model, not the protocol |
 | `rmcp` and any async runtime | nobody, until M8 measures a need | M6-1 |
-| warm-index invalidation by file events | M8 (`watch`) | M6 caches a generation; it does not watch the corpus |
+| warm-index invalidation by file events | M8 (`watch`) | M6 caches one load; it does not watch the corpus |
 | HTTP or SSE transport | M8 or later | stdio is the only transport an agent host needs today |
 | `max_chars` on `search` | M6b, if the walkthrough asks | the generation stores spans, not text (§3.7 case 7.6) |
 
@@ -76,8 +80,8 @@ M6 closes. §6.11 stays the design authority for both, unchanged.
 
 | Phase | Unit | Why this is one reviewable change |
 |---|---|---|
-| P1 | the envelope and the codes | pure types plus one field on three reports |
-| P2 | the engine, `read`, `status` | compute is separated from rendering, once |
+| P1 | the envelope, the codes, the response matrix | pure types plus one field on three reports |
+| P2 | the engine, `read`, `status` | compute separated from rendering, once; ships as two PRs |
 | P3 | the rpc loop | one framing, one loop, no protocol state |
 | P4 | the MCP server | handshake, tool list, tool dispatch |
 | P5 | the refusal and the docs | one predicate plus the client snippets |
@@ -91,7 +95,7 @@ crate the rpc loop and the MCP server need. `rmcp` is rejected; M6-1 records why
 
 ### 2.1 The envelope (`src/api/dto.rs`, new)
 
-Every surface returns one object with the same head:
+Every tool surface returns one object with the same head:
 
 ```rust
 #[derive(Serialize)]
@@ -113,7 +117,7 @@ pub struct Failure {
 }
 ```
 
-A failure carries no `results`, no `took_ms` and no `vault`. An agent branches on
+A failure carries no `results`, no `taken_ms` and no `vault`. An agent branches on
 `ok`, then on `code`, then on `hint`. Nothing else is promised.
 
 `Ok<T>` flattens, so a search answer keeps every field it has today. It gains
@@ -121,15 +125,21 @@ A failure carries no `results`, no `took_ms` and no `vault`. An agent branches o
 
 ### 2.2 The error codes (`src/api/error.rs`, new)
 
-Codes are stable strings, and each maps from one or more `JanusError` variants.
-The exit code is the CLI's; rpc and MCP keep running (§3.2 case 2.5).
+Codes are stable strings. Each maps from one `JanusError` variant, and the exit
+code is copied from `JanusError::exit_code` (`src/error.rs:207`), not invented:
 
 | `code` | from `JanusError` | exit |
 |---|---|---|
 | `usage` | `Usage` | 2 |
-| `config` | `ConfigExists`, `ConfigMissing`, `ConfigRead`, `ConfigParse` | 1 |
-| `corpus` | `VaultResolve`, `VaultNotFound`, `VaultNotDirectory` | 1 |
+| `config_exists` | `ConfigExists` | 4 |
+| `vault_not_directory` | `VaultNotDirectory` | 4 |
 | `path_escape` | `PathEscape` | 4 |
+| `config_missing` | `ConfigMissing` | 1 |
+| `config_read` | `ConfigRead` | 1 |
+| `config_parse` | `ConfigParse` | 1 |
+| `vault_resolve` | `VaultResolve` | 1 |
+| `vault_not_found` | `VaultNotFound` | 1 |
+| `path_resolve` | `PathResolve` | 1 |
 | `not_found` | `DocumentNotInCorpus`, `TopicNotFound` | 1 |
 | `index_missing` | `IndexMissing` | 1 |
 | `index_unstable` | `IndexUnstable` | 1 |
@@ -137,25 +147,37 @@ The exit code is the CLI's; rpc and MCP keep running (§3.2 case 2.5).
 | `busy` | `LockTimeout` | 1 |
 | `unstable_corpus` | `ChangedDuringRead` | 1 |
 | `write` | `Write` | 1 |
-| `io` | `CreateDir`, `PathResolve` | 1 |
+| `create_dir` | `CreateDir` | 1 |
+| `io` | `Io` | 1 |
+| `refused` | (no variant; the adapter's policy answer) | 4 |
 
 `conflict` and `precondition_required` arrive with M7, which adds the variants.
-`refused` is emitted by the MCP layer itself (§3.8); it has no `JanusError`
-variant, because a refusal is a policy answer, not a failure of the engine.
+`refused` is shared by every surface and comes from the core (§3.8), not from one
+adapter.
 
 ### 2.3 The call (`src/api/mod.rs`, new)
 
 ```rust
 pub struct Call {
-    pub tool: Tool,                 // Search, Facts, Lineage, Read, Status
+    pub tool: Tool,
     pub params: serde_json::Value,  // deserialized into the typed shape below
+}
+
+pub enum Tool {
+    Search,               // wire: "search"
+    AuthoritativeFacts,   // wire: "get_authoritative_facts"
+    Lineage,              // wire: "get_lineage"
+    ReadDocument,         // wire: "read_document"
+    Status,               // wire: "janus_status"
 }
 ```
 
-`Tool::parse(&str)` is the only place a tool name becomes a `Tool`. An unknown
-name is rejected before the core runs, so the core never sees a name it cannot
-serve. One enum means the MCP tool list, the rpc tool list and the tests cannot
-drift apart.
+`Tool::parse(&str)` and `Tool::wire_name()` are the only places a name becomes a
+`Tool`. An unknown name is rejected before the core runs. One enum means the MCP
+tool list, the rpc tool list and the tests cannot drift apart.
+
+The CLI keeps its own command names (`facts`, `lineage`, `read`, `status`) and
+maps them to these five. That mapping is the adapter's only naming decision.
 
 ### 2.4 The engine (`src/engine.rs`, new)
 
@@ -165,9 +187,9 @@ pub struct Engine {
     config: Config,
     clock: Box<dyn Clock>,
     embedder: Option<Box<dyn Embedder>>,
-    cache: RwLock<Cache>,     // one loaded generation
-    loads: AtomicU64,         // cache misses, for `janus_status`
-    hits: AtomicU64,          // cache hits, for `janus_status`
+    cache: RwLock<Option<Cached>>,
+    loads: AtomicU64,
+    hits: AtomicU64,
 }
 
 impl Engine {
@@ -178,47 +200,84 @@ impl Engine {
 `Response { ok: bool, json: serde_json::Value, code: Option<&'static str> }`.
 `call` never prints, never exits, and never panics on a recoverable error.
 
-The cache holds the loaded `Snapshot`, the `LexicalIndex` and the optional
-`Vectors`, keyed by two values (M6-5):
+`Clock` gains `Send + Sync` (`src/clock.rs:12`), because the cache and the
+`RwLock` make the engine shared across threads.
 
-1. the corpus signature digest of this call's walk (`Signature::of(...).digest()`,
-   `src/index/refresh.rs:84`), and
-2. the loaded manifest's `index_sha` (`src/index/store.rs:67`).
+**The cache holds one load, not one answer.** Every call still walks the corpus
+and still runs the refresh decision, so freshness is a fact of this call. The
+cache only avoids re-reading `index.bin` and `vectors.f32`. A cached load is
+reused when both of these hold (M6-5):
 
-Both inputs are needed. The digest alone misses a generation republished by
-another process; `index_sha` alone misses an edited document. `today` is not a key:
-decay and windows are computed per query, never stored in the generation.
+1. the on-disk `manifest.json` equals the cached manifest field for field,
+   including `index_sha`, `vectors_sha`, `corpus_sig`, `format_version`,
+   `schema_version`, `corpus_id` and the three fingerprints, and
+2. the walk digest of this call equals `corpus_sig`.
+
+`index_sha` alone is not enough: `vectors.f32` is published separately, so a
+vector-only rewrite keeps `index_sha` and changes only `vectors_sha`
+(`src/index/store.rs:104`, `src/index/store.rs:220`). A stale
+generation is never served from cache: its digest differs from `corpus_sig`, so
+the call falls through to `prepare()`, which retries the busy lock.
 
 ### 2.5 Tool parameters (`src/api/dto.rs`)
 
-| Tool | Parameters (`camelCase` on the wire) |
-|---|---|
-| `search` | `query` (required), `limit?`, `intent?`, `as_of?`, `scope?`, `scope_only?`, `types?`, `tags?`, `include_superseded?`, `decay_half_life_days?` |
-| `facts` | `query?`, `tags?`, `types?`, `scope?`, `limit?` |
-| `lineage` | `path?` **or** `topic?`, exactly one |
-| `read` | `path` (required), `max_chars?`, `chunk_id?` |
-| `status` | none |
+Wire names and parameter names follow §9.2 exactly. Parameters are
+`snake_case`, as the spec writes them. There is no `camelCase` pass.
 
-The wire uses `camelCase` (`#[serde(rename_all = "camelCase")]`); the Rust fields
-keep `snake_case`. `no_rebuild`, `no_embeddings` and `progress` are **not** tool
-parameters: an MCP read always rebuilds when the corpus changed (§9.2) and never
-reports progress on a shared stdout. `decay_half_life_days` maps to
-`Options::decay_half_life`; `as_of` is parsed with `search::parse_as_of`
-(`src/search/mod.rs:661`), so rpc and MCP accept exactly the CLI's date shapes.
+| Tool | Parameters |
+|---|---|
+| `search` | `query` (string, required), `limit?` (int), `intent?` (string), `as_of?` (string), `scope?` (list of string), `scope_only?` (bool), `types?` (list), `tags?` (list), `include_superseded?` (bool), `decay_half_life_days?` (number) |
+| `get_authoritative_facts` | `query?`, `tags?`, `types?`, `scope?`, `limit?` |
+| `get_lineage` | `path?` **or** `topic?`, exactly one |
+| `read_document` | `path` (required), `max_chars?` (int), `chunk_id?` (hex string) |
+| `janus_status` | none |
+
+`no_rebuild`, `no_embeddings` and `progress` are **not** tool parameters: an MCP
+read always rebuilds when the corpus changed (§9.2) and never reports progress on
+a shared stdout. `decay_half_life_days` maps to `Options::decay_half_life`;
+`as_of` is parsed with `search::parse_as_of` (`src/search/mod.rs:661`), so rpc
+and MCP accept exactly the CLI's date shapes.
+
+`get_authoritative_facts` gains a working `types` filter. Today `facts` passes an
+empty type list to `Filter::new` (`src/search/facts.rs:140`), so the parameter
+would be accepted and ignored. P2a adds the filter and one CLI flag `--types`, so
+one predicate serves both surfaces.
 
 ### 2.6 The status DTO
 
 ```json
 { "api": 1, "ok": true, "vault": "/abs/root", "corpus_id": "main",
-  "writes_enabled": false, "embeddings": { "available": true, "model": "…" },
+  "writes_enabled": false,
+  "embeddings": { "available": true, "model": "hash-64", "degraded": null },
   "index": { "present": true, "stale": false, "docs": 24, "chunks": 210,
              "built_at": "…", "format_version": 6, "index_sha": "…" },
   "cache": { "hits": 2, "misses": 1 } }
 ```
 
-`embeddings.model` is the manifest's `EmbedderId` when the generation has vectors,
-and `null` otherwise. `index.present` is false before the first build, and then
-every `index` field except `present` is `null`.
+`embeddings.available` means **this process can embed a query now**, so it comes
+from `embed::resolve`. A `hash-<n>` model resolves without the `embeddings`
+feature (`src/index/embed.rs:267`), so it is available on every build.
+`embeddings.model` is the validated manifest's `EmbedderId` when the generation
+has vectors, and `null` otherwise. The two fields answer two questions and may
+disagree: a feature-on binary with `enabled = false` can read stored vectors but
+cannot embed a query.
+
+### 2.7 The response matrix
+
+The envelope does not cover every report in the program yet. This table is the
+contract, and P1 adds it to §9.4.
+
+| Surface | `api` + `ok` | `content_hash` on document rows |
+|---|---|---|
+| `search`, `get_lineage`, `get_authoritative_facts`, `read_document`, `janus_status` over MCP and rpc | yes | yes |
+| `janus search --json`, `facts --json`, `lineage --json`, `read --json`, `status --json` | yes | yes |
+| `janus index --json`, `scan`, `chunks`, `doctor`, `ids`, `moves`, `suggest-links` | unchanged in M6 | not applicable |
+| a failing CLI command with `--json` | yes (`ok: false`) on stdout, then the exit code | not applicable |
+| a failing CLI command without `--json` | unchanged: one `error:` line on stderr | not applicable |
+
+`content_hash` is the field name, copied from `DocMeta::content_hash`
+(`src/index/mod.rs:273`), because M7's `expected_hash` is that value. No format
+bump: the value is already stored.
 
 ## 3. Contracts
 
@@ -227,16 +286,23 @@ Every case below is a test. A case number names one test function.
 ### 3.1 The envelope
 
 **Case 1.1.** `janus search "authority" --json` returns an object with
-`ok: true` and `api: 1`. Every other key is byte-identical to the `main` output.
+`ok: true` and `api: 1`, and every document row carries `content_hash`. Every
+other key is byte-identical to the `main` output.
 
 **Case 1.2.** `janus facts --json` and `janus lineage <path> --json` likewise.
 
 **Case 1.3.** The three committed search snapshots
-(`tests/snapshots/golden_search__*.snap`) move by exactly one line each: the
-added `"ok": true`. `api` stays `1`. The diff is reviewed line by line.
+(`tests/snapshots/golden_search__*.snap`) move by exactly two changes each: the
+added `"ok": true` and one `content_hash` per row. `api` stays `1`. The diff is
+reviewed line by line against `tests/fixtures/vault`.
 
-**Case 1.4.** A failure on any surface is `{api, ok: false, code, message}` plus
-`hint` when one exists. It has no `results` and no `took_ms`.
+**Case 1.4.** A failing command with `--json` prints `{api, ok: false, code,
+message}` plus `hint` when one exists, on stdout, and exits with the code of
+§2.2. Without `--json` the output is unchanged.
+
+**Case 1.5.** A failure object has no `results`, no `taken_ms` and no `vault`.
+
+**Case 1.6.** A command outside the matrix (`janus scan --json`) is unchanged.
 
 ### 3.2 Codes and exit codes
 
@@ -247,7 +313,7 @@ exit `2` on the CLI.
 with both it also gives `usage`.
 
 **Case 2.3.** A path outside the corpus gives `code: "path_escape"` on every
-surface.
+surface and exit `4` on the CLI.
 
 **Case 2.4.** A generation whose manifest `format_version` is `999` gives
 `code: "index_needs_full_build"`, and the `message` contains
@@ -256,9 +322,9 @@ surface.
 **Case 2.5.** A failed call never ends the rpc process or the MCP server. The
 next line or request is answered normally. The server exits `0` on end of input.
 
-**Case 2.6.** The mapping is total: a `match` over `JanusError` in
-`src/api/error.rs` has no `_` arm, so a new variant fails to compile until it has
-a code.
+**Case 2.6.** The mapping is total and faithful. A `match` over `JanusError` in
+`src/api/error.rs` has no `_` arm, and one test asserts, for every variant, that
+the table's exit code equals `JanusError::exit_code()`. No exit code moves in M6.
 
 ### 3.3 `janus read` and `read_document`
 
@@ -268,8 +334,9 @@ file outside the corpus.
 
 **Case 3.1.** `janus read decisions/2024-11-02-postgres-cache.md --json` returns
 `frontmatter` as a JSON object with `title: "Postgres cache"` and
-`status: "superseded"`, and `body` equal to the file bytes after the closing
-fence. The expected body is written out by hand in the test.
+`status: "superseded"`, `body` equal to the file bytes after the closing fence,
+and `content_hash` equal to the document's `DocMeta::content_hash`. The expected
+body is written out by hand in the test.
 
 **Case 3.2.** `read` of `.janus/manifest.json` gives `path_escape`.
 
@@ -278,17 +345,27 @@ fence. The expected body is written out by hand in the test.
 **Case 3.4.** `read` of a path that does not exist gives `not_found`, and the
 message names the path.
 
-**Case 3.5.** `read` with `max_chars: 10` on a body that starts with a two-byte
-character cuts after a character boundary, never inside one, and sets
-`truncated: true`. The test body starts with `é`, so a byte cut would panic or
-return invalid UTF-8.
+**Case 3.5.** `max_chars` truncates on a character boundary. The test body is
+`"ééééé"` (ten bytes, five characters), `max_chars: 5` returns `"éé"` (two
+characters, four bytes) and `truncated: true`, because the sixth byte starts
+inside the third `é`. A byte slice at offset 5 would panic or corrupt. Expected
+text is the literal, not a length.
 
-**Case 3.6.** `read` with `chunk_id` set returns that chunk's `span` text, its
-`breadcrumb`, and the document's `frontmatter`. A `chunk_id` from another
-generation gives `not_found`.
+**Case 3.6.** `max_chars` defaults to `config.mcp.max_chars` (4000,
+`src/config.rs:479`). An explicit request value overrides it; `0` means no limit
+and sets `truncated: false`. One case per rule, each with an exact expected
+`body`.
 
-**Case 3.7.** `read` never returns a `text` field for a document it was not asked
-for. `search` returns spans, not text, so a caller reads text in exactly one way.
+**Case 3.7.** `chunk_id` is resolved as `(path, chunk_id)` inside the current
+generation, because a chunk id excludes the document id and survives a rebuild
+(`src/id.rs:163`). A surviving id returns the chunk's `span` text and
+`breadcrumb`; a body edit that moves the span makes `body_hash`
+(`src/index/mod.rs:280`) disagree with the file, and the call returns
+`not_found` with a note naming the changed document. Two cases: an unchanged
+chunk across a rebuild succeeds, an edited document fails.
+
+**Case 3.8.** `read` never returns text for a document it was not asked for, and
+`search` returns spans, not text. Text has one path.
 
 ### 3.4 The engine and its cache
 
@@ -296,18 +373,33 @@ for. `search` returns spans, not text, so a caller reads text in exactly one way
 `cache.hits` is `1` and `cache.misses` is `1`.
 
 **Case 4.2.** A document edit between two calls makes the second call a miss, and
-its result reflects the edit. The signature digest is the cause, so the test
-changes one byte and moves no mtime.
+its result reflects the edit. The test writes the file and advances its mtime
+explicitly, because the signature reads path, size and mtime only
+(`src/index/refresh.rs:64`).
+
+**Case 4.2b.** An edit that keeps path, size and mtime is invisible to the cache
+key and to freshness, by design (§8.3). The test asserts the old answer, then
+runs `janus index --rebuild`, then asserts the new answer. This pins the
+documented limit instead of hiding it.
 
 **Case 4.3.** Two threads call `search` on one `Engine` at once. Both answers
-equal the single-threaded answer. No result depends on which thread arrived first.
+equal the single-threaded answer. `Clock` is `Send + Sync` for this case.
 
 **Case 4.4.** The cache never holds a `today`: `status` and `search` compute decay
 from the injected clock on every call. A `FixedClock` moved between calls changes
 the decay factor and not the cached generation.
 
-**Case 4.5.** A cache hit does no build. `.janus/` is not written, and its mtimes
-do not move.
+**Case 4.5.** A cache hit writes nothing: every `.janus/` mtime is unchanged.
+
+**Case 4.6.** A generation whose `index_sha` is unchanged but whose `vectors_sha`
+changed is not reused. The test makes that state with `janus index
+--no-embeddings` after a cached vector build, then calls `search` again and
+asserts `cache.misses` is `2`.
+
+**Case 4.7.** A busy lock is a skip, and the next call retries. While another
+process holds `.janus/lock`, call one answers from the loaded generation with
+`refresh: skipped, index busy`. After the lock is released and the corpus
+changed, call two refreshes and `cache.misses` is `2`.
 
 ### 3.5 `janus rpc`
 
@@ -324,16 +416,21 @@ else on stdout.
 "params": {...}}`. The response echoes `id` unchanged. A request with no `id`
 answers `id: null`.
 
-**Case 5.4.** An unknown `tool` gives `code: "usage"` and a `hint` listing the five
-names.
+**Case 5.4.** An unknown `tool` gives `code: "usage"` and a `hint` listing the
+five wire names.
 
 **Case 5.5.** A request that changes the corpus prints its `refresh:` line on
 stderr only. `stdout` holds responses only (case 10.1).
 
-**Case 5.6.** `{"tool": "status"}` is answered without a build and without a lock.
+**Case 5.6.** `{"tool": "janus_status"}` is answered without a build and without
+a lock.
 
-**Case 5.7.** The same five calls over rpc and over MCP return equal JSON, apart
-from `id` and `took_ms`.
+**Case 5.7.** The same five calls over rpc and over MCP return equal JSON, after
+one normalization: `taken_ms` is replaced by `0`. The field is `taken_ms` in both
+DTOs (`src/search/mod.rs:1122`, `src/lineage.rs:384`).
+
+**Case 5.8.** A write tool name over rpc gives the same refusal as over MCP
+(case 8.2), because the refusal comes from the core.
 
 ### 3.6 The MCP handshake
 
@@ -345,29 +442,42 @@ version, `capabilities: {"tools": {}}` and
 `serverInfo: {"name": "janus-mem", "version": "<crate version>"}`.
 
 **Case 6.2.** `initialize` with an older supported version echoes the client's
-version. The supported set is written in one constant, and the test names every
-member of it.
+version. The supported set is one constant, and the test names every member.
 
-**Case 6.3.** `notifications/initialized` produces no response line.
+**Case 6.3.** `initialize` with an unsupported version answers the server's latest
+version, and the client may continue or disconnect (MCP lifecycle rule). The test
+asserts the answer names `2025-06-18`.
 
-**Case 6.4.** A request before `initialize` returns error `-32002` and the server
+**Case 6.4.** No notification produces a response. The test sends
+`notifications/initialized`, `notifications/cancelled` and an unknown
+`notifications/…` method, and asserts stdout stays empty for all three.
+
+**Case 6.5.** A request before `initialize` returns error `-32002` and the server
 stays alive.
 
-**Case 6.5.** `tools/list` returns exactly five tools, in the fixed order
-`search`, `facts`, `lineage`, `read`, `status`. Each has `description` and
-`inputSchema.type == "object"`.
+**Case 6.6.** A line that is not JSON returns `-32700` with `id: null`. A line
+that is JSON but not a valid request object returns `-32600`. A known method with
+a bad `params` object returns `-32602` and names the field. An unknown method
+returns `-32601`. The loop survives all four.
 
-**Case 6.6.** An unknown method returns `-32601`. A `tools/call` whose params do
-not match the schema returns `-32602` and names the missing field.
+**Case 6.7.** `tools/list` returns exactly five tools, in the fixed wire order
+`search`, `get_lineage`, `get_authoritative_facts`, `read_document`,
+`janus_status`. Each has `description` and `inputSchema.type == "object"` with
+`additionalProperties: false`.
 
 ### 3.7 Tool dispatch
 
 **Case 7.1.** `search` with `{"query": "cache"}` returns the envelope of case 1.1.
 
-**Case 7.2.** `facts` with `{"tags": ["principle"]}` returns only effective-active
-facts, using the same predicate as the CLI (no second inclusion rule).
+**Case 7.2.** `get_authoritative_facts` with `{"tags": ["principle"]}` returns
+only effective-active facts, using the same predicate as the CLI (no second
+inclusion rule).
 
-**Case 7.3.** `lineage` with neither or both of `path` and `topic` returns
+**Case 7.2b.** `get_authoritative_facts` with `{"types": ["decision", "principle"]}`
+on a temp vault holding one of each plus one `spec` returns the two named types
+only. The test's expected set is written by hand from the three files.
+
+**Case 7.3.** `get_lineage` with neither or both of `path` and `topic` returns
 `ok: false, code: "usage"`, not a protocol error, because the shape is legal and
 the combination is not.
 
@@ -379,14 +489,14 @@ and as one `content` entry of type `text` holding the same JSON. An older client
 that reads only `text` still gets the answer.
 
 **Case 7.6.** `search` rejects a `max_chars` parameter with `-32602`, because the
-schema does not list it. The caller reads text with `read`.
+schema does not list it. The caller reads text with `read_document`.
 
 **Case 7.7.** A cold mismatch (case 2.4) returns `ok: false` with
 `code: "index_needs_full_build"`; a missing index is built on the first call.
 
 **Case 7.8.** A busy writer (another process holds `.janus/lock`) is a skip, not
-an error: the call answers from the generation it loaded, and one `refresh:
-skipped, index busy` line goes to stderr.
+an error: the call answers from the generation it loaded, and one
+`refresh: skipped, index busy` line goes to stderr.
 
 ### 3.8 The write refusal
 
@@ -395,13 +505,16 @@ M6 serves no write. This is a planned, temporary state, and M7 reverses it.
 **Case 8.1.** `tools/list` never lists a write tool, with or without
 `--allow-write`.
 
-**Case 8.2.** `tools/call` naming `update_frontmatter`, `write_document`,
+**Case 8.2.** A call naming `update_frontmatter`, `write_document`,
 `supersede_document` or `promote_document` returns `ok: false`,
-`code: "refused"`, and a `hint` that names the release that adds writes.
+`code: "refused"`, and a `hint` that names the release that adds writes. The same
+answer comes from rpc (case 5.8), because `src/api/mod.rs` owns the refusal, not
+an adapter.
 
 **Case 8.3.** `janus mcp --allow-write` starts and prints one line to stderr:
 `writes are not implemented yet; --allow-write has no effect`. `janus_status`
-reports `writes_enabled: false` in both modes.
+reports `writes_enabled: false` in both modes, including when `janus.toml` sets
+`[mcp] allow_write = true`.
 
 **Case 8.4.** The refusal is pinned by a test that names M7 as the phase that
 reverses it, so M7 cannot land without editing that test.
@@ -418,8 +531,17 @@ build runs.
 **Case 9.3.** `status` never locks. Run it while another process holds
 `.janus/lock`; it answers immediately with the loaded generation's facts.
 
-**Case 9.4.** `embeddings.available` is false and `model` is null when the binary
-has no `embeddings` feature, whatever `janus.toml` says.
+**Case 9.4.** With `[embedding] model = "hash-64"` and a binary without the
+`embeddings` feature, `available` is true and `model` is `"hash-64"`. Hash
+embedding does not need the feature (`src/index/embed.rs:267`).
+
+**Case 9.4b.** With a model name that needs the feature and a binary without it,
+`available` is false, `model` is `null`, and `degraded` names the missing
+feature.
+
+**Case 9.4c.** After a vector build, set `[embedding] enabled = false`: `model`
+is still the manifest's id, and `available` is false. The two fields disagree on
+purpose (§2.6).
 
 ### 3.10 Stdout discipline
 
@@ -428,11 +550,12 @@ has no `embeddings` feature, whatever `janus.toml` says.
 command. Both lines appear on stderr.
 
 **Case 10.2.** Every stdout line of `janus mcp` parses as a JSON-RPC message. The
-test feeds a whole session and parses all lines.
+test captures stdout across a whole session, including the first build, and
+parses every line.
 
-**Case 10.3.** No code path below `src/api/` and `src/engine.rs` calls
-`println!` or writes to `stdout`. A test greps the two directories for
-`println!` and `stdout()`.
+**Case 10.3.** No code path below `src/api/` and `src/engine.rs` writes to
+stdout. The test greps the crate for `println!` and `stdout()` and asserts the
+only hits are the CLI renderers and `src/main.rs`.
 
 ### 3.11 The walkthrough (the milestone done-when)
 
@@ -446,17 +569,17 @@ declare `status: superseded`, so none of them may appear in `current` (M5 §3.7)
 The test asserts the set, not the rank: rank depends on scoring, which M6 does not
 change.
 
-**Case 11.2.** W2: `lineage` on `chain/2022-01-01-cache-returns.md` returns the
-five nodes at depths 0–4 in this order: `adopt-postgres`, `move-to-redis`,
+**Case 11.2.** W2: `get_lineage` on `chain/2022-01-01-cache-returns.md` returns
+the five nodes at depths 0–4 in this order: `adopt-postgres`, `move-to-redis`,
 `cache-in-front`, `drop-cache`, `cache-returns`, with terminal `active`. Then
-`read` on the top path returns a body that contains `measured budget`. Both
-values come from the fixture files.
+`read_document` on the same path returns a body that contains `measured budget`.
+Both values come from the fixture files.
 
 **Case 11.3.** W3: the test adds one file to its temp copy,
 `principles/pricing.md`, with `type: principle`, `status: active` and
-`tags: [pricing]`. `facts` with `{"tags": ["pricing"]}` returns exactly that one
-path. The committed fixtures hold no principle, so the test supplies one rather
-than asserting an empty list.
+`tags: [pricing]`. `get_authoritative_facts` with `{"tags": ["pricing"]}` returns
+exactly that one path. The committed fixtures hold no principle, so the test
+supplies one rather than asserting an empty list.
 
 ### 3.12 What must not change
 
@@ -464,69 +587,101 @@ than asserting an empty list.
   written, not what it says.
 - `format_version` stays `6`. M6 adds no persisted field.
 - `api` stays `1`. Every change is additive.
+- Every exit code in `JanusError::exit_code` stays as it is.
 - The CLI's human output stays. A table is not a protocol.
-- `janus index` output stays. M6 does not touch the build.
+- `janus index`, `scan`, `chunks`, `doctor`, `ids`, `moves` and `suggest-links`
+  output stays.
 
 ## 4. Decisions
 
 | ID | Decision | Why |
 |---|---|---|
-| M6-1 | Hand-rolled JSON-RPC 2.0; no `rmcp`, no Tokio | Five methods and five tools need about 300 lines and one dependency already present. `rmcp` brings an async runtime, a churning API (§13 risk table) and a version pinned to a protocol revision. D11 wants async at one edge; M6 needs none. |
+| M6-1 | Hand-rolled JSON-RPC 2.0; no `rmcp`, no Tokio | Five methods and five tools need about 300 lines and one dependency already present. `rmcp` brings an async runtime, a churning API (§13 risk table) and a version pinned to a protocol revision. |
 | M6-2 | One `Engine::call`; adapters parse and format only | §9.5. Two adapters that each parse params drift within one release. |
-| M6-3 | Every object carries `api` and `ok`; failures carry `code`, `message`, `hint` | One contract an agent learns once. Additive to every existing report, so `api` stays `1`. |
-| M6-4 | `janus rpc` uses `{id, tool, params}`, not JSON-RPC | The rpc loop exists for `subprocess` + `json` callers. A flat tool envelope is one line of Python; JSON-RPC adds error envelopes and ids for no caller benefit. MCP keeps JSON-RPC because that is its protocol. |
-| M6-5 | One in-process generation cache, keyed by signature digest and `index_sha` | Removes the per-call 300 MB load from an agent session. Both keys are needed: each one alone misses a real invalidation. |
-| M6-6 | `status` walks the corpus but never builds and never locks | An agent must be able to ask "is this fresh?" before it asks a question, and a status call must never be the thing that starts a three-minute build. |
+| M6-3 | Every tool object carries `api` and `ok`; failures carry `code`, `message`, `hint` | One contract an agent learns once. Additive to every existing report, so `api` stays `1`. |
+| M6-4 | `janus rpc` uses `{id, tool, params}`, not JSON-RPC | The rpc loop exists for `subprocess` + `json` callers. A flat tool envelope is one line of Python. MCP keeps JSON-RPC because that is its protocol. |
+| M6-5 | The cache holds one **load**, keyed by manifest equality plus the walk digest; freshness runs on every call | Removes the per-call payload read from an agent session without hiding a stale corpus. `index_sha` alone misses a vector-only publish, which changes only `vectors_sha`. |
+| M6-6 | `status` walks the corpus but never builds and never locks | An agent must be able to ask "is this fresh?" before it asks a question, and a status call must never start a build. |
 | M6-7 | Write tools are refused in both `--allow-write` modes until M7 | M6 has no writer. A listed tool that cannot work is worse than an absent one. Pinned by case 8.4. |
-| M6-8 | A legal shape with a bad combination is `ok: false`; an illegal shape is `-32602` | The agent must read `code`, not the transport error. `lineage` with both args is legal JSON and illegal usage. |
-| M6-9 | MCP protocol `2025-06-18`; echo any supported version the client asks for | Newest revision with structured tool output; older hosts must still connect. |
-| M6-10 | `read` truncates at `max_chars` on a character boundary, default 8000 | A byte cut panics or corrupts. A default keeps a 2 MB document from filling an agent's context. |
+| M6-8 | A legal shape with a bad combination is `ok: false`; an illegal shape is `-32602` | The agent must read `code`, not the transport error. |
+| M6-9 | MCP protocol `2025-06-18`; echo any supported version, otherwise offer the newest | Current revision with structured tool output; older hosts must still connect. |
+| M6-10 | `read_document` truncates on a character boundary; default `config.mcp.max_chars`, `0` means no limit | A configured limit already exists (`src/config.rs:479`). A byte cut panics or corrupts. |
 | M6-11 | Corpora, workspaces and `promote` are M6b | §0.3. |
-| M6-12 | `search` returns spans, never text; `read` is the one text path | The generation stores spans (§8.5), and one text path cannot disagree with itself about truncation. §9.2's `max_chars` on `search` is corrected in §9. |
+| M6-12 | `search` returns spans, never text; `read_document` is the one text path | The generation stores spans (§8.5), and one text path cannot disagree with itself about truncation. §9.2's `max_chars` on `search` is corrected in §9. |
+| M6-13 | Wire names and parameter names follow §9.2 exactly | The spec is the public contract. Renaming a tool in an implementation plan is a breaking change nobody asked for. |
+| M6-14 | The envelope covers the five tool surfaces and their CLI counterparts, not the whole program | `janus index --json` is a receipt, not an answer. Widening the envelope there would move goldens for no agent benefit. |
 
 ## 5. Phases
 
 Each phase: one branch from `main`, one PR, one report. Do not poll CI.
 
-### Phase 1 — The envelope, the codes, and the DTO head
+### Phase 1 — The envelope, the codes, the response matrix
 
 **Files.** `src/api/mod.rs` (new), `src/api/dto.rs` (new), `src/api/error.rs`
-(new), `src/lib.rs`, `src/search/mod.rs`, `src/search/facts.rs`, `src/lineage.rs`,
-`tests/api_envelope.rs` (new), `tests/snapshots/golden_search__*.snap`.
+(new), `src/lib.rs`, `src/main.rs`, `src/search/mod.rs`, `src/search/facts.rs`,
+`src/lineage.rs`, `tests/api_envelope.rs` (new),
+`tests/snapshots/golden_search__*.snap`.
 
-**Build.** `Ok<T>` and `Failure`; `ApiCode` from `JanusError`; `API_VERSION`
-re-exported. The three command reports gain `ok`, and their human output is
-unchanged.
+**Build.** `Ok<T>` and `Failure`; `ApiCode` from `JanusError` with the exact exit
+codes; `API_VERSION` re-exported; `content_hash` on document rows; a `--json`
+failure prints the failure envelope on stdout before the exit code.
 
-**Tests.** Cases 1.1–1.4, 2.1–2.6, 10.1 (the three `--json` commands only).
+**Tests.** Cases 1.1–1.6, 2.1–2.6, 10.1 for the three `--json` commands only. No
+rpc or MCP test here; those adapters do not exist yet.
 
 **Handoff.** A shared DTO head exists. Every command still renders inside `run`.
 
-**Accept.** Three snapshots move by one line each. `api` is `1` everywhere. The
-error match has no `_` arm.
+**Accept.** Three snapshots move by the two declared changes only. `api` is `1`.
+No exit code moves. The error match has no `_` arm.
 
-### Phase 2 — The engine, `janus read`, `janus status`
+**Split seam.** Types first (`api/dto.rs`), then wire mapping and the CLI failure
+path. Split before the ceiling.
 
-**Files.** `src/engine.rs` (new), `src/read.rs` (new), `src/status.rs` (new),
-`src/api/dto.rs`, `src/search/mod.rs` (split compute from `render`),
-`src/search/facts.rs`, `src/lineage.rs`, `src/cli.rs` (two new commands),
-`src/main.rs`, `tests/cli_read.rs` (new), `tests/engine_cache.rs` (new),
+### Phase 2 — The engine, `read`, `status` (two PRs)
+
+Mandatory split (M6 §8). P2a is dispatched first; P2b branches from `main` after
+P2a merges.
+
+#### Phase 2a — the engine and the three query tools
+
+**Files.** `src/engine.rs` (new), `src/api/mod.rs`, `src/api/dto.rs`,
+`src/clock.rs` (`Clock: Send + Sync`), `src/search/mod.rs` (split compute from
+`render`), `src/search/facts.rs` (compute + the `types` filter),
+`src/lineage.rs`, `src/cli.rs` (`facts --types`), `src/main.rs`,
+`tests/engine_cache.rs` (new), `tests/api_hashes.rs` (new).
+
+**Build.** `Engine::call` for `search`, `get_authoritative_facts` and
+`get_lineage`, plus the cache of M6-5 and its counters. `facts` and `lineage`
+gain a `compute` that returns a DTO; `run` becomes `compute` + a renderer.
+
+**Tests.** Cases 4.1–4.7, 7.2b, 1.1–1.3 for unchanged output.
+
+**Handoff.** `Engine::call` answers three tools with no stdout. `read` and
+`status` are not yet in the engine.
+
+**Accept.** The `search`, `facts` and `lineage` human tables and JSON are
+unchanged apart from `content_hash`. `Clock` compiles with the bounds.
+
+**Split seam if still over ceiling.** Part 1: `search` compute extraction and the
+engine. Part 2: `facts` + `lineage` extraction. The `types` filter moves with
+`facts`.
+
+#### Phase 2b — `read`, `status`, and the two CLI commands
+
+**Files.** `src/read.rs` (new), `src/status.rs` (new), `src/engine.rs`,
+`src/api/mod.rs`, `src/cli.rs`, `src/main.rs`, `tests/cli_read.rs` (new),
 `tests/cli_status.rs` (new).
 
-**Build.** `Engine::call` with the five tools and the cache of M6-5. `search`,
-`facts` and `lineage` expose a `compute` function returning the DTO; `run` becomes
-`compute` + a renderer. `read` and `status` are new commands.
+**Build.** `read_document` and `janus_status` in the engine; `janus read` and
+`janus status` as thin adapters. The chunk-span guard of case 3.7.
 
-**Tests.** Cases 3.1–3.7, 4.1–4.5, 9.1–9.4, 10.3.
+**Tests.** Cases 3.1–3.8, 9.1–9.4c, 10.3.
 
-**Handoff.** `Engine::call` answers all five tools with no stdout. The CLI uses it
-for `read` and `status`; the other three still call their own `compute` + render.
+**Handoff.** All five tools answer from the engine. The rpc loop has nothing left
+to decide.
 
-**Accept.** The `search` and `lineage` human tables and JSON are unchanged. One
-test deletes `.janus/index.bin` and proves the second call answers from the cache.
-
-**Split seam if over budget.** Part 1: the engine and the three query tools. Part
-2: `read`, `status` and the cache counters. Both are reviewable alone.
+**Accept.** `read` refuses every escape and cuts on a character boundary.
+`status` never locks.
 
 ### Phase 3 — `janus rpc`
 
@@ -537,7 +692,7 @@ test deletes `.janus/index.bin` and proves the second call answers from the cach
 line answered, then the loop continues. Startup failures (no corpus, no config)
 exit `1` before the loop; every later failure is a response line.
 
-**Tests.** Cases 5.1–5.7, 10.1.
+**Tests.** Cases 5.1–5.8, 10.1.
 
 **Handoff.** A language-agnostic surface exists. The MCP adapter reuses
 `Engine::call` and nothing else.
@@ -553,19 +708,20 @@ every stdout line. No test sleeps.
 `src/mcp/tools.rs` (new), `src/cli.rs`, `src/main.rs`, `tests/cli_mcp.rs` (new),
 `tests/mcp_walkthrough.rs` (new).
 
-**Build.** JSON-RPC 2.0 framing, `initialize`, `notifications/initialized`,
-`tools/list`, `tools/call`. Schemas are `serde_json::Value` literals with
+**Build.** JSON-RPC 2.0 framing, `initialize`, notifications, `tools/list`,
+`tools/call`. Schemas are `serde_json::Value` literals with
 `additionalProperties: false`, so an extra param is `-32602` (case 7.6).
 
-**Tests.** Cases 6.1–6.6, 7.1–7.8, 8.1–8.2, 10.2, 11.1–11.3.
+**Tests.** Cases 6.1–6.7, 7.1–7.8, 8.1–8.2, 10.2, 11.1–11.3.
 
 **Handoff.** The server answers W1–W3. The write refusal exists.
 
 **Accept.** A whole scripted session parses as JSON-RPC. The walkthrough asserts
 the hand-derived first path and the five-link chain.
 
-**Split seam.** Part 1: handshake, list, dispatch, `search` and `read`. Part 2:
-`facts`, `lineage`, `status`, the walkthrough.
+**Split seam.** Part 1: handshake, framing, list, dispatch, `search` and
+`read_document`. Part 2: `get_authoritative_facts`, `get_lineage`, `janus_status`,
+the walkthrough.
 
 ### Phase 5 — The gate, the snippets, and the corrections
 
@@ -573,10 +729,10 @@ the hand-derived first path and the five-link chain.
 `docs/mcp-clients.md` (new), `SPEC.md`, `docs/m6-breakdown.md` (this plan).
 
 **Build.** The refusal of §3.8, the `--allow-write` stderr line, and the client
-configuration for Claude Desktop and Hermes (§16.3). The SPEC corrections of §9
+registration for Claude Desktop and Hermes (§16.3). The SPEC corrections of §9
 land here.
 
-**Tests.** Case 8.3, and a test that reads the snippets and checks the JSON is
+**Tests.** Case 8.3, and a test that reads the snippet and checks the JSON is
 valid and names `janus mcp`.
 
 **Handoff.** M7 can add write tools to one list in `src/mcp/tools.rs`.
@@ -597,88 +753,140 @@ valid and names `janus mcp`.
   `std::os::unix`; no `#[cfg]` without a Windows arm.
 - **Exit codes.** Only the CLI maps an error to a code. The servers exit `0` on
   clean end of input and `1` on a startup failure.
+- **Reply format.** Each phase reports: PR number, size numbers, gates, decisions,
+  and anything this plan got wrong.
 
 ## 7. Definition of done
 
-1. `janus mcp` and `janus rpc` answer `search`, `facts`, `lineage`, `read` and
-   `status` from one `Engine::call`. Evidence: `tests/cli_rpc.rs` parity test.
+1. `janus mcp` and `janus rpc` answer all five tools from one `Engine::call`.
+   Evidence: `tests/cli_rpc.rs` parity test.
 2. W1–W3 are answered from the fixtures with no `grep`. Evidence:
-   `tests/mcp_walkthrough.rs`, three assertions with hand-derived paths.
-3. A write tool call is refused with `--allow-write` and without it. Evidence:
-   case 8.2.
+   `tests/mcp_walkthrough.rs`, three assertions with hand-derived values.
+3. A write tool call is refused with `--allow-write` and without it, on both
+   surfaces. Evidence: cases 8.2 and 5.8.
 4. stdout carries protocol only. Evidence: case 10.2, one whole session parsed.
 5. `janus read` and `janus status` exist and are tested. Evidence:
    `tests/cli_read.rs`, `tests/cli_status.rs`.
-6. No golden moved except the one added `ok` line per snapshot. Evidence: the P1
-   diff and `git diff --stat tests/snapshots`.
+6. No golden moved except `ok` and `content_hash`. Evidence: the P1 diff and
+   `git diff --stat tests/snapshots`.
 7. `cargo doc --no-deps` has zero warnings. Evidence: the command's output.
-8. `format_version` stays `6` and `api` stays `1`. Evidence: `git diff
-   src/index/store.rs` is empty.
+8. `format_version` stays `6` (`src/index/mod.rs:49`) and `api` stays `1`
+   (`src/scan.rs:46`). Evidence: both constants are unchanged in
+   `git diff main`.
+9. No exit code moves. Evidence: case 2.6, one table compared with
+   `JanusError::exit_code`.
 
 ## 8. PR plan and size budget
 
 | phase | logic ceiling | estimate | test ceiling | estimate | base |
 |---|---|---|---|---|---|
-| P1 envelope + codes | 400 | ~300 | 600 | ~350 | `main` |
-| P2 engine + read + status | 600 | ~500 | 900 | ~600 | `main` |
+| P1 envelope + codes + matrix | 400 | ~320 | 600 | ~380 | `main` |
+| P2a engine + 3 query tools | 600 | ~520 | 900 | ~650 | `main` |
+| P2b read + status + engine wiring | 350 | ~280 | 550 | ~400 | `main` |
 | P3 rpc | 350 | ~250 | 500 | ~300 | `main` |
 | P4 mcp | 550 | ~450 | 800 | ~550 | `main` |
 | P5 gate + docs | 250 | ~150 | 400 | ~150 | `main` |
 
-Estimates run low by a factor of two to three. The split seam in each phase is
-named above; split before the ceiling, never shave a comment or drop a test.
+The P2 split is mandatory, not a contingency: three compute extractions, a cache,
+a concurrency bound and two commands are not one reviewable unit. M5's lineage
+phase alone took 652 logic lines.
+
+Estimates run low by a factor of two to three in this repository. Both P2 parts
+carry a named split seam; split before the ceiling, never shave a comment or drop
+a test.
 
 ## 9. SPEC corrections
 
 These amendments ship in the phase that owns them. Each is in the same PR.
 
-1. **§9.4 envelope.** State that `api` and `ok` are on every object, that a
-   failure carries `code`, `message` and optional `hint` and no results, and that
-   the envelope is shared by CLI `--json`, rpc and MCP. (P1.)
+1. **§9.4 envelope.** State that `api` and `ok` are on the five tool surfaces and
+   their five CLI counterparts, that `janus index` and the other reports keep
+   their shape, that a failure carries `code`, `message` and optional `hint` with
+   no results, that a `--json` failure prints that object on stdout before the
+   exit code, and that `content_hash` is the etag field name. (P1.)
 2. **§9.5 rpc shape.** Add the request shape `{id, tool, params}` and state that
    rpc is **not** JSON-RPC, while MCP is. The current text says "same shapes as
    the MCP tools" without saying which layer owns framing. (P3.)
 3. **§9.1 exit codes.** State that exit codes belong to the CLI. A tool failure
-   inside `janus rpc` or `janus mcp` is a response, not an exit. (P3.)
+   inside `janus rpc` or `janus mcp` is a response, not an exit. Add `janus
+   status [--json]` to the command list. (P3 and P5.)
 4. **§9.2 `search` parameters.** Remove `max_chars` from the `search` row and
    state that `read_document` is the one text path, addressed by `chunk_id`. The
-   generation stores spans, not text, and §8.5 keeps it that way. (P2.)
-5. **§9.2 `read_document`.** State the default `max_chars` (8000), the
-   character-boundary rule, and that `chunk_id` selects a span of the current
-   generation. (P2.)
+   generation stores spans, not text, and §8.5 keeps it that way. (P2b.)
+5. **§9.2 `read_document`.** State that `max_chars` defaults to `[mcp] max_chars`
+   (§16.1, 4000), that a request overrides it, that `0` means no limit, that the
+   cut is on a character boundary, and that `chunk_id` is resolved against
+   `(path, chunk_id)` in the current generation and checked against `body_hash`.
+   (P2b.)
 6. **§9.2 `janus_status`.** Add the response shape of §2.6, including
-   `writes_enabled`, `embeddings`, `index` and `cache`. (P2.)
-7. **§11 M6.** Move corpora, workspaces and `promote` out of M6 into M6b, and say
-   that M6's done-when is the scripted transcript of §3.11. Add that writes are
-   refused until M7. (P5.)
-8. **§9.1 command list and §11 M8.** Add `janus status`, and remove the
-   "register in Claude Desktop and Hermes" line from M8, which moves to M6 P5. (P5.)
-9. **§9.2 refresh.** State that a cold mismatch refuses but a missing index is
-   built on the first call, and that the generation cache is keyed by the corpus
-   signature and the manifest's `index_sha`. (P2.)
+   `writes_enabled`, `embeddings` (`available` from the resolved embedder,
+   `model` from the manifest), `index` and `cache`. (P2b.)
+7. **§9.2 refresh.** State that a cold mismatch refuses but a missing index is
+   built on the first call, and that a process may cache one load, reused only
+   when the on-disk manifest is unchanged and the walk digest matches
+   `corpus_sig`. (P2a.)
+8. **§9.1 `janus facts`.** Add `--types T,..` so the CLI and
+   `get_authoritative_facts` share one predicate. §9.2 already gives the tool the
+   parameter. (P2a.)
+9. **§11 M6.** State that the done-when is the scripted transcript of §11 here,
+   that writes are refused until M7, and that corpora, workspaces and `promote`
+   are M6b. The deferral source is the handoff in `docs/m5-breakdown.md` §10, not
+   the M6 paragraph. M6 keeps "register in Claude Desktop and Hermes"; M8 keeps
+   the configuration snippets. (P5.)
 
 ## 10. Handoff to M7
 
 - `Engine::call` is the one place a write tool is added. `Tool` gains a variant,
-  `src/mcp/tools.rs` gains one descriptor, and `--allow-write` becomes a real
-  gate instead of a refusal.
+  `src/mcp/tools.rs` gains one descriptor, and `--allow-write` becomes a real gate
+  instead of a refusal.
 - `JanusError` gains `Conflict` and `PreconditionRequired`; `src/api/error.rs`
   gains two rows and no `_` arm, so the compiler finds the call sites.
-- The `read` DTO already returns `content_hash`, which is the etag M7 requires.
-  P2 must include it, or M7 has to re-open every read tool.
+- The document DTOs already return `content_hash`, which is the etag M7 requires.
 - The cache of M6-5 must be invalidated after a write. The writer publishes a new
-  `index_sha`, so the key already changes; M7 adds a test that proves it.
+  `index_sha` or `vectors_sha`, so the key changes; M7 adds a test that proves it.
+- The refusal of §3.8 and its pinned test are deleted in M7, in the same PR that
+  adds the first write tool.
 
 ## 11. Implementation logs
 
 Each phase appends a log here when it merges: what deviated, why, and the size
 numbers.
 
-### Phase 1 — the envelope, the codes, and the DTO head
+### Review round 1 — twelve findings, all accepted
+
+An independent review of this plan produced twelve findings. All twelve were
+verified against the code before acceptance; none was rejected. The four that
+changed a contract:
+
+1. The error table had invented exit codes. `ConfigExists`, `VaultNotDirectory`
+   and `PathEscape` exit `4` (`src/error.rs:214`). The table now copies
+   `exit_code` and case 2.6 compares the two.
+2. Case 4.2 could not fail: the signature reads path, size and mtime, not content
+   (`src/index/refresh.rs:64`). The case now moves the mtime, and a new case 4.2b
+   pins the documented blind spot.
+3. Chunk ids exclude the document id (`src/id.rs:163`) and survive a rebuild, so
+   "an id from another generation is not found" was wrong. `read_document` now
+   resolves `(path, chunk_id)` and checks `body_hash` before slicing.
+4. The cache key was `index_sha` alone, which a vector-only publish keeps
+   (`src/index/store.rs:104`). The key is now manifest equality plus the walk
+   digest.
+
+The other eight: the tool names now follow §9.2, `get_authoritative_facts` gains
+a real `types` filter, `max_chars` follows `[mcp] max_chars`
+(`src/config.rs:479`), `available` comes from the resolver rather than the
+feature flag, four JSON-RPC conformance cases were added, the P2 split became
+mandatory and `Clock` gained `Send + Sync`, the `é` truncation case was replaced
+with an exact character count, and four evidence citations were corrected.
+
+### Phase 1 — the envelope, the codes, the response matrix
 
 _(empty)_
 
-### Phase 2 — the engine, `janus read`, `janus status`
+### Phase 2a — the engine and the three query tools
+
+_(empty)_
+
+### Phase 2b — `read`, `status`, and the two CLI commands
 
 _(empty)_
 
