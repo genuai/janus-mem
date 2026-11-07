@@ -31,13 +31,12 @@ use crate::mcp::protocol::{Error, Message};
 /// ends the loop; a failed write, such as a closed pipe, ends it too, because
 /// the client has stopped reading.
 ///
-/// `allow_write` is accepted and changes no answer: this server serves no write
-/// tool, and a write name is not yet refused (M6-7; the refusal and its case
-/// arrive with the write-tool gate).
+/// `allow_write` travels to the shared refusal and changes no answer in this
+/// release: a write tool is refused in both modes (M6-7).
 pub fn run(engine: &Engine, allow_write: bool, input: &mut dyn BufRead, out: &mut dyn Write) {
-    let _ = allow_write;
     let mut session = Session {
         engine,
+        allow_write,
         initialized: false,
     };
     // One buffer, cleared per line: `read_line` appends, so a buffer that is
@@ -64,6 +63,7 @@ pub fn run(engine: &Engine, allow_write: bool, input: &mut dyn BufRead, out: &mu
 /// One open session: the engine, the flag, and the one handshake fact.
 struct Session<'a> {
     engine: &'a Engine,
+    allow_write: bool,
     /// True once `initialize` has been answered.
     initialized: bool,
 }
@@ -103,7 +103,7 @@ impl Session<'_> {
             }
             "tools/call" => {
                 self.ready()?;
-                tools::call(self.engine, params)
+                tools::call(self.engine, params, self.allow_write)
             }
             other => Err(Error::new(
                 protocol::METHOD_NOT_FOUND,
