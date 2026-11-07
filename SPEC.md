@@ -1239,8 +1239,10 @@ generation it answered from: those tools read the index and never the file, so
 after a skipped refresh the hash describes the indexed bytes and not the file on
 disk. A caller that needs the current bytes calls `read_document`, or sends the
 indexed hash with a write and accepts a conflict when the file has changed.
-`janus_status` reports `index.stale`, and the refresh decision itself is one
-`refresh:` line on stderr (§9.1). `content_hash` is the etag field name; §9.3's
+`search` and `get_authoritative_facts` report `index.stale` beside their rows,
+`janus_status` reports it for the corpus, and the refresh decision itself is one
+`refresh:` line on stderr (§9.1). `get_lineage` carries no staleness flag, so a
+caller that needs one asks `janus_status`. `content_hash` is the etag field name; §9.3's
 `expected_hash` asks for that same value under the name a write request needs,
 and there is no second name for it.
 
