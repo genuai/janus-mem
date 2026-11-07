@@ -224,6 +224,7 @@ fn case_4_4_the_cache_holds_no_today() {
         Config::load(dir.path()).expect("the corpus config"),
         Box::new(clock.clone()),
         None,
+        None,
     );
     let params = json!({
         "query": "redis",

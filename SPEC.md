@@ -1118,7 +1118,7 @@ A process may cache one loaded generation, and only one: the payload of `index.b
 
 | Tool | Params | Returns |
 |---|---|---|
-| `search` | `query`, `limit?`, `intent?`, `as_of?`, `corpus?`, `scope?`, `scope_only?`, `types?`, `tags?`, `include_superseded?`, `decay_half_life_days?`, `max_chars?` | Ranked results with score breakdown, age, declared + effective status, validity window, corpus, path |
+| `search` | `query`, `limit?`, `intent?`, `as_of?`, `corpus?`, `scope?`, `scope_only?`, `types?`, `tags?`, `include_superseded?`, `decay_half_life_days?` | Ranked results with score breakdown, age, declared + effective status, validity window, corpus, path |
 | `get_lineage` | `path?` **or** `topic?` (exactly one) | Ordered chain with relation edges and terminal state |
 | `get_authoritative_facts` | `query?`, `tags?`, `types?`, `scope?`, `limit?` | Active decisions/specs/principles only |
 | `read_document` | `path`, `max_chars?`, `chunk_id?` | Frontmatter as JSON + body (or a specific chunk's span) |
@@ -1127,7 +1127,25 @@ A process may cache one loaded generation, and only one: the payload of `index.b
 
 MCP reads inherit the index refresh and the refusal. They expose no `--no-rebuild`, so a cold mismatch is answered with `index needs a full build: run janus index`, which names the command the agent must run. A changed corpus refreshes under the same non-blocking lock, and a busy writer is a skip, never an error, so a read tool cannot fail because another process is building.
 
-Plus `janus_status` (read-only, no params): index freshness, doc/chunk counts, embedder, vault root, whether writes are enabled. Cheap, and it stops agents from guessing.
+**The read path.** `read_document` is the only tool that returns document text. The generation stores spans, not text (§8.5), so `search` answers with a span and a chunk id, and a controller that wants the text asks for it here. Three rules keep the answer honest:
+
+- `content_hash` describes the bytes the call read, never the indexed row, so a skipped refresh cannot label old bytes with a new hash.
+- `max_chars` defaults to `[mcp] max_chars` (§16.1, 4000). A request overrides it, and `0` means no limit. The cut is on a character boundary, never a byte boundary, and `truncated` says whether it happened.
+- `chunk_id` is resolved against `(path, chunk_id)` in the current generation, because a chunk id carries no document id and survives a rebuild. The span is sliced only when the file's body hash equals the indexed `body_hash`. Otherwise the call answers `not_found`, because the span no longer describes the body.
+
+**`janus_status`.** Read-only, no parameters. It reports index freshness, the embedder, the vault root and the cache counters, and it stops agents from guessing:
+
+```json
+{ "api": 1, "ok": true, "vault": "/abs/root", "corpus_id": "main",
+  "writes_enabled": false,
+  "embeddings": { "available": true, "model": "hash-64", "degraded": null },
+  "index": { "present": true, "stale": false, "docs": 24, "chunks": 210,
+             "built_at": "2026-01-01T00:00:00Z", "format_version": 6,
+             "index_sha": "…" },
+  "cache": { "hits": 2, "misses": 1 } }
+```
+
+Before the first build, `index.present` is `false` and every other `index` field is `null`. `embeddings.available` answers "can this process embed a query now", so it comes from the resolved embedder. `embeddings.model` answers "what produced the stored vectors", so it comes from the manifest. The two may disagree: a binary with embeddings compiled out can read stored vectors and cannot embed a query. `writes_enabled` is `false` until M7 adds a writer. A status call never builds and never takes the writer lock, so an agent can ask "is this fresh?" while another process holds the index.
 
 ### 9.3 MCP write tools (only with `--allow-write`)
 

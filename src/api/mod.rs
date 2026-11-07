@@ -23,7 +23,7 @@ use crate::error::JanusError;
 /// One read tool this surface serves (M6 §2.3).
 ///
 /// One enum means the MCP tool list, the rpc tool list and the tests cannot
-/// drift apart. Phase 2b adds `ReadDocument` and `Status`.
+/// drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     /// `search`: ranked documents for one query.
@@ -34,6 +34,8 @@ pub enum Tool {
     Lineage,
     /// `read_document`: the text of one document, or of one chunk of it.
     ReadDocument,
+    /// `janus_status`: index freshness, embeddings, and the cache counters.
+    Status,
 }
 
 impl Tool {
@@ -43,6 +45,7 @@ impl Tool {
         Self::AuthoritativeFacts,
         Self::Lineage,
         Self::ReadDocument,
+        Self::Status,
     ];
 
     /// The wire name an agent sends and reads (§9.2).
@@ -53,6 +56,7 @@ impl Tool {
             Self::AuthoritativeFacts => "get_authoritative_facts",
             Self::Lineage => "get_lineage",
             Self::ReadDocument => "read_document",
+            Self::Status => "janus_status",
         }
     }
 
