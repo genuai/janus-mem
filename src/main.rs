@@ -281,6 +281,13 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             let config = Config::load(&root)?;
             let (embedder, degraded) = read_embedder(&config, false);
             let engine = Engine::new(root, config, Box::new(SystemClock), embedder, degraded);
+            // This release serves no write, so the flag cannot grant one. It is
+            // accepted anyway, so a client config does not change at M7, and it
+            // says once on stderr what it did (§3.8 case 8.3). Stdout stays
+            // protocol only (§3.10).
+            if allow_write {
+                eprintln!("writes are not implemented yet; --allow-write has no effect");
+            }
             mcp::run(
                 &engine,
                 allow_write,
