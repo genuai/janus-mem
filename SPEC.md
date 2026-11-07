@@ -1088,6 +1088,7 @@ janus search <QUERY> [--intent current|history|evolution|exhaustive]
 janus lineage <PATH|--topic QUERY> [--json]
 janus facts [--types T,..] [--tags T,..] [--query Q] [--scope S]... [--no-rebuild] [--no-embeddings] [--json]   # authoritative_facts
 janus read <PATH> [--json]
+janus status [--json]
 janus set <PATH> --expect-hash H --key status=superseded [--key k=v ...] [--dry-run]
 janus write <PATH> --frontmatter f.yaml (--body -|f.md)
             [--create | --overwrite --expect-hash H] [--dry-run]
@@ -1105,6 +1106,8 @@ janus completions <shell>
 ```
 
 Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash, `4` refused (unsafe or unsupported operation). Human output is a compact table; `--json` is stable and versioned.
+
+Exit codes belong to the CLI. A command exits; a server answers. A tool failure inside `janus rpc` or `janus mcp` is a response line with `ok: false` and a stable `code`, and the process exits `0` when its input ends. Only a startup failure — no corpus, no config — exits `1`, and it exits before the loop starts. §9.4 states the failure object.
 
 `--no-embeddings` is accepted by `index`, `search` and `facts`, and means two different things on purpose: on `index` it is a statement about the generation being published (vectors are carried forward, or dropped when a document's embedded text changed, §8.3), and on `search`/`facts` it is a statement about the query (`degraded`, §9.4).
 
@@ -1177,7 +1180,7 @@ Rules:
 
 - Adapters only parse input, call the engine, and format output. If an adapter contains a decision the other adapters need, it belongs in the core.
 - One DTO module defines request/response/error types; CLI `--json`, MCP tool output, and `janus rpc` share them and the same stable error codes (`conflict`, `precondition_required`, `refused`, `not_found`, …).
-- `janus rpc` is line-delimited JSON: one request object per line in, one response object per line out, same shapes as the MCP tools. This is deliberately the simplest possible interop contract: any language can drive janus-mem with `subprocess` + `json` — no FFI, no bindings to maintain. A Python wrapper (or a Hermes tool, or an Emacs client) is then ~50 lines.
+- `janus rpc` is line-delimited JSON: one request object per line in, one response object per line out. The request is `{"id": <number|string|null>, "tool": "<wire name>", "params": {...}}`; the answer echoes `id` and carries the tool envelope of §9.4. An empty line answers nothing, and a line that does not parse answers a `usage` failure, so one bad line never ends a session. `janus rpc` is **not** JSON-RPC: it has no `jsonrpc` field, no method table and no protocol error code, because every answer is a tool envelope. `janus mcp` is JSON-RPC 2.0, because that is its protocol. This is deliberately the simplest possible interop contract: any language can drive janus-mem with `subprocess` + `json` — no FFI, no bindings to maintain. A Python wrapper (or a Hermes tool, or an Emacs client) is then ~50 lines.
 - `status` is always available and returns `api_version`, index freshness, and capability flags (`writes_enabled`, `embeddings`), so a controller can feature-detect instead of assuming.
 - Exit codes and error codes are part of the public API and are versioned; changing one is a breaking change.
 - `--json` receipts grow by addition. `janus index --json` reports `passes`, how many build passes ran: one on a quiet corpus, more when a document changed while the build ran. Adding a field keeps `api` at `1`; changing or removing one does not.

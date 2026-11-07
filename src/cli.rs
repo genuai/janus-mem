@@ -152,6 +152,13 @@ pub enum Command {
         json: bool,
     },
 
+    /// Answer tool calls as line-delimited JSON on stdin and stdout (§9.5)
+    Rpc {
+        /// Accepted now, and it changes no answer until writes exist (M6-7)
+        #[arg(long)]
+        allow_write: bool,
+    },
+
     /// Report the chunks the corpus produces, without building an index
     Chunks {
         /// Emit one JSON object on stdout instead of the table

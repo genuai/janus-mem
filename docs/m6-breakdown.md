@@ -479,8 +479,9 @@ a lock.
 equal JSON, after two normalizations: `taken_ms` becomes `0`, and for
 `janus_status` the `cache` object becomes `null`. Both are process-local facts:
 one is a duration, the other counts calls in this process. Each process's
-counters are asserted separately against its own call history. The MCP parity
-case is 7.9.
+counters are asserted separately against its own call history. The comparison
+drops the echoed `id`, which names the request line and has no CLI counterpart
+(M6-22). The MCP parity case is 7.9.
 
 **Case 5.8.** A write tool name over rpc returns the core's refusal row
 (case 8.2): `ok: false`, `code: "refused"`. The refusal is decided in
@@ -680,6 +681,8 @@ supplies one rather than asserting an empty list.
 | M6-19 | The counters are `hits` and `misses`; a declined refresh still prints its one `refresh:` line to stderr | A hit and a miss are the two things a caller can observe, and `janus_status` reports both. `stderr` is a diagnostic stream, not the answer stream: case 7.8 and §9.4 require the line, and case 10.1 keeps it off stdout. |
 | M6-20 | Phase 2a ships as two pull requests: the compute/render split, then the engine | The phase is 1149 logic lines, and its named seam put 736 on one side, over the 600 ceiling. The split chosen keeps part one free of behaviour change, so its diff can be reviewed against an unmoved golden. |
 | M6-21 | Phase 2b ships as two pull requests: `read` first, `status` second | The phase is 624 logic lines against a 280 estimate, and the whole phase cannot fit 350. The seam of §5 splits it into 349 and 275, so each part is one reviewable unit. Part one adds no output to a command that already existed. |
+| M6-22 | The rpc answer carries the echoed `id` beside the envelope, and case 5.7 compares the envelope alone | The request line has an `id` and the CLI has no request to name, so the comparison drops that one key. Everything else in the two answers is equal by construction, because both call `Engine::call`. |
+| M6-23 | §9 corrections 2 and 3 ship in Phase 3; Phase 5 keeps the rest | Their markers name P3, and the Phase 5 build line claimed all §9 text. The `rpc` shape and the exit-code rule describe this phase's code, so they land with it. |
 
 ## 5. Phases
 
@@ -775,7 +778,7 @@ the same gap P2a reported.
 ### Phase 3 — `janus rpc`
 
 **Files.** `src/rpc.rs` (new), `src/api/mod.rs`, `src/cli.rs`, `src/main.rs`,
-`tests/cli_rpc.rs` (new).
+`tests/cli_rpc.rs` (new), `SPEC.md`, `docs/m6-breakdown.md` (this plan).
 
 **Build.** One line in, one line out. `id` echoed. Empty line skipped. Malformed
 line answered, then the loop continues. Startup failures (no corpus, no config)
