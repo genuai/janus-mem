@@ -675,6 +675,7 @@ supplies one rather than asserting an empty list.
 | M6-18 | One load serves all three tools, so it asks for vector rows whenever the configuration weights them and an embedder exists | A load chosen by the tool would leave a vectorless cache that a later `search` answers with zero semantics. Reading rows a lexical tool ignores costs one file read per process. |
 | M6-19 | The counters are `hits` and `misses`; a declined refresh still prints its one `refresh:` line to stderr | A hit and a miss are the two things a caller can observe, and `janus_status` reports both. `stderr` is a diagnostic stream, not the answer stream: case 7.8 and §9.4 require the line, and case 10.1 keeps it off stdout. |
 | M6-20 | Phase 2a ships as two pull requests: the compute/render split, then the engine | The phase is 1149 logic lines, and its named seam put 736 on one side, over the 600 ceiling. The split chosen keeps part one free of behaviour change, so its diff can be reviewed against an unmoved golden. |
+| M6-21 | Phase 2b ships as two pull requests: `read` first, `status` second | The phase is 624 logic lines against a 280 estimate, and the whole phase cannot fit 350. The seam of §5 splits it into 349 and 275, so each part is one reviewable unit. Part one adds no output to a command that already existed. |
 
 ## 5. Phases
 
@@ -755,6 +756,17 @@ to decide.
 
 **Accept.** `read` refuses every escape and cuts on a character boundary.
 `status` never locks.
+
+**Split, as delivered.** The seam held, and the phase is two pull requests
+(M6-21):
+
+| part | contents | logic | tests |
+|---|---|---|---|
+| 2b-i | `src/read.rs`, the `ReadParams` shape, the engine arm, `janus read` | 349 | 391 |
+| 2b-ii | `src/status.rs`, the `StatusParams` shape, the engine arm, `janus status`, this log and the §9 corrections | 275 | 266 |
+
+The 350 estimate covered both parts and did not survive measurement, which is
+the same gap P2a reported.
 
 ### Phase 3 — `janus rpc`
 
@@ -1110,7 +1122,57 @@ tool is added, and `src/api/mod.rs` is the only place a wire name is decided.
 
 ### Phase 2b — `read`, `status`, and the two CLI commands
 
-_(empty)_
+**Sizes.** Two pull requests, both under the ceiling: `read` is 349 logic and 391
+test lines, `status` is 275 logic and 266 test lines. No dependency was added.
+The phase is 624 logic lines against a 280 estimate (M6-21).
+
+**What landed.** `Engine::call` answers all five tools. `read_document` walks and
+parses through the functions `search` uses, so it cannot disagree with the index
+about which files exist or where the body starts, and it returns the hash of the
+bytes it read. `janus_status` answers from the manifest and one walk, without a
+build and without the writer lock. `janus read` and `janus status` are thin
+adapters over the engine, and a `--json` failure of either prints the failure
+object on stdout.
+
+**Deviations.**
+
+1. The phase is two pull requests (M6-21). Part one alone is 349 logic lines,
+   which leaves no room for part two under one ceiling.
+2. `JanusError` gains `DocumentChanged`, which reuses the existing `not_found`
+   code. Case 3.7 needs an answer for "the indexed span no longer describes this
+   body", and no variant carried it. The variant is additive, its exit code is
+   `1`, and an agent that branches on `not_found` learns nothing new.
+3. `Engine::new` gains the reason an embedder is absent. `status` reports why
+   this process cannot embed, and nothing below `main` may read the environment
+   to resolve one, so the reason travels with the embedder it describes.
+4. `read::render` and `status::render` write to `&mut dyn Write`, so no new
+   module writes to stdout and the allowlist of case 10.3 is unchanged.
+5. A whole-body read loads no generation, so it cannot trigger a build. Only a
+   chunk id asks for one. This is stronger than the case requires and it follows
+   from the case: a read that never loads a generation cannot answer from a span
+   that moved.
+6. Case 3.2 reads `.janus/manifest.json` after a build. Confinement canonicalizes
+   the path first, so an absent file is a typo (`not_found`) and not an escape.
+   The case needs the file to exist to test the directory rule.
+7. Case 3.1 asserts the whole frontmatter object, all sixteen keys, not only the
+   title and the status. A second frontmatter reader would differ in the keys the
+   case leaves out.
+8. Case 9.4b is compiled only without the `embeddings` feature, because the case
+   is about a binary that lacks that feature. With the feature on, resolution
+   fails for another reason and the expected words do not apply.
+9. Case 9.3 also pins the empty parameter shape: an extra parameter is `usage`,
+   never a silent ignore.
+
+**Test budget.** `read` uses 391 of 550 test lines and `status` 266 of 550. The
+confinement cases run the binary, because the CLI is the surface that exits on
+them, and every other case runs the engine directly.
+
+**Golden diff.** None. `git diff --stat tests/snapshots` is empty, `api` is still
+`1`, and `format_version` is still `6`.
+
+**Handoff to phase 3.** `Engine::call` serves all five tools, so the rpc loop has
+nothing left to decide. `src/api/mod.rs` is the only place a wire name is
+decided, and `src/engine.rs` is the only place a tool is added.
 
 ### Phase 3 — `janus rpc`
 

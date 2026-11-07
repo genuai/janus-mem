@@ -16,7 +16,9 @@ use janus_mem::config::{self, Config};
 use janus_mem::engine::Engine;
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
-use janus_mem::{chunk, doctor, ids, index, lineage, moves, read, scan, search, suggest, vault};
+use janus_mem::{
+    chunk, doctor, ids, index, lineage, moves, read, scan, search, status, suggest, vault,
+};
 use tracing_subscriber::EnvFilter;
 
 /// The directories a model may be read from, highest precedence first (V-25).
@@ -236,6 +238,20 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             call_tool(root, Tool::ReadDocument, params, json, read::render)
         }
 
+        // A status call answers from the manifest and one walk. It builds
+        // nothing and takes no lock, so it works while a writer holds the index.
+        Command::Status { json } => {
+            let root = vault::resolve_corpus(cli.vault)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+            call_tool(
+                root,
+                Tool::Status,
+                serde_json::json!({}),
+                json,
+                status::render,
+            )
+        }
+
         // Chunking is a read command too: it shares the discovery, resolution and
         // identity pipeline with `scan` and stops one step later (M2 phase 3).
         Command::Chunks {
@@ -416,8 +432,8 @@ fn call_tool(
     render: fn(&serde_json::Value, &mut dyn Write) -> std::io::Result<()>,
 ) -> Result<(), JanusError> {
     let config = Config::load(&root)?;
-    let (embedder, _reason) = read_embedder(&config, false);
-    let engine = Engine::new(root, config, Box::new(SystemClock), embedder);
+    let (embedder, degraded) = read_embedder(&config, false);
+    let engine = Engine::new(root, config, Box::new(SystemClock), embedder, degraded);
     let answer = engine.answer(&Call::new(tool, params))?;
     if json {
         emit_json(&answer);
@@ -449,6 +465,7 @@ fn failure_envelope_wanted(cli: &Cli) -> bool {
             | Command::Facts { json: true, .. }
             | Command::Lineage { json: true, .. }
             | Command::Read { json: true, .. }
+            | Command::Status { json: true, .. }
     )
 }
 

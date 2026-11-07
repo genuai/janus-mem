@@ -32,7 +32,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::api::dto::{FactsParams, LineageParams, ReadParams, SearchParams};
+use crate::api::dto::{FactsParams, LineageParams, ReadParams, SearchParams, StatusParams};
 use crate::api::{ApiCode, Call, Failure, Tool};
 use crate::clock::Clock;
 use crate::config::{self, Config};
@@ -43,6 +43,7 @@ use crate::index::store::{self, Manifest};
 use crate::lineage;
 use crate::read;
 use crate::search;
+use crate::status;
 use crate::vault::{self, WalkOptions};
 
 /// What one call returned: the envelope, and the code when it failed (M6 §2.3).
@@ -80,6 +81,8 @@ pub struct Engine {
     config: Config,
     clock: Box<dyn Clock>,
     embedder: Option<Box<dyn Embedder>>,
+    /// Why the embedder is absent, when the caller resolved none (§2.6).
+    degraded: Option<String>,
     cache: RwLock<Option<Arc<Cached>>>,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -94,12 +97,14 @@ impl Engine {
         config: Config,
         clock: Box<dyn Clock>,
         embedder: Option<Box<dyn Embedder>>,
+        degraded: Option<String>,
     ) -> Self {
         Self {
             root,
             config,
             clock,
             embedder,
+            degraded,
             cache: RwLock::new(None),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
@@ -204,6 +209,20 @@ impl Engine {
                 };
                 let snapshot = loaded.as_ref().map(|load| &load.prepared.snapshot);
                 let report = read::compute(&self.root, &self.config, &options, snapshot)?;
+                encode(&report)
+            }
+            Tool::Status => {
+                // A status call reads the manifest and walks the corpus; it
+                // builds nothing and takes no lock (M6-6). The `params` type is
+                // empty, so an unknown parameter is a usage failure.
+                let _: StatusParams = params(call)?;
+                let report = status::compute(
+                    &self.root,
+                    &self.config,
+                    self.embedder.is_some(),
+                    self.degraded.clone(),
+                    self.cache(),
+                )?;
                 encode(&report)
             }
         }

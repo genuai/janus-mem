@@ -68,6 +68,7 @@ pub fn engine(root: &Path) -> Engine {
         Config::load(root).expect("the corpus config"),
         Box::new(FixedClock(today())),
         None,
+        None,
     )
 }
 

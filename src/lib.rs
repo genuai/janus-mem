@@ -32,6 +32,7 @@
 //! * [`read`] — `read_document`: the one path that returns document text (M6).
 //! * [`search`] — `janus search` and `janus facts`: the M3 command surface.
 //! * [`score`] — authority, status gating, decay and scope: pure scoring (M3).
+//! * [`status`] — `janus_status`: freshness, embeddings, cache (M6).
 //! * [`suggest`] — candidate pairs of unlinked similar documents (M5).
 //! * [`vault`] — corpus root discovery, the directory walk, path confinement,
 //!   frontmatter isolation, metadata resolution, and identity derivation.
@@ -68,6 +69,7 @@ pub mod read;
 pub mod scan;
 pub mod score;
 pub mod search;
+pub mod status;
 pub mod suggest;
 pub mod tokenize;
 pub mod vault;

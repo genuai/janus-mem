@@ -130,6 +130,11 @@ pub struct LineageParams {
     pub topic: Option<String>,
 }
 
+/// The parameters of one `janus_status` call: none (M6 §2.5).
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusParams {}
+
 /// The parameters of one `read_document` call (M6 §2.5).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]

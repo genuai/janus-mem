@@ -145,6 +145,13 @@ pub enum Command {
         json: bool,
     },
 
+    /// Report index freshness, the embedder and the cache (§2.6)
+    Status {
+        /// Emit one JSON object on stdout instead of the summary
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Report the chunks the corpus produces, without building an index
     Chunks {
         /// Emit one JSON object on stdout instead of the table
