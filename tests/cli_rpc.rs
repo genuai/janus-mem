@@ -142,6 +142,28 @@ fn case_5_1_two_requests_answer_two_lines_in_order() {
 }
 
 #[test]
+fn rpc_startup_failure_exits_before_the_loop() {
+    // §3.5 states this rule without a case: a startup failure is the one thing
+    // that exits, and it exits before any line is read.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = format!("{}\n", json!({ "id": 1, "tool": "janus_status" }));
+    let session = rpc_session(dir.path(), false, &script);
+    assert_eq!(session.code, Some(1));
+    assert!(session.stdout.is_empty(), "{}", session.stdout);
+    assert!(session.answers.is_empty());
+    let config = std::fs::canonicalize(dir.path())
+        .expect("a canonical temporary directory")
+        .join("janus.toml");
+    assert!(
+        session
+            .stderr
+            .contains(&format!("error: no corpus config at {}", config.display())),
+        "stderr:\n{}",
+        session.stderr
+    );
+}
+
+#[test]
 fn case_5_2_a_malformed_line_answers_once_and_the_loop_continues() {
     let dir = fixture_vault();
     let root = dir.path();
