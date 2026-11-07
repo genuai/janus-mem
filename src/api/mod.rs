@@ -106,3 +106,40 @@ impl Call {
         Ok(Self::new(Tool::parse(name)?, params))
     }
 }
+
+/// The write tools this release names but does not serve (M6-7, §3.8).
+///
+/// A caller that sends one of these names gets a refusal, not "no such tool":
+/// the name is legal and the release is not. M7 deletes this list with the
+/// first write tool it adds.
+const WRITE_TOOLS: [&str; 4] = [
+    "update_frontmatter",
+    "write_document",
+    "supersede_document",
+    "promote_document",
+];
+
+/// The refusal for one tool name, or `None` when the name is not a write tool.
+///
+/// The refusal lives here, not in an adapter, so `janus rpc` (case 5.8) and
+/// `janus mcp` (case 8.2) cannot answer the same name differently.
+///
+/// `allow_write` is accepted and changes nothing: this release refuses a write
+/// in both modes, because it serves no write (case 8.3). M7 makes the flag a
+/// real gate and deletes the refusal.
+#[must_use]
+pub fn write_refusal(name: &str, allow_write: bool) -> Option<Failure> {
+    // The flag decides nothing until a writer exists. Reading it here keeps the
+    // signature that M7 needs, so no caller changes when it becomes a gate.
+    let _ = allow_write;
+    if !WRITE_TOOLS.contains(&name) {
+        return None;
+    }
+    Some(Failure {
+        api: API_VERSION,
+        ok: false,
+        code: ApiCode::refused().code,
+        message: format!("{name} is a write tool, and this release serves reads only"),
+        hint: Some("writes arrive in M7; use a read tool until then".to_owned()),
+    })
+}

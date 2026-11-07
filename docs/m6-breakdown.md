@@ -479,8 +479,9 @@ a lock.
 equal JSON, after two normalizations: `taken_ms` becomes `0`, and for
 `janus_status` the `cache` object becomes `null`. Both are process-local facts:
 one is a duration, the other counts calls in this process. Each process's
-counters are asserted separately against its own call history. The MCP parity
-case is 7.9.
+counters are asserted separately against its own call history. The comparison
+drops the echoed `id`, which names the request line and has no CLI counterpart
+(M6-22). The MCP parity case is 7.9.
 
 **Case 5.8.** A write tool name over rpc returns the core's refusal row
 (case 8.2): `ok: false`, `code: "refused"`. The refusal is decided in
@@ -680,6 +681,8 @@ supplies one rather than asserting an empty list.
 | M6-19 | The counters are `hits` and `misses`; a declined refresh still prints its one `refresh:` line to stderr | A hit and a miss are the two things a caller can observe, and `janus_status` reports both. `stderr` is a diagnostic stream, not the answer stream: case 7.8 and §9.4 require the line, and case 10.1 keeps it off stdout. |
 | M6-20 | Phase 2a ships as two pull requests: the compute/render split, then the engine | The phase is 1149 logic lines, and its named seam put 736 on one side, over the 600 ceiling. The split chosen keeps part one free of behaviour change, so its diff can be reviewed against an unmoved golden. |
 | M6-21 | Phase 2b ships as two pull requests: `read` first, `status` second | The phase is 624 logic lines against a 280 estimate, and the whole phase cannot fit 350. The seam of §5 splits it into 349 and 275, so each part is one reviewable unit. Part one adds no output to a command that already existed. |
+| M6-22 | The rpc answer carries the echoed `id` beside the envelope, and case 5.7 compares the envelope alone | The request line has an `id` and the CLI has no request to name, so the comparison drops that one key. Everything else in the two answers is equal by construction, because both call `Engine::call`. |
+| M6-23 | §9 corrections 2 and 3 ship in Phase 3; Phase 5 keeps the rest | Their markers name P3, and the Phase 5 build line claimed all §9 text. The `rpc` shape and the exit-code rule describe this phase's code, so they land with it. |
 
 ## 5. Phases
 
@@ -775,7 +778,7 @@ the same gap P2a reported.
 ### Phase 3 — `janus rpc`
 
 **Files.** `src/rpc.rs` (new), `src/api/mod.rs`, `src/cli.rs`, `src/main.rs`,
-`tests/cli_rpc.rs` (new).
+`tests/cli_rpc.rs` (new), `SPEC.md`, `docs/m6-breakdown.md` (this plan).
 
 **Build.** One line in, one line out. `id` echoed. Empty line skipped. Malformed
 line answered, then the loop continues. Startup failures (no corpus, no config)
@@ -1180,7 +1183,51 @@ decided, and `src/engine.rs` is the only place a tool is added.
 
 ### Phase 3 — `janus rpc`
 
-_(empty)_
+**Sizes.** One pull request: logic 259 / 350, tests 443 / 500. No dependency was
+added. The named seam was not needed: both numbers are under their ceilings.
+
+**What landed.** `src/rpc.rs` reads one line at a time with `BufRead::read_line`
+on one buffer that is cleared per line, and writes one answer per line, flushed
+before the next read. The request is `{id, tool, params}`, the answer echoes
+`id` and holds the tool envelope. An empty line answers nothing, and a final
+line without a trailing newline is answered. End of input and a closed stdout
+exit `0`.
+
+The write refusal moved into `api::write_refusal(name, allow_write)`, one
+function holding the four names and the one refusal object. The rpc loop calls
+it before the tool table, so a write name is `refused` and not `unknown`, and
+case 5.8 compares the answer with the helper's own object. `--allow-write` is
+parsed and changes no answer, and M7 turns the same argument into a gate.
+
+**Deviations.**
+
+1. The answer carries the echoed `id`, which the CLI answer has no place for.
+   Case 5.7 therefore compares the two answers with `id` removed as well as the
+   two stated normalizations (M6-22).
+2. A line without the request shape answers `id: null` even when it parsed as
+   an object, including an object whose `tool` is not a string. The echo names a
+   request, and such a line is not one (case 5.2).
+3. §9 corrections 2 and 3 ship here, not in Phase 5 (M6-23). The Phase 5 build
+   line claimed all §9 text, and the two correction markers name this phase.
+4. A read error on stdin ends the loop like end of input: the caller has gone
+   away, and there is nobody left to answer. It is not a case.
+5. The startup failure has a test without a case number. §3.5 states the rule
+   (exit `1` before the loop, current stderr message) and names no case, and one
+   line of stderr plus an empty stdout is the evidence.
+
+**Test budget.** Cases 5.1–5.8 and 10.1 use 443 of 500 test lines, including the
+startup rule above. Case 5.7 drives one rpc session of five lines and five CLI
+commands, so it costs the most and proves the most: both sides call
+`Engine::call`, and every expected value beyond the two normalizations is equal
+byte for byte.
+
+**Golden diff.** None. `git diff --stat tests/snapshots` is empty, `api` is still
+`1`, and `format_version` is still `6`.
+
+**Handoff to phase 4.** The MCP adapter calls `Engine::call` for a tool call and
+`api::write_refusal` for a write name, and it adds no decision of its own. The
+rpc loop reads a line and answers a line; the MCP server adds JSON-RPC framing on
+top of the same two calls.
 
 ### Phase 4 — `janus mcp`
 

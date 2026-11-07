@@ -30,6 +30,7 @@
 //! * [`moves`] — `janus moves`: confirmed path changes and continuation hints (M5).
 //! * [`progress`] — the stderr progress printer for a long build (M4D).
 //! * [`read`] — `read_document`: the one path that returns document text (M6).
+//! * [`rpc`] — `janus rpc`: one tool call per line on stdin and stdout (M6).
 //! * [`search`] — `janus search` and `janus facts`: the M3 command surface.
 //! * [`score`] — authority, status gating, decay and scope: pure scoring (M3).
 //! * [`status`] — `janus_status`: freshness, embeddings, cache (M6).
@@ -66,6 +67,7 @@ pub mod link;
 pub mod moves;
 pub mod progress;
 pub mod read;
+pub mod rpc;
 pub mod scan;
 pub mod score;
 pub mod search;
