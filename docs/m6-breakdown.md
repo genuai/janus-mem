@@ -959,6 +959,15 @@ The re-check found two defects, both introduced by round 2.
    counters count calls in one. The normalization now also nulls `cache`, and
    each process's counters are asserted against its own history.
 
+### Review closure
+
+A fourth round could not run: the independent reviewer reached its usage limit.
+Both round-3 findings were fixed exactly as the reviewer prescribed, and the
+facts behind them were re-checked here: the engine keeps its embedder, so a
+re-index under another model is a compatibility mismatch (`src/index/store.rs:865`),
+and the cache counters count calls in one process. The review is closed on that
+evidence, with round 4 as a known gap.
+
 ### Phase 1 — the envelope, the codes, the response matrix
 
 _(empty)_
