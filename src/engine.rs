@@ -32,7 +32,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::api::dto::{FactsParams, LineageParams, SearchParams};
+use crate::api::dto::{FactsParams, LineageParams, ReadParams, SearchParams};
 use crate::api::{ApiCode, Call, Failure, Tool};
 use crate::clock::Clock;
 use crate::config::{self, Config};
@@ -41,6 +41,7 @@ use crate::index::embed::Embedder;
 use crate::index::refresh::Signature;
 use crate::index::store::{self, Manifest};
 use crate::lineage;
+use crate::read;
 use crate::search;
 use crate::vault::{self, WalkOptions};
 
@@ -109,7 +110,7 @@ impl Engine {
     /// recoverable failure: the failure is the answer (§2.3, §9.5).
     #[must_use]
     pub fn call(&self, call: &Call) -> Response {
-        match self.dispatch(call) {
+        match self.answer(call) {
             Ok(json) => Response {
                 ok: true,
                 json,
@@ -139,8 +140,12 @@ impl Engine {
         self.embedder.as_deref()
     }
 
-    /// Parses the parameters, answers, and encodes the report.
-    fn dispatch(&self, call: &Call) -> Result<Value, JanusError> {
+    /// Answers one tool call, and returns the failure as an error.
+    ///
+    /// [`Engine::call`] wraps this in the response object. The CLI asks here
+    /// instead, because it is the only surface that exits on a failure and the
+    /// exit code belongs to the error (§9.1).
+    pub fn answer(&self, call: &Call) -> Result<Value, JanusError> {
         let started = Instant::now();
         match call.tool {
             Tool::Search => {
@@ -188,6 +193,17 @@ impl Engine {
                     &options,
                     started,
                 )?;
+                encode(&report)
+            }
+            Tool::ReadDocument => {
+                let options = read_options(&params(call)?);
+                // A whole-body read needs no generation, so it loads none (§3.3).
+                let loaded = match options.chunk_id {
+                    Some(_) => Some(self.load()?),
+                    None => None,
+                };
+                let snapshot = loaded.as_ref().map(|load| &load.prepared.snapshot);
+                let report = read::compute(&self.root, &self.config, &options, snapshot)?;
                 encode(&report)
             }
         }
@@ -327,6 +343,15 @@ fn facts_options(params: &FactsParams) -> search::facts::Options {
         embedding_reason: None,
         progress: false,
         json: false,
+    }
+}
+
+/// One `read_document` call as the read path's options.
+fn read_options(params: &ReadParams) -> read::Options {
+    read::Options {
+        path: PathBuf::from(&params.path),
+        max_chars: params.max_chars,
+        chunk_id: params.chunk_id.clone(),
     }
 }
 

@@ -34,9 +34,9 @@ impl ApiCode {
         }
     }
 
-    /// The code for one error. Two variants may share one code: an agent treats
-    /// "no such document" and "no such topic" the same way, so they are one
-    /// answer, not two (§2.2).
+    /// The code for one error. Several variants may share one code: an agent
+    /// treats "no such document" and "no such topic" the same way, so they are
+    /// one answer, not two (§2.2).
     #[must_use]
     pub fn of(err: &JanusError) -> Self {
         match err {
@@ -80,7 +80,9 @@ impl ApiCode {
                 code: "path_resolve",
                 exit: 1,
             },
-            JanusError::DocumentNotInCorpus { .. } | JanusError::TopicNotFound { .. } => Self {
+            JanusError::DocumentNotInCorpus { .. }
+            | JanusError::DocumentChanged { .. }
+            | JanusError::TopicNotFound { .. } => Self {
                 code: "not_found",
                 exit: 1,
             },

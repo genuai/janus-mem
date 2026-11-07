@@ -129,3 +129,15 @@ pub struct LineageParams {
     /// A `current` query whose top result the chain is reported for.
     pub topic: Option<String>,
 }
+
+/// The parameters of one `read_document` call (M6 §2.5).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadParams {
+    /// The corpus path of the document; required.
+    pub path: String,
+    /// The text cap in characters; `0` means no limit.
+    pub max_chars: Option<usize>,
+    /// Return one chunk's span text instead of the whole body.
+    pub chunk_id: Option<String>,
+}

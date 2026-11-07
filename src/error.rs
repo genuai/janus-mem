@@ -129,6 +129,15 @@ pub enum JanusError {
         path: PathBuf,
     },
 
+    /// A document read found the file, but the generation does not describe
+    /// these bytes: the body moved after the build, or no chunk of it answers
+    /// to the id. A span over older bytes is wrong, so a rebuild is the cure.
+    #[error("document {path}: the index does not describe these bytes; run janus index")]
+    DocumentChanged {
+        /// Vault-relative path of the document that moved.
+        path: PathBuf,
+    },
+
     /// A `--topic` query returned no `current` result, so there is no document
     /// whose chain could be rendered. Not an error in the corpus: the query is
     /// the subject, and the message repeats it verbatim.
@@ -216,6 +225,7 @@ impl JanusError {
             | Self::VaultNotFound { .. }
             | Self::PathResolve { .. }
             | Self::DocumentNotInCorpus { .. }
+            | Self::DocumentChanged { .. }
             | Self::TopicNotFound { .. }
             | Self::ChangedDuringRead { .. }
             | Self::ConfigMissing { .. }
