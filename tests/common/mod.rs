@@ -110,6 +110,79 @@ pub fn janus() -> Command {
     Command::cargo_bin("janus").expect("the janus binary must build for tests")
 }
 
+/// One finished `janus mcp` session (M6 §3.6).
+pub struct McpSession {
+    /// Every stdout line, parsed as one JSON-RPC message.
+    pub answers: Vec<Value>,
+    /// Stdout as text, so a test can count lines and look for a diagnostic.
+    pub stdout: String,
+    /// Stderr as text. Diagnostics belong here and nowhere else.
+    pub stderr: String,
+    /// The exit code, when the process exited rather than died by a signal.
+    pub code: Option<i32>,
+}
+
+/// Runs one `janus mcp` session: the script goes to stdin, the answers come back
+/// parsed as JSON-RPC messages.
+pub fn mcp(root: &Path, allow_write: bool, script: &str) -> McpSession {
+    let mut command = janus();
+    command
+        .env("RUST_LOG", "off")
+        .arg("--vault")
+        .arg(root)
+        .arg("mcp");
+    if allow_write {
+        command.arg("--allow-write");
+    }
+    let output = command.write_stdin(script).output().expect("run janus mcp");
+    let stdout = String::from_utf8(output.stdout).expect("stdout is UTF-8");
+    let answers = stdout
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("stdout line is not JSON ({err}):\n{line}"))
+        })
+        .collect();
+    McpSession {
+        answers,
+        stdout,
+        stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        code: output.status.code(),
+    }
+}
+
+/// The two lines that open a session: the handshake request and its notification.
+pub fn mcp_opening() -> String {
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18" },
+    });
+    format!(
+        "{initialize}\n{}\n",
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
+    )
+}
+
+/// One `tools/call` request line.
+pub fn mcp_call(id: u64, name: &str, arguments: Value) -> String {
+    format!(
+        "{}\n",
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments },
+        })
+    )
+}
+
+/// The tool envelope inside one `tools/call` answer.
+pub fn mcp_envelope(answer: &Value) -> &Value {
+    &answer["result"]["structuredContent"]
+}
+
 /// Copies the committed fixture into a fresh temporary directory and adds the
 /// generated ugly inputs.
 ///

@@ -159,6 +159,13 @@ pub enum Command {
         allow_write: bool,
     },
 
+    /// Serve the read tools over MCP, JSON-RPC 2.0 on stdin and stdout (§9.2)
+    Mcp {
+        /// Accepted now, and it changes no answer until writes exist (M6-7)
+        #[arg(long)]
+        allow_write: bool,
+    },
+
     /// Report the chunks the corpus produces, without building an index
     Chunks {
         /// Emit one JSON object on stdout instead of the table
