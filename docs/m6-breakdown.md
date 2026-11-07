@@ -683,6 +683,13 @@ supplies one rather than asserting an empty list.
 | M6-21 | Phase 2b ships as two pull requests: `read` first, `status` second | The phase is 624 logic lines against a 280 estimate, and the whole phase cannot fit 350. The seam of §5 splits it into 349 and 275, so each part is one reviewable unit. Part one adds no output to a command that already existed. |
 | M6-22 | The rpc answer carries the echoed `id` beside the envelope, and case 5.7 compares the envelope alone | The request line has an `id` and the CLI has no request to name, so the comparison drops that one key. Everything else in the two answers is equal by construction, because both call `Engine::call`. |
 | M6-23 | §9 corrections 2 and 3 ship in Phase 3; Phase 5 keeps the rest | Their markers name P3, and the Phase 5 build line claimed all §9 text. The `rpc` shape and the exit-code rule describe this phase's code, so they land with it. |
+| M6-24 | The five parameter structs also derive `Serialize` | The drift test compares every `inputSchema` property with an encoded struct, and a derive reads the field names where a second hand-written list would drift with the first. No envelope moves. |
+| M6-25 | `tools/list` reports SPEC §9.2 order, which is not `Tool::ALL` order | The spec states the order a client reads, and case 6.7 names it. `Tool::ALL` keeps the enum's own order because the rpc hint already lists it that way. |
+| M6-26 | An unknown tool name in `tools/call` is `-32602`, not a tool failure | The name is part of the request's shape, and the protocol's tools section names `-32602` for an unknown tool. A write name stays a `refused` result, because that name is legal and the release is not. |
+| M6-27 | A malformed request that carries an `id` is answered with that `id` | JSON-RPC requires `null` only when the id cannot be read. A client that sent `id: 4` can then match the error line to its request. |
+| M6-28 | `ping` and the handshake rules are protocol conformance, so they are in scope | `ping` answers `{}` in four lines and lets a host keep a session alive; the lifecycle states the version answer and the refusal of a request before the handshake, and §3.6 case 6.5 names `-32002`. |
+| M6-29 | `-32002` is this server's own code, inside the JSON-RPC server-error range | The `2025-06-18` lifecycle states the rule and names no code. JSON-RPC reserves `-32000..=-32099` for implementation errors, and §3.6 fixes this value, so nothing invents a meaning for a standard code. |
+| M6-30 | Phase 4 ships as two pull requests, and the strict argument check is part two | The phase is 867 logic lines against a 450 estimate. Part one with the check measured 596 against 550, so the check, its two cases and its refusal moved to part two; part one keeps the two tools of the seam. |
 
 ## 5. Phases
 
@@ -815,6 +822,18 @@ the hand-derived first path and the five-link chain.
 **Split seam.** Part 1: handshake, framing, list, dispatch, `search` and
 `read_document`. Part 2: `get_authoritative_facts`, `get_lineage`, `janus_status`,
 the walkthrough.
+
+**Split, as delivered.** The seam held at two tools, and both parts fit their
+ceilings once the strict argument check moved to part two (M6-30):
+
+| part | contents | logic | tests |
+|---|---|---|---|
+| 4-i | `src/mcp/protocol.rs`, `src/mcp/mod.rs`, `search` and `read_document`, cases 6.1–6.6 and 10.2, the drift test | 549 | 394 |
+| 4-ii | the other three tools, the argument check, the write refusal, cases 6.7, 7.1–7.10 and 8.1–8.2, the walkthrough | 318 | 674 |
+
+Part one ships a server that answers `search` and `read_document`; an unknown
+parameter there is the engine's `usage` answer, and part two turns it into
+`-32602`.
 
 ### Phase 5 — The gate, the snippets, and the corrections
 
@@ -1231,7 +1250,88 @@ top of the same two calls.
 
 ### Phase 4 — `janus mcp`
 
-_(empty)_
+**Sizes.** Two pull requests, M6-30. Part 4-i: logic 549 / 550, tests 394 / 800.
+Part 4-ii: logic 318 / 550, tests 674 / 800. The phase is 867 logic and 1068
+test lines against estimates of 450 and 550. No dependency was added.
+
+**What landed.** `janus mcp [--allow-write] [--vault PATH]` is a JSON-RPC 2.0 peer
+on stdio. `src/mcp/protocol.rs` reads one message per line; a message with an
+`id` is a request and earns one answer, and a message without one is a
+notification and earns none. `src/mcp/mod.rs` holds the loop, the handshake flag
+and the method table. `src/mcp/tools.rs` holds the five descriptors and the
+`tools/call` dispatch.
+
+`initialize` echoes a revision this server accepts and answers `2025-06-18`
+otherwise; it reports `capabilities: {"tools": {}}` and `serverInfo` from
+`Cargo.toml`. `notifications/initialized`, `notifications/cancelled` and any
+unknown notification answer nothing. `ping` answers `{}` before or after the
+handshake (M6-28). A request before `initialize` answers `-32002` and the loop
+stays alive.
+
+The five schemas are hand-written `serde_json::Value` literals with
+`additionalProperties: false`, and `tools/call` validates the arguments against
+the schema it published, so an unknown or mistyped parameter is `-32602` and
+names the field (case 7.6). No schema enumerates a value the engine decides:
+an unknown `intent` is a tool failure with `code: "usage"`, because the shape is
+legal and the combination is not (case 7.4). One test compares every
+`inputSchema` property with the encoded parameter struct of
+`src/api/dto.rs`, so a field that moves in either place fails a test instead of
+becoming a silent default.
+
+A tool answer is the engine's envelope twice: `structuredContent` and one text
+content block holding the same compact JSON. A tool failure adds
+`isError: true`. A write name is refused through `api::write_refusal` before the
+tool table runs, in both `--allow-write` modes, so MCP and rpc answer the same
+name alike (case 8.2). `tools/list` never lists a write tool (case 8.1).
+
+stdout carries protocol only. The engine's `refresh:` and `warning:` lines stay
+on stderr, which case 10.2 pins by parsing every line of a session that builds
+an index for the first time.
+
+**Deviations.**
+
+1. The phase is two pull requests, and the strict argument check is part two
+   (M6-30). Part one keeps the seam's two tools and answers `-32602` only for a
+   `params` value that is not an object; part two adds the field-level check.
+2. Case 7.2's `{"tags": ["principle"]}` returns an empty list: the committed
+   fixtures hold no principle, which case 11.3 states. The test therefore runs
+   the same predicate on the graph fixture, compares the listing with
+   `janus facts --limit 50 --json`, and asserts every row is `effective_status:
+   active`. An empty answer would prove nothing about the gate.
+3. Case 7.7 is two halves in one test: a missing index is built on the first
+   call, and a patched `format_version` answers `index_needs_full_build`. Both
+   are the same call against two corpora, and one test keeps the contrast.
+4. Case 7.9 compares the five MCP answers with the five rpc answers after
+   `taken_ms` becomes `0` and the rpc `id` is dropped. The cache counters are
+   compared as they are: both sessions make the same five calls in the same
+   order, so each counts one miss and two hits.
+5. `-32002` is this server's own code (M6-29): the `2025-06-18` lifecycle
+   document states the rule and names no code, and JSON-RPC reserves the range.
+6. An unknown tool name in `tools/call` is `-32602` (M6-26). A malformed request
+   that carries an `id` is answered with that `id` (M6-27).
+7. `ping` is added as protocol conformance, not scope (M6-28).
+
+**The walkthrough.** `tests/mcp_walkthrough.rs` runs one scripted session
+against a temp copy of `tests/fixtures/graph-vault`. W1: `search` with
+`intent: current` returns the current decision at `effective_status: active`,
+and the four replaced links are absent. W2: `get_lineage` on
+`chain/2022-01-01-cache-returns.md` returns `adopt-postgres`, `move-to-redis`,
+`cache-in-front`, `drop-cache` and `cache-returns` at depths 0–4 in that order,
+with terminal `active`, and `read_document` returns a body holding `measured
+budget`. Both values are read from the fixture files by hand. W3 adds
+`principles/pricing.md` to its own copy and gets exactly that path back for
+`{"tags": ["pricing"]}`.
+
+**Test budget.** Part 4-ii spends 674 of 800 test lines. Case 7.9 costs the most
+and proves the most: two sessions across two adapters, one comparison.
+
+**Golden diff.** None. `git diff --stat tests/snapshots` is empty, `api` is still
+`1`, and `format_version` is still `6`.
+
+**Handoff to phase 5.** The `--allow-write` line, the client registration
+snippets, `docs/mcp-clients.md` and the §9 corrections remain. `src/mcp/tools.rs`
+is the one place M7 adds a write descriptor, and `api::write_refusal` is the one
+place it deletes.
 
 ### Phase 5 — the gate, the snippets, and the corrections
 
