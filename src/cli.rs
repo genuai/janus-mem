@@ -249,6 +249,10 @@ pub enum Command {
         #[arg(long, value_name = "T,..", value_delimiter = ',')]
         tags: Vec<String>,
 
+        /// Restrict to these canonical types or configured aliases
+        #[arg(long, value_name = "T,..", value_delimiter = ',')]
+        types: Vec<String>,
+
         /// Add a scope to the query set; may be repeated (§6.12)
         #[arg(long, value_name = "SCOPE")]
         scope: Vec<String>,

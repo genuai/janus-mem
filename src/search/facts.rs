@@ -39,7 +39,7 @@ use crate::index::embed::Embedder;
 use crate::score::{self, DecayBasis, Intent, ScopeFilter, ScoreDoc, ScoreInput, ScoredDoc};
 
 // One loader, one filter, one renderer: only the predicate and the order differ.
-use super::{Filter, Gate, Hit, Render, prepare, query_scores, render, require_scope, select};
+use super::{Filter, Gate, Hit, Report, prepare, query_scores, require_scope, select};
 
 /// How the included documents are ranked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +59,8 @@ pub struct Options {
     pub tags: Vec<String>,
     /// The query scope set; repeated `--scope` unions (§6.12 rule 4).
     pub scopes: Vec<String>,
+    /// Canonical type names or configured aliases; empty means every fact type.
+    pub types: Vec<String>,
     /// Exclude `global` and shared-only matches; requires a scope.
     pub scope_only: bool,
     /// Maximum documents returned.
@@ -92,7 +94,6 @@ pub fn run(
 ) -> Result<(), JanusError> {
     let started = Instant::now();
     require_scope(options.scope_only, &options.scopes)?;
-
     let load_embedder = if options.no_embeddings {
         None
     } else {
@@ -107,6 +108,34 @@ pub fn run(
         options.no_rebuild,
         options.progress,
     )?;
+    let report = compute(
+        root,
+        config,
+        clock,
+        load_embedder,
+        &prepared,
+        options,
+        started,
+    )?;
+    super::render(&report, options.json)
+}
+
+/// Answers `janus facts` without printing it (M6 §2.4).
+///
+/// # Errors
+///
+/// Exactly [`run`]'s.
+pub(crate) fn compute(
+    root: &Path,
+    config: &Config,
+    clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
+    prepared: &super::Prepared,
+    options: &Options,
+    started: Instant,
+) -> Result<Report, JanusError> {
+    require_scope(options.scope_only, &options.scopes)?;
+    let load_embedder = embedder;
     let mut degraded = super::degraded_reasons(
         options.no_embeddings,
         load_embedder.is_some(),
@@ -137,7 +166,7 @@ pub fn run(
     } else {
         Gate::facts(&graph, &scopes, today)
     };
-    let filter = Filter::new(config, &[], &options.tags, scopes, gate);
+    let filter = Filter::new(config, &options.types, &options.tags, scopes, gate);
     let selection = select(&rows, &filter);
     let (selected, map) = (selection.selected, selection.map);
     let docs: Vec<ScoreDoc<'_>> = selected
@@ -174,15 +203,16 @@ pub fn run(
     if order == Order::Newest && decay_basis.undated_age_days.is_none() {
         notes.push("the corpus has no dated document; an undated document decays 1.0".to_owned());
     }
+    let median_decay = order == Order::Newest && decay_basis.undated_age_days.is_some();
+    super::add_provenance(&rows, &selected, &hits, median_decay, &mut notes);
 
-    render(&Render {
+    Ok(Report::new(&super::Answer {
         root,
         config,
         snapshot: &prepared.snapshot,
         rows: &rows,
         selected: &selected,
         hits: &hits,
-        json: options.json,
         started,
         query: options.query.as_deref(),
         intent: None,
@@ -190,11 +220,10 @@ pub fn run(
         filter: &filter,
         limit: options.limit,
         alpha: 0.0,
-        degraded,
-        notes,
-        median_decay: order == Order::Newest && decay_basis.undated_age_days.is_some(),
+        degraded: &degraded,
+        notes: &notes,
         stale: prepared.stale,
-    })
+    }))
 }
 
 /// Picks each document's representative chunk and orders documents.

@@ -21,8 +21,8 @@ use crate::config::Config;
 use crate::error::JanusError;
 use crate::graph::{ChainNode, EffectiveStatus, Endpoint, Graph, Window};
 use crate::id::DocId;
+use crate::index::TombstoneMeta;
 use crate::index::embed::Embedder;
-use crate::index::{Snapshot, TombstoneMeta};
 use crate::score::ScopeFilter;
 use crate::search::{self, DocRow};
 use crate::vault;
@@ -60,14 +60,52 @@ pub fn run(
     options: Options,
 ) -> Result<(), JanusError> {
     let started = Instant::now();
-    let (snapshot, id, topic) = locate(root, config, clock, embedder, &options)?;
-    let graph = Graph::for_snapshot(&snapshot, config);
-    let rows = search::doc_rows(&snapshot, config);
+    // The argument check runs before any read, so a usage error builds nothing.
+    validate(&options)?;
+    // A read passes the embedder so a rebuild it triggers still produces the
+    // generation this process would build (V-21 row 5).
+    let embedder = if options.no_embeddings {
+        None
+    } else {
+        embedder
+    };
+    let want_vectors = embedder.is_some() && config.embedding.alpha > 0.0;
+    let prepared = search::prepare(
+        root,
+        config,
+        clock,
+        embedder,
+        want_vectors,
+        options.no_rebuild,
+        options.progress,
+    )?;
+    let report = compute(root, config, clock, embedder, &prepared, &options, started)?;
+    render(&report, options.json)
+}
+
+/// Answers `janus lineage` without printing it (M6 §2.4).
+///
+/// # Errors
+///
+/// Exactly [`run`]'s.
+pub(crate) fn compute(
+    root: &Path,
+    config: &Config,
+    clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
+    prepared: &search::Prepared,
+    options: &Options,
+    started: Instant,
+) -> Result<Report, JanusError> {
+    let (id, topic) = locate(root, config, clock, embedder, prepared, options)?;
+    let graph = Graph::for_snapshot(&prepared.snapshot, config);
+    let rows = search::doc_rows(&prepared.snapshot, config);
     let scopes = ScopeFilter::new(&[], false);
     let tables = Tables {
         graph: &graph,
         rows: rows.iter().map(|row| (row.id, row)).collect(),
-        tombstones: snapshot
+        tombstones: prepared
+            .snapshot
             .tombstones
             .iter()
             .map(|meta| (meta.id, meta))
@@ -81,7 +119,7 @@ pub fn run(
     let mut notes = Vec::new();
     let cycle_breaks = tables.cycle_breaks(&chain, &mut notes);
     let terminal = tables.terminal(&chain, &mut notes);
-    let report = Report {
+    Ok(Report {
         vault: root.display().to_string(),
         corpus_id: config.corpus_id.clone(),
         topic,
@@ -91,31 +129,33 @@ pub fn run(
         cycle_breaks,
         terminal,
         results: chain.iter().map(|node| tables.node(node, id)).collect(),
-    };
+    })
+}
 
+/// Writes the chain in the command's selected mode.
+fn render(report: &Report, json: bool) -> Result<(), JanusError> {
     let mut out = io::stdout().lock();
-    if options.json {
+    if json {
         let json = serde_json::to_string_pretty(&crate::api::Ok::new(report))
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         // A closed pipe is not a command failure (`… --json | head`).
         let _ = writeln!(out, "{json}");
     } else {
-        write_human(&mut out, &report);
+        write_human(&mut out, report);
     }
     Ok(())
 }
 
-/// Resolves the one argument the caller gave into a document of one generation.
-///
-/// Both branches use the read path `search` uses, so a refresh this command
-/// triggers publishes the generation `search` would (V-21 row 5, M5-39).
-fn locate(
-    root: &Path,
-    config: &Config,
-    clock: &dyn Clock,
-    embedder: Option<&dyn Embedder>,
-    options: &Options,
-) -> Result<(Snapshot, DocId, Option<String>), JanusError> {
+/// Which document the caller named (§3.9).
+enum Target {
+    /// A corpus path, live or retired.
+    Path(PathBuf),
+    /// A `current` query whose top result the chain belongs to.
+    Topic(String),
+}
+
+/// Reads the one argument the caller gave; neither or both is a usage error.
+fn target(options: &Options) -> Result<Target, JanusError> {
     match (&options.path, &options.topic) {
         (None, None) => Err(search::usage(
             "lineage needs a PATH or --topic QUERY: give exactly one",
@@ -123,77 +163,86 @@ fn locate(
         (Some(_), Some(_)) => Err(search::usage(
             "lineage takes a PATH or --topic QUERY, not both",
         )),
-        (Some(given), None) => {
-            // The embedder travels with the read even though no row is wanted:
-            // a rebuild it triggers must publish the generation `janus search`
-            // would publish (V-21 row 5).
-            let embedder = if options.no_embeddings {
-                None
-            } else {
-                embedder
-            };
-            let want_vectors = embedder.is_some() && config.embedding.alpha > 0.0;
-            let prepared = search::prepare(
-                root,
-                config,
-                clock,
-                embedder,
-                want_vectors,
-                options.no_rebuild,
-                options.progress,
-            )?;
+        (Some(given), None) => Ok(Target::Path(given.clone())),
+        (None, Some(topic)) => Ok(Target::Topic(topic.clone())),
+    }
+}
+
+/// The argument check on its own, for a caller that reads before it answers.
+///
+/// # Errors
+///
+/// [`JanusError::Usage`] when neither or both of `path` and `topic` is given.
+pub(crate) fn validate(options: &Options) -> Result<(), JanusError> {
+    target(options).map(|_| ())
+}
+
+/// Resolves the one argument into a document of the loaded generation.
+fn locate(
+    root: &Path,
+    config: &Config,
+    clock: &dyn Clock,
+    embedder: Option<&dyn Embedder>,
+    prepared: &search::Prepared,
+    options: &Options,
+) -> Result<(DocId, Option<String>), JanusError> {
+    match target(options)? {
+        Target::Path(given) => {
             let graph = Graph::for_snapshot(&prepared.snapshot, config);
             // One lookup answers for a live and a retired path, because a
             // tombstone keeps the last path it held (M5-38).
-            let Some(id) = corpus_path(given, root)
+            let Some(id) = corpus_path(&given, root)
                 .ok()
                 .and_then(|rel| graph.by_path(&rel))
             else {
-                return Err(JanusError::DocumentNotInCorpus {
-                    path: given.clone(),
-                });
+                return Err(JanusError::DocumentNotInCorpus { path: given });
             };
-            Ok((prepared.snapshot, id, None))
+            Ok((id, None))
         }
-        (None, Some(topic)) => {
-            let found = search::query(
-                root,
+        Target::Topic(topic) => {
+            // The chain of the top `current` result, ranked by the one search
+            // path, so `lineage --topic` cannot disagree with `search` (M5-39).
+            let ranked = search::rank(
                 config,
                 clock,
                 embedder,
-                &search::Options {
-                    query: topic.clone(),
-                    intent: Some("current".to_owned()),
-                    scopes: Vec::new(),
-                    scope_only: false,
-                    limit: 1,
-                    types: Vec::new(),
-                    tags: Vec::new(),
-                    decay_half_life: None,
-                    include_superseded: false,
-                    as_of: None,
-                    no_rebuild: options.no_rebuild,
-                    no_embeddings: options.no_embeddings,
-                    embedding_reason: None,
-                    progress: options.progress,
-                    json: false,
-                },
+                prepared,
+                &topic_options(&topic, options),
             )?;
             // `hit.doc_index` indexes `selected` by construction. The lookup is
             // total rather than indexed, because a panic in a read command is
             // never the right answer; an impossible mismatch reads as no result.
-            let row = found
+            let row = ranked
                 .hits
                 .first()
-                .and_then(|hit| found.selected.get(hit.doc_index).copied())
-                .and_then(|index| found.rows.get(index));
+                .and_then(|hit| ranked.selected.get(hit.doc_index).copied())
+                .and_then(|index| ranked.rows.get(index));
             let Some(row) = row else {
-                return Err(JanusError::TopicNotFound {
-                    topic: topic.clone(),
-                });
+                return Err(JanusError::TopicNotFound { topic });
             };
-            Ok((found.snapshot, row.id, Some(topic.clone())))
+            Ok((row.id, Some(topic)))
         }
+    }
+}
+
+/// The `search` query a `--topic` chain is built for: one `current` result.
+fn topic_options(topic: &str, options: &Options) -> search::Options {
+    search::Options {
+        query: topic.to_owned(),
+        intent: Some("current".to_owned()),
+        scopes: Vec::new(),
+        scope_only: false,
+        limit: 1,
+        types: Vec::new(),
+        tags: Vec::new(),
+        decay_half_life: None,
+        include_superseded: false,
+        as_of: None,
+        no_rebuild: options.no_rebuild,
+        no_embeddings: options.no_embeddings,
+        embedding_reason: None,
+        progress: options.progress,
+        json: false,
     }
 }
 
@@ -373,7 +422,7 @@ impl Tables<'_> {
 
 /// The `--json` report: one stable object, like every other command's.
 #[derive(Debug, Serialize)]
-struct Report {
+pub(crate) struct Report {
     vault: String,
     corpus_id: String,
     /// The `--topic` text; absent for a `PATH` argument.
