@@ -690,6 +690,7 @@ supplies one rather than asserting an empty list.
 | M6-28 | `ping` and the handshake rules are protocol conformance, so they are in scope | `ping` answers `{}` in four lines and lets a host keep a session alive; the lifecycle states the version answer and the refusal of a request before the handshake, and §3.6 case 6.5 names `-32002`. |
 | M6-29 | `-32002` is this server's own code, inside the JSON-RPC server-error range | The `2025-06-18` lifecycle states the rule and names no code. JSON-RPC reserves `-32000..=-32099` for implementation errors, and §3.6 fixes this value, so nothing invents a meaning for a standard code. |
 | M6-30 | Phase 4 ships as two pull requests, and the strict argument check is part two | The phase is 867 logic lines against a 450 estimate. Part one with the check measured 596 against 550, so the check, its two cases and its refusal moved to part two; part one keeps the two tools of the seam. |
+| M6-31 | Only `janus mcp --allow-write` prints the statement; `janus rpc --allow-write` stays silent | §3.8 case 8.3 asks for the line on the server a controller starts. An rpc caller reads one JSON answer per line and already gets `refused` with a hint that names M7, so a second wording of the same fact on stderr is one more thing to keep true. |
 
 ## 5. Phases
 
@@ -840,9 +841,10 @@ parameter there is the engine's `usage` answer, and part two turns it into
 **Files.** `src/mcp/tools.rs`, `src/main.rs`, `README.md`,
 `docs/mcp-clients.md` (new), `SPEC.md`, `docs/m6-breakdown.md` (this plan).
 
-**Build.** The refusal of §3.8, the `--allow-write` stderr line, and the client
-registration for Claude Desktop and Hermes (§16.3). The SPEC corrections of §9
-land here.
+**Build.** The `--allow-write` stderr line and the client registration for
+Claude Desktop and Hermes (§16.3). The refusal of §3.8 and its `tools/list`
+already shipped in Phase 4, so this phase states the flag and pins the refusal
+instead of writing it. The SPEC corrections of §9 land here.
 
 **Tests.** Case 8.3, and a test that reads the snippet and checks the JSON is
 valid and names `janus mcp`.
@@ -871,7 +873,9 @@ valid and names `janus mcp`.
 ## 7. Definition of done
 
 1. `janus mcp` and `janus rpc` answer all five tools from one `Engine::call`.
-   Evidence: `tests/cli_rpc.rs` parity test.
+   Evidence: case 5.7 (`tests/cli_rpc.rs`) compares the rpc answer with the CLI
+   answer, and case 7.9 (`tests/cli_mcp.rs`) compares the MCP answer with the rpc
+   answer, so the three surfaces are pinned to each other.
 2. W1–W3 are answered from the fixtures with no `grep`. Evidence:
    `tests/mcp_walkthrough.rs`, three assertions with hand-derived values.
 3. A write tool call is refused with `--allow-write` and without it, on both
@@ -879,8 +883,9 @@ valid and names `janus mcp`.
 4. stdout carries protocol only. Evidence: case 10.2, one whole session parsed.
 5. `janus read` and `janus status` exist and are tested. Evidence:
    `tests/cli_read.rs`, `tests/cli_status.rs`.
-6. No golden moved except `ok` and `content_hash`. Evidence: the P1 diff and
-   `git diff --stat tests/snapshots`.
+6. No golden moved except `ok` and `content_hash`. Evidence:
+   `git diff bd57a33..HEAD -- tests/snapshots` — three files, twelve inserted
+   lines, and every one of them is `ok` or `content_hash`.
 7. `cargo doc --no-deps` has zero warnings. Evidence: the command's output.
 8. `format_version` stays `6` (`src/index/mod.rs:49`) and `api` stays `1`
    (`src/scan.rs:46`). Evidence: both constants are unchanged in
@@ -1335,4 +1340,88 @@ place it deletes.
 
 ### Phase 5 — the gate, the snippets, and the corrections
 
-_(empty)_
+**Sizes.** logic 7 / 250, tests 223 / 400. Seven logic lines are one `if` and its
+comment in `src/main.rs`; everything else this phase adds is a test or Markdown.
+No dependency was added.
+
+**What landed.** `janus mcp --allow-write` starts, prints exactly one line on
+stderr — `writes are not implemented yet; --allow-write has no effect` — and
+serves the same five tools. The statement sits in the `Command::Mcp` arm of
+`src/main.rs`, where the flag arrives, so no library path writes a diagnostic and
+stdout stays protocol-only (case 8.3).
+
+`tests/mcp_gate.rs` holds the gate:
+
+| test | what it asserts |
+|---|---|
+| `case_8_3_allow_write_prints_one_line_and_leaves_stdout_empty` | the exact stderr line, empty stdout with and without the flag, and the same five tools plus one `search` answer with the flag |
+| `case_8_3_writes_enabled_is_false_in_both_modes_whatever_the_config_says` | `[mcp] allow_write = true` leaves `writes_enabled` false in both modes |
+| `case_8_4_m7_deletes_this_test_when_it_serves_a_write` | `tools/list` is the five read names and each of the four write names answers `refused` with a hint naming M7 |
+
+Case 8.4 fails the moment M7 lists or answers a write tool, so M7 cannot land
+without deleting it. That is the pin the case asks for.
+
+`docs/mcp-clients.md` registers the server in Claude Desktop, with the
+`mcpServers` block of SPEC §16.3, and in Hermes, with the same command and
+arguments. Both use absolute path placeholders. `tests/mcp_clients_docs.rs` parses
+every fenced JSON block, requires an absolute `command` ending in `/janus`, an
+`mcp` first argument and an absolute `--vault`, and requires the file to name both
+clients. It parses; it does not match text.
+
+README gains one section of 14 net lines and loses the claim that there is no MCP
+server.
+
+**Corrections.** §9.4 now states the scope of the envelope (five tools, five CLI
+counterparts, receipt commands excluded), the failure object with no results, the
+`--json` failure on stdout before the exit code, and `content_hash` as the etag
+field name. §11 M6 now states the scripted transcript as the done-when, the write
+refusal until M7, and the M6b deferral from the M5 handoff. §9 items 2–8 were
+already applied by the phases that owned them, and §9.1 already listed `janus
+mcp`, `janus status` and the exit-code rule; no edit was needed there.
+
+**Deviations.**
+
+1. `src/mcp/tools.rs` needed no change. Phase 4 shipped the shared refusal and a
+   `tools/list` without the four write names, so this phase adds the statement and
+   the pin only. The plan named the file; the code it named arrived one phase
+   earlier.
+2. `tests/mcp_gate.rs` and `tests/mcp_clients_docs.rs` are new files, and the
+   plan's Phase 5 file list named no test file. Two files rather than one keeps
+   the gate and the snippet apart: one needs a server, the other needs a text
+   file.
+3. `janus rpc --allow-write` prints no statement (M6-31).
+
+**Golden diff.** None in this phase. Across M6, three snapshot files gained
+`ok` and `content_hash` and no other line moved.
+
+**Handoff to M7.** `api::write_refusal` and its `WRITE_TOOLS` list are the one
+place a write tool stops being refused, and
+`case_8_4_m7_deletes_this_test_when_it_serves_a_write` is the one test M7 must
+delete in the same pull request. §10 states the rest.
+
+## 12. Close-out
+
+The milestone is complete. Every row of §7 is proven by a test or a command that
+ran on this branch.
+
+| # | Done when | Evidence | Result |
+|---|---|---|---|
+| 1 | five tools, one `Engine::call`, two surfaces | `case_5_7_the_five_calls_equal_the_five_cli_calls`, `case_7_9_the_five_calls_equal_the_five_rpc_calls` | proven: equal answers on all five |
+| 2 | W1–W3 from the fixtures, no `grep` | `case_11_1_w1_the_current_decision_is_present_and_nothing_superseded_is`, `case_11_2_w2_the_chain_has_five_nodes_and_the_text_holds_the_budget`, `case_11_3_w3_one_added_principle_is_the_answer` | proven: 3 passed |
+| 3 | a write is refused in both modes, on both surfaces | `case_8_2_a_write_name_is_refused_by_the_shared_helper`, `case_8_4_m7_deletes_this_test_when_it_serves_a_write`, `case_5_8_a_write_tool_is_refused_by_the_shared_helper` | proven |
+| 4 | stdout carries protocol only | `case_10_2_a_whole_session_parses_as_json_rpc`; `case_10_3_only_the_cli_renderers_write_to_stdout` | proven: every line of a session parses |
+| 5 | `janus read` and `janus status` exist and are tested | `tests/cli_read.rs` (11 tests), `tests/cli_status.rs` (7 tests) | proven |
+| 6 | no golden moved except `ok` and `content_hash` | `git diff bd57a33..HEAD -- tests/snapshots` | proven: 3 files, 12 inserted lines, all `ok` or `content_hash` |
+| 7 | `cargo doc --no-deps` has zero warnings | the command, after `touch src/lib.rs` | proven: no warning printed |
+| 8 | `format_version` 6, `api` 1 | `git diff -U0 bd57a33..HEAD -- src/index/mod.rs src/scan.rs` is empty for both constants; `FORMAT_VERSION: u16 = 6` at `src/index/mod.rs:49`, `API_VERSION: u32 = 1` at `src/scan.rs:46` | proven |
+| 9 | no exit code moves | `case_2_6_the_code_table_is_total_and_faithful` | proven: the table copies `exit_code` |
+
+Rows 1 and 6 of §7 were corrected in this phase. Row 1 named only the rpc parity
+test, which compares rpc with the CLI and says nothing about MCP; row 6 named "the
+P1 diff", which is not a command a reader can run. Neither correction changes a
+result.
+
+**What M6 did not close, and who owns it.** Writes, `expected_hash`, `conflict`
+and `precondition_required` are M7 (§10). Corpora, workspaces, `janus promote` and
+`janus corpora` are M6b (§0.3). The client snippet set beyond Claude Desktop and
+Hermes is not planned here.

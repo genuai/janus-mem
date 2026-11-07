@@ -70,6 +70,21 @@ stale index by themselves and print one `refresh:` line to stderr. They never ed
 Markdown. Every command takes `--vault <path>` or `JANUS_VAULT`; read commands also find
 the corpus by walking up from the current directory.
 
+## Connect an agent over MCP
+
+janus-mem speaks the Model Context Protocol on stdio. The server offers five read tools:
+`search`, `get_lineage`, `get_authoritative_facts`, `read_document` and `janus_status`.
+Register it once in your controller:
+
+```json
+{ "mcpServers": { "janus-mem": {
+    "command": "/Users/me/.cargo/bin/janus",
+    "args": ["mcp", "--vault", "/Users/me/vault"] } } }
+```
+
+[docs/mcp-clients.md](docs/mcp-clients.md) shows where the block goes in Claude Desktop
+and in Hermes, and what the agent can then do.
+
 ## The part that makes it useful: dates and links
 
 janus reads what you wrote. It does not invent metadata. Three keys do most of the work:
@@ -105,9 +120,8 @@ the difference between a search engine and a knowledge engine.
 
 ## What it does not do yet
 
-- **No MCP server.** An agent calls the CLI today. M6 adds the server and `janus rpc`.
 - **No writes.** janus never edits your Markdown. Writes arrive in M7, behind an explicit
-  flag and a hash check.
+  flag and a hash check. `--allow-write` is accepted and has no effect until then.
 - **macOS and Linux.** Windows builds, but is not tested.
 - **Speed is not the selling point.** Expect about a second per query on a few thousand
   documents. This is a known gap, and it is on the M8 list.

@@ -1187,10 +1187,11 @@ Rules:
 
 ### 9.4 Response envelope
 
-Every tool returns the same outer shape, so agents learn one contract:
+Every tool of §9.2 returns the same outer shape, so agents learn one contract:
 
 ```json
 {
+  "api": 1,
   "ok": true,
   "intent": "current",
   "took_ms": 3,
@@ -1207,12 +1208,43 @@ Every tool returns the same outer shape, so agents learn one contract:
                  "scores": { "semantic": 0.81, "lexical": 0.72, "relevance": 1.10,
                              "title_boost": 1.43, "authority": 1.5, "decay": 0.93,
                              "corpus": 1.0, "final": 1.53 },
+                 "content_hash": "…",
                  "chunk_id": "…", "heading": "## Decision", "text": "…",
                  "truncated": false } ]
 }
 ```
 
-Errors are `{ "ok": false, "code": "conflict", "message": "...", "hint": "..." }` — never a bare panic or a stack trace. The `hint` field is for the agent, not the human.
+**Scope.** `api` and `ok` are on the five tool surfaces of §9.2 and on their five
+CLI counterparts: `janus search --json`, `janus lineage --json`, `janus facts
+--json`, `janus read --json` and `janus status --json`. `janus index` and the
+other reports keep the shape they have: `scan`, `chunks`, `doctor`, `ids`,
+`moves` and `suggest-links` answer a receipt, not an envelope, and widening them
+would move every golden for no agent benefit.
+
+**Failure.** A failure is `{ "api": 1, "ok": false, "code": "conflict",
+"message": "...", "hint": "..." }` — never a bare panic or a stack trace.
+`code` is stable and comes from one table (§9.1), `message` states the failure in
+the words the error type already uses, and `hint` is optional, written for the
+agent and not for the human. A failure carries no `results`.
+
+**Failure on the CLI.** The five tool commands above print the failure object on
+stdout when `--json` is set, and then exit with the code of §9.1. A receipt
+command prints its `error:` line on stderr and nothing on stdout, so a caller can
+tell "no report" from "a report with no rows".
+
+**Etag.** Every document row carries `content_hash`. `read_document` hashes the
+bytes it returned, so the value always describes the text beside it. A `search`,
+`get_authoritative_facts` or `get_lineage` row carries the indexed hash of the
+generation it answered from: those tools read the index and never the file, so
+after a skipped refresh the hash describes the indexed bytes and not the file on
+disk. A caller that needs the current bytes calls `read_document`, or sends the
+indexed hash with a write and accepts a conflict when the file has changed.
+`search` and `get_authoritative_facts` report `index.stale` beside their rows,
+`janus_status` reports it for the corpus, and the refresh decision itself is one
+`refresh:` line on stderr (§9.1). `get_lineage` carries no staleness flag, so a
+caller that needs one asks `janus_status`. `content_hash` is the etag field name; §9.3's
+`expected_hash` asks for that same value under the name a write request needs,
+and there is no second name for it.
 
 ---
 
@@ -1284,8 +1316,8 @@ Supersession parsing, transitive chains, cycle detection, intersect-or-global cr
 **Learn:** recursive functions and explicit stacks (avoid gratuitous recursion), `HashMap` graph representation, `enum` state machines, borrowing across a traversal, `impl Display` for output types.
 
 ### M6 — MCP server, read-only (3–5 days)
-`rmcp` (or hand-rolled JSON-RPC) over stdio: `search`, `get_lineage`, `get_authoritative_facts`, `read_document`, `janus_status`. Same core also exposed as `janus rpc` (line-delimited JSON) so a future Python wrapper or any other controller needs no bindings. Register in Claude Desktop and Hermes. Stdout is protocol-only; all logs to stderr.
-**Done when:** an agent answers W1–W3 using janus-mem with `grep` disabled, and `--allow-write` absence provably blocks writes.
+Hand-rolled JSON-RPC 2.0 over stdio: `search`, `get_lineage`, `get_authoritative_facts`, `read_document`, `janus_status`. Same core also exposed as `janus rpc` (line-delimited JSON) so a future Python wrapper or any other controller needs no bindings. Register in Claude Desktop and Hermes. Stdout is protocol-only; all logs to stderr.
+**Done when:** one scripted session answers W1–W3 from the fixture vaults with `grep` disabled — the current decision, the five-link chain, the active principle — over `janus mcp`, and the same five tools answer over `janus rpc`. Writes are refused until M7: a call naming a write tool answers `refused` in both `--allow-write` modes, and `writes_enabled` stays `false`. Corpora, workspaces and `promote` are M6b, deferred by the handoff in `docs/m5-breakdown.md` §10 and not by this paragraph.
 **Learn:** JSON-RPC framing, `serde` DTOs, `Arc`/`RwLock`, error → protocol-error mapping, `#[serde(rename_all)]`, `serde_json::Value` for schemas, async only at the transport edge.
 
 ### M7 — Safe writes (5–7 days)
