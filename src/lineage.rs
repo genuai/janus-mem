@@ -23,7 +23,6 @@ use crate::graph::{ChainNode, EffectiveStatus, Endpoint, Graph, Window};
 use crate::id::DocId;
 use crate::index::embed::Embedder;
 use crate::index::{Snapshot, TombstoneMeta};
-use crate::scan::API_VERSION;
 use crate::score::ScopeFilter;
 use crate::search::{self, DocRow};
 use crate::vault;
@@ -83,7 +82,6 @@ pub fn run(
     let cycle_breaks = tables.cycle_breaks(&chain, &mut notes);
     let terminal = tables.terminal(&chain, &mut notes);
     let report = Report {
-        api: API_VERSION,
         vault: root.display().to_string(),
         corpus_id: config.corpus_id.clone(),
         topic,
@@ -97,7 +95,7 @@ pub fn run(
 
     let mut out = io::stdout().lock();
     if options.json {
-        let json = serde_json::to_string_pretty(&report)
+        let json = serde_json::to_string_pretty(&crate::api::Ok::new(report))
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         // A closed pipe is not a command failure (`… --json | head`).
         let _ = writeln!(out, "{json}");
@@ -248,6 +246,7 @@ impl Tables<'_> {
         let mut node = NodeDto {
             path: self.path(id),
             id: id.to_hex(),
+            content_hash: None,
             title: String::new(),
             type_name: None,
             date: None,
@@ -262,6 +261,7 @@ impl Tables<'_> {
         };
         if let Some(row) = self.rows.get(&id) {
             let window = self.windows.get(&id).copied().unwrap_or_default();
+            node.content_hash = Some(row.content_hash.to_hex());
             node.title.clone_from(&row.title);
             node.type_name = Some(row.type_name.clone());
             node.date = row.date.map(|date| date.to_string());
@@ -374,7 +374,6 @@ impl Tables<'_> {
 /// The `--json` report: one stable object, like every other command's.
 #[derive(Debug, Serialize)]
 struct Report {
-    api: u32,
     vault: String,
     corpus_id: String,
     /// The `--topic` text; absent for a `PATH` argument.
@@ -404,12 +403,15 @@ struct TerminalDto {
     paths: Vec<String>,
 }
 
-/// One node of the chain (§3.9). The four nullable fields are `None` only for a
+/// One node of the chain (§3.9). The nullable fields are `null` only for a
 /// retired document.
 #[derive(Debug, Serialize)]
 struct NodeDto {
     path: String,
     id: String,
+    /// Hash of the whole file's bytes; `null` for a retired document, which
+    /// keeps no hash to offer (M6 §2.7 rule 2).
+    content_hash: Option<String>,
     /// Effective title, or the last title of a retired document.
     title: String,
     #[serde(rename = "type")]

@@ -14,6 +14,7 @@
 //! Milestone 1 implemented corpus config parsing and document scanning;
 //! milestone 2 adds the chunker:
 //!
+//! * [`api`] — the shared answer head and the stable failure codes (M6).
 //! * [`chunk`] — the heading-aware chunker: sections with byte spans (M2).
 //! * [`clock`] — the injected clock, so scoring never reads the wall clock.
 //! * [`config`] — `janus.toml`, alias resolution, type registry, globs, decay.
@@ -44,6 +45,7 @@
 // Library code must not panic on recoverable errors; tests may unwrap (clippy.toml).
 #![warn(clippy::unwrap_used)]
 
+pub mod api;
 pub mod chunk;
 pub mod cli;
 pub mod clock;
