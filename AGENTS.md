@@ -82,6 +82,22 @@ or the Windows gate. It is checked and linted by its own Linux CI job
 (`cargo check` and `cargo clippy --all-targets --features embeddings`), which is
 the only place the `fastembed` module is compiled at all.
 
+## Dogfooding install
+
+After a milestone merges, rebuild the local binary that agents run:
+
+```bash
+cargo install --path . --locked   # release build into ~/.cargo/bin
+janus --version                   # the version the next dogfood run will use
+```
+
+Record the commit the binary was built from. A finding that comes from a stale
+binary is not a finding: the index is written by one version and queried by
+another, and every result is suspect for a reason nobody can name.
+
+Do not skip this because a phase looked small. Tests cover the library, not the
+installed binary, and a dogfood run is the only check that covers both.
+
 ## Versioning
 
 Four version numbers exist and must never be conflated (SPEC §6.8, §9.5):
