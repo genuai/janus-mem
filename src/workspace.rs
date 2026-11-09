@@ -118,7 +118,7 @@ pub struct Workspace {
     pub corpora: Vec<Corpus>,
     /// The federation policy of `[search]`.
     pub search: SearchPolicy,
-    /// Keys that were ignored, for the caller to print.
+    /// What was ignored or looked wrong, for the caller to print.
     pub warnings: Vec<String>,
 }
 

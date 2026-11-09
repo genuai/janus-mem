@@ -99,10 +99,14 @@ Rules taken from §6.11, which is the authority:
 
 - `id` is required, unique, and matches `[a-z0-9][a-z0-9._-]*`. It is declared, never derived.
 - `root` is resolved to an absolute path once, at load, with `dunce::canonicalize`.
+  A value that is not absolute resolves against the workspace file's own directory
+  (M6b-8), so a workspace can be committed beside its corpora.
 - `role` is `primary` or `archived`; exactly one primary in v1. More than one is a config
   error, not a warning, because "primary" is what a default query means.
 - `read_only` defaults to `true` for `archived` and `false` for `primary`.
 - `index_dir` falls back to `<root>/.janus`, which is what a corpus already uses today.
+  It is the index location of a corpus inside a workspace; the corpus config's own
+  `index_dir` applies in single-corpus mode (M6b-11). A leading `~` is not expanded.
 - An unknown key is tolerated, as in `janus.toml`: a newer janus may write it.
 - A missing `root`, a duplicate `id`, or two primaries are errors that name the file and the
   entry. Everything else degrades with a warning, because a broken federated read must still
@@ -263,6 +267,10 @@ are not committed, because they describe personal material.
 | M6b-5 | Cross-corpus links and `promote` stay in M7 | A cross-corpus edge changes windows and status across corpora. It is a write-side fact. |
 | M6b-6 | `read_document` gains `corpus?`, and a qualified `corpus:path` is accepted | A path alone is ambiguous once two corpora exist; the qualifier already exists in link syntax. |
 | M6b-7 | A missing index in any corpus is built on first read, as today | A workspace whose second corpus was never indexed must not fail the first query. |
+| M6b-8 | A relative `root` resolves against the workspace file's directory | A workspace can be committed beside its corpora, and a committed fixture needs no machine path. An absolute root is used as given. |
+| M6b-9 | An `id` that breaks the pattern is an error, not a warning | `--corpus <id>` must be able to name every corpus. A name the command line cannot pass is a corpus no query can select. |
+| M6b-10 | A value of the wrong type is an error naming the entry; an unknown key is a warning | A key a newer janus writes is forward compatibility. A value that cannot be read is not. |
+| M6b-11 | A workspace's `index_dir` is the index location for a corpus in that workspace | §6.11 gives the workspace that key. The corpus config's own value applies in single-corpus mode, where no workspace exists. |
 
 ## 5. Phases
 
@@ -376,4 +384,56 @@ Estimates run two to three times low in this repository. Each phase names its sp
 
 ## 12. Implementation logs
 
-_(empty)_
+### M6b-1 — The workspace file, resolution, and `janus corpora`
+
+**State.** Complete. Branch `m6b-phase1-workspace`, one pull request.
+
+**Files.** `src/workspace.rs` (new: the file's shape, its validation, the
+resolution, and the listing command), `src/error.rs` and `src/api/error.rs` (one
+new failure), `src/cli.rs` (`corpora`), `src/main.rs` (resolution at the edge),
+`src/lib.rs`, `tests/cli_corpora.rs` (new), `tests/cli_status.rs` (the renderer
+list gains the new module), `tests/fixtures/workspace/` (two corpora and the file
+that names them).
+
+**What runs.** `janus corpora [--json]` reads one workspace and reports each
+corpus's id, role, root, read-only flag, index directory, config presence, index
+presence and staleness. It reads one manifest per corpus and walks only for the
+digest. It builds nothing and takes no lock.
+
+**Resolution.** `--workspace PATH`, then `JANUS_WORKSPACE`, then
+`<platform config dir>/janus/workspace.toml`, then nothing. `main` reads the
+variable and the platform directory once and passes both as values, so
+`workspace.rs` reads no environment and two runs in one process cannot disagree.
+A named path that is not a file is an error; the platform file is used only when
+it exists.
+
+**Cases.**
+
+| Case | Evidence |
+|---|---|
+| 1.1 flag, then env, then config dir | `case_1_1_the_flag_beats_the_env_and_the_env_beats_the_config_dir` |
+| 1.2 no workspace changes nothing | `case_1_2_no_workspace_changes_nothing_about_a_single_corpus_report`, plus the untouched goldens |
+| 1.3 two primaries, duplicate id, missing root | three `case_1_3_…` tests; each asserts the file and the entry appear in the message |
+| 1.3 unknown key, and an unusable id | `case_1_3_an_unknown_key_is_tolerated_with_a_warning`, `case_1_3_an_id_the_command_line_cannot_name_is_an_error` |
+| 1.4 archived is read-only by default | `case_1_4_an_archived_corpus_is_read_only_unless_it_says_otherwise` |
+| 1.5 presence and staleness without a build | `case_1_5_corpora_reports_freshness_without_building_or_locking` |
+
+**Single-corpus evidence.** `tests/golden_search.rs` and `tests/golden_scan.rs`
+run unchanged and no snapshot moved. In this phase only `corpora` loads a
+workspace, so every other command keeps its output byte for byte: `search` gains
+no field and prints no workspace diagnostic.
+
+**Gates.** fmt, clippy with `-D warnings`, test (902 passed, 2 ignored), doc
+(zero warnings), the Windows cross-check. Size: logic 583, tests 533.
+
+**Size against the plan.** The phase budget was 400 logic, the estimate 300, and
+the delivered phase is 583. The split seam was not taken: part 1 alone (the file,
+validation and resolution with their tests) is about 450, so neither half fits
+under 400 without dropping validation this plan asks for. The numbers stay under
+the repository ceiling of 600. The next phase should read 400 as a floor, not a
+target.
+
+**Not included.** `--corpus`, the merge, the archived exclusion and the `corpus`
+field (M6b-2); `read_document` and `janus_status` in a workspace (M6b-3);
+`promote`, cross-corpus links and every write (M7); `[scope_groups]`; and a
+`--workspace` flag on commands that read no workspace yet.
