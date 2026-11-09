@@ -39,6 +39,8 @@
 //! * [`suggest`] — candidate pairs of unlinked similar documents (M5).
 //! * [`vault`] — corpus root discovery, the directory walk, path confinement,
 //!   frontmatter isolation, metadata resolution, and identity derivation.
+//! * [`workspace`] — `workspace.toml`: the corpora one query reads together, and
+//!   `janus corpora` (M6b).
 //! * [`scan`] — the `janus scan` command (discovery report so far).
 //! * [`tokenize`] — the one tokenizer shared by indexing and queries (M3).
 //! * [`error`] — the single error type and its exit-code mapping.
@@ -79,3 +81,4 @@ pub mod status;
 pub mod suggest;
 pub mod tokenize;
 pub mod vault;
+pub mod workspace;

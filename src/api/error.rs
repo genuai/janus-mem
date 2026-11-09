@@ -56,6 +56,10 @@ impl ApiCode {
                 code: "path_escape",
                 exit: 4,
             },
+            JanusError::WorkspaceInvalid { .. } => Self {
+                code: "workspace_invalid",
+                exit: 2,
+            },
             JanusError::ConfigMissing { .. } => Self {
                 code: "config_missing",
                 exit: 1,
