@@ -1089,8 +1089,8 @@ mod tests {
         let corpus = DecayBasis::new(
             today(),
             [Some(days_ago(10)), Some(days_ago(20)), Some(days_ago(30))],
-        )
-        .with_undated(UndatedDecay::Median);
+        );
+        assert_eq!(corpus.undated, UndatedDecay::Median, "the shipped default");
         assert_eq!(corpus.undated_age_days, Some(20.0));
 
         let undated = with_date(doc(1, Status::Active), None);
@@ -1141,14 +1141,11 @@ mod tests {
         let empty = DecayBasis::new(today(), none_dated).with_undated(UndatedDecay::Median);
         assert_eq!(empty.undated_rule(), None);
 
-        let median = DecayBasis::new(today(), one_dated).with_undated(UndatedDecay::Median);
-        assert_eq!(median.undated_rule(), Some(UndatedDecay::Median));
-
-        // The default is the measured winner, so a basis built without a rule
-        // reports `none` and needs no median.
+        // A basis built without a rule runs the shipped default, `median`, and
+        // reports it when the corpus has a median to name.
         let default = DecayBasis::new(today(), one_dated);
-        assert_eq!(default.undated, UndatedDecay::None);
-        assert_eq!(default.undated_rule(), Some(UndatedDecay::None));
+        assert_eq!(default.undated, UndatedDecay::Median);
+        assert_eq!(default.undated_rule(), Some(UndatedDecay::Median));
     }
 
     #[test]

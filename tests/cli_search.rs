@@ -1120,9 +1120,9 @@ fn the_undated_note_counts_only_returned_results() {
         .map(|note| note.as_str().expect("note"))
         .collect();
     // This vault does not set `[decay] undated`, so it runs the shipped
-    // default: the measured winner, `none`, which says so in one line.
+    // default: `median`, which names the median in one line.
     assert!(
-        notes.contains(&"1 result(s) have no date; decay is 1.0"),
+        notes.contains(&"1 result(s) have no date; decay uses the corpus median"),
         "{all}"
     );
 
