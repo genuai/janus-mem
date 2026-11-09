@@ -14,7 +14,7 @@
 use serde_json::{Map, Value, json};
 
 use crate::api::{Call, Failure, Tool, write_refusal};
-use crate::engine::Engine;
+use crate::engine::Fleet;
 use crate::mcp::protocol::{self, Error, INTERNAL_ERROR, INVALID_PARAMS};
 
 /// The order `tools/list` reports, and the only tools this release lists.
@@ -46,7 +46,7 @@ pub fn descriptors() -> Value {
 /// [`INVALID_PARAMS`] when the request has no legal shape: a missing tool name,
 /// an `arguments` value that is not an object, a name this server does not serve,
 /// or an argument the tool's schema does not accept.
-pub fn call(engine: &Engine, params: &Value, allow_write: bool) -> Result<Value, Error> {
+pub fn call(fleet: &Fleet, params: &Value, allow_write: bool) -> Result<Value, Error> {
     let fields = params.as_object().ok_or_else(|| {
         Error::new(
             INVALID_PARAMS,
@@ -76,7 +76,7 @@ pub fn call(engine: &Engine, params: &Value, allow_write: bool) -> Result<Value,
     }
     let tool = Tool::parse(name).map_err(|error| Error::new(INVALID_PARAMS, error.to_string()))?;
     validate(tool, &arguments)?;
-    let response = engine.call(&Call::new(tool, arguments));
+    let response = fleet.call(&Call::new(tool, arguments));
     Ok(tool_result(&response.json))
 }
 
@@ -327,6 +327,11 @@ fn schema(tool: Tool) -> Value {
                 "chunk_id": {
                     "type": "string",
                     "description": "Return one chunk's span text instead of the whole body."
+                },
+                "corpus": {
+                    "type": "string",
+                    "description": "Corpus to read: primary (default), or a workspace corpus id. \
+                                    A path may carry the same name as a corpus:path qualifier."
                 }
             },
             "required": ["path"],

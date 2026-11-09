@@ -22,7 +22,7 @@ use std::io::{BufRead, Write};
 use serde_json::{Map, Value, json};
 
 use crate::api::{Call, Failure, Tool, write_refusal};
-use crate::engine::Engine;
+use crate::engine::Fleet;
 use crate::error::JanusError;
 
 /// Answers every request line until input ends (M6 §3.5).
@@ -36,7 +36,7 @@ use crate::error::JanusError;
 ///
 /// End of input ends the loop. A failed write on stdout, such as a closed pipe,
 /// also ends it: the caller has stopped reading, and that is not an error.
-pub fn run(engine: &Engine, allow_write: bool, input: &mut dyn BufRead, out: &mut dyn Write) {
+pub fn run(fleet: &Fleet, allow_write: bool, input: &mut dyn BufRead, out: &mut dyn Write) {
     // One buffer, cleared per line: `read_line` appends, and a buffer that is
     // never cleared would answer the whole session's input at once.
     let mut line = String::new();
@@ -53,7 +53,7 @@ pub fn run(engine: &Engine, allow_write: bool, input: &mut dyn BufRead, out: &mu
         if line.trim().is_empty() {
             continue;
         }
-        let (id, answer) = answer(engine, &line, allow_write);
+        let (id, answer) = answer(fleet, &line, allow_write);
         if respond(out, &id, &answer).is_err() {
             return;
         }
@@ -61,7 +61,7 @@ pub fn run(engine: &Engine, allow_write: bool, input: &mut dyn BufRead, out: &mu
 }
 
 /// The echoed `id` and the answer object for one request line.
-fn answer(engine: &Engine, line: &str, allow_write: bool) -> (Value, Value) {
+fn answer(fleet: &Fleet, line: &str, allow_write: bool) -> (Value, Value) {
     let request = match request(line) {
         Ok(request) => request,
         // The line did not have the request shape, so there is no `id` to echo.
@@ -74,7 +74,7 @@ fn answer(engine: &Engine, line: &str, allow_write: bool) -> (Value, Value) {
     }
     match Tool::parse(&request.tool) {
         Ok(tool) => {
-            let response = engine.call(&Call::new(tool, request.params));
+            let response = fleet.call(&Call::new(tool, request.params));
             (request.id, response.json)
         }
         Err(error) => {

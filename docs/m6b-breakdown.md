@@ -278,6 +278,11 @@ are not committed, because they describe personal material.
 | M6b-16 | A neutral `scores.corpus` of `1.0` is omitted from JSON, and the human table shows the column only when a row carries a weight | §2.4 asks for the field and for it to appear only when it is not neutral. Omitting the neutral value is what keeps every existing golden byte-identical. |
 | M6b-17 | A merged `facts` list uses the authority order whenever any selected corpus listed facts | Authority is why the command exists (§7.1). A corpus with no fact type falls back for itself; its rows still merge by their own authority value. |
 | M6b-18 | A merged report takes its head fields from the first selected corpus and lists every selected id in `corpora`; a human row prints its corpus as `id:rel_path` | The query, the intent and the date are the same in every part. `alpha` is each corpus's own setting, so the head reports the first and every row keeps the score its own corpus gave it. The qualified path is the form a cross-corpus link already uses (M6b-6). |
+| M6b-19 | One fleet per surface: every corpus the workspace names, with one `Engine` per corpus built on first use | A `corpus` parameter must mean one thing on the command line, over rpc and over MCP, and the rpc loop and the MCP server must answer it too. Building an engine on first use keeps a query that reads the primary from resolving a model for a corpus it left out. This replaces M6b-12's blanket refusal: the refusal now applies only where no workspace is in play. |
+| M6b-20 | `janus_status` takes no `corpus`; `--workspace` is its flag, and `corpora` reports every corpus | The array already answers the per-corpus question, so a selection parameter would add a second rule for the same answer. In single-corpus mode both new fields are absent, so the shape does not change. |
+| M6b-21 | A read names its corpus in JSON only; the human form stays the document text | `janus read` is a text stream, and `janus read | head` is a documented use. A header line would break the one thing the command promises, so the field that names the corpus lives in the envelope. |
+| M6b-22 | A `corpus:path` qualifier and a `corpus` parameter that name different corpora is a usage error | One call cannot read two corpora. Resolving the contradiction silently would answer a question nobody asked, which is the failure M6b-14 refuses for a root and a workspace. |
+| M6b-23 | `lineage` keeps no `corpus` parameter, and a qualified path is refused | A supersession chain is one corpus's graph. A cross-corpus chain is a write-side fact, because the edge changes windows and status across corpora, so it stays in M7. |
 
 ## 5. Phases
 
@@ -311,16 +316,29 @@ module), `tests/workspace_query.rs` (new).
 
 ### Phase 3 — The other tools
 
-**Files.** `src/read.rs`, `src/status.rs`, `src/api/dto.rs`, `src/engine.rs`,
-`tests/workspace_read.rs` (new), `tests/cli_status.rs`.
+**Files.** `src/read.rs` (nothing: the answer names its corpus in the engine),
+`src/status.rs`, `src/api/dto.rs`, `src/engine.rs` (the fleet), `src/main.rs`,
+`src/cli.rs`, `src/rpc.rs`, `src/mcp/mod.rs`, `src/mcp/tools.rs`,
+`src/search/federate.rs`, `src/workspace.rs`, `tests/workspace_read.rs` (new),
+`tests/fixtures/workspace-read/` (new).
 
-**Build.** `corpus?` on `read_document`, the `corpora` block on `status`, and the same
-parameter over rpc and MCP.
+**Build.** `corpus?` on `read_document`, the `corpora` block on `status`, and the
+same parameter over rpc and MCP through one fleet.
 
 **Tests.** Cases 3.1–3.5.
 
 **Accept.** The five tools answer identically over the three surfaces, with the M6
 normalizations.
+
+**Split seam.** Part 1 is `read_document` and `janus read`; part 2 is `status`
+and the rpc/MCP parity. Measured, and not taken: see §12.
+
+**Amendment.** The original file list named `src/read.rs` and `tests/cli_status.rs`
+and no fleet. A read names its corpus where the fleet resolved it, so `read.rs`
+is untouched; the fleet lives in `engine.rs` because that is the type every
+adapter already calls; and the cases live in one file beside their fixture.
+`tests/cli_status.rs` keeps its own cases unchanged, which is the evidence that
+single-corpus output did not move.
 
 ### Phase 4 — The archive becomes a role
 
@@ -383,11 +401,21 @@ therefore move plumbing into a first review and make the second review read it
 again, so the phase ships as one change under the `large-pr` label. The numbers
 and the whole argument are in §12.
 
+**Delivered, M6b-3.** 839 logic against a ceiling of 400, and 535 tests against
+600. The estimate was 300 and the delivery is 2.8× it. The split seam was
+measured and not taken: part 1 alone (the fleet, `read_document` and
+`janus read`) is about 450, because `search` and `facts` must read through the
+same fleet or the branch would hold two ways to open a workspace; part 2
+(`status` and the rpc/MCP parity) is about 200. Neither half fits 400 either, so
+the split would buy a second review and a rewritten `main.rs` without meeting the
+phase ceiling. The phase ships as one change under the `large-pr` label, and §12
+states the arithmetic.
+
 ## 10. SPEC corrections
 
 1. **§9.2.** Add `corpus?` to `read_document` and to `janus_status`'s response, and state
    that a workspace's `id` and a corpus's declared `corpus_id` are two names reported
-   separately when they differ. (P3.)
+   separately when they differ. (P3.) **Delivered in M6b-3.**
 2. **§9.4.** Add `corpus` to the score breakdown and state its default of `1.0`. (P2.)
 3. **§6.11.** State that exactly one corpus is primary in v1, that naming an archived corpus
    does not promote it, and that a cross-corpus link stays inert until M7. (P1, P2.)
@@ -564,3 +592,104 @@ one is refused rather than answered from the primary (M6b-12, M6b-3);
 `read_document` and `janus_status` in a workspace (M6b-3); the remaining SPEC
 corrections of §10 (the §9.4 `corpus` wording landed with this phase); `promote`,
 cross-corpus link resolution and every write (M7); `[scope_groups]`.
+
+### M6b-3 — The other tools
+
+**State.** Complete. Branch `m6b-phase3-tools`, one pull request.
+
+**Files.** `src/engine.rs` (the fleet: every corpus a workspace names, one engine
+per corpus built on first use, and the one dispatch every surface calls),
+`src/main.rs` (one resolution helper, and the read, status, rpc and MCP commands
+wired through it), `src/status.rs` (`workspace` and `corpora`),
+`src/workspace.rs` (the corpus rows owned, so two surfaces print one shape),
+`src/search/federate.rs` (one answer, rendered or encoded),
+`src/cli.rs` (`--workspace` and `--corpus` on `read`, `--workspace` on `status`,
+`rpc` and `mcp`), `src/rpc.rs` and `src/mcp/mod.rs` and `src/mcp/tools.rs` (the
+fleet, and `corpus` in the read schema), `src/api/dto.rs` (`ReadParams.corpus`),
+`src/link.rs` (the qualifier splitter, shared), `SPEC.md` §9.2 (correction 1),
+`tests/workspace_read.rs` (new), `tests/fixtures/workspace-read/` (new: two
+corpora holding one document at one path with different bytes).
+
+`src/read.rs` is untouched. A read names its corpus where the fleet resolved it,
+which is the one place that knows the name, so the read path keeps its rule that
+it returns text and nothing else.
+
+**What runs.** `read_document` takes `corpus?`: absent, the primary corpus is
+read. A path may carry the same name as a `corpus:path` qualifier, which is the
+form a cross-corpus link already uses, and the qualifier is stripped before the
+path is resolved. The answer carries `corpus`, and that field is absent in
+single-corpus mode. `janus read` gains `--workspace` and `--corpus`, so the
+command line can read a document from an archived corpus.
+
+`janus_status` in a workspace reports `workspace` and one row per corpus: `id`,
+`role`, `root`, `read_only`, `index_dir`, `config_present`, `index_present`,
+`index_stale`. The rows are the ones `janus corpora` prints, read by one function,
+so the two commands cannot disagree. Nothing is built and no lock is taken.
+
+**One dispatch, three surfaces.** `Fleet` is the type every adapter calls: the
+command line, the rpc loop and the MCP server. It holds one `Engine` per corpus,
+built on first use, so a query that reads the primary does not resolve an
+embedding model for an archived corpus it left out. A selection that names no
+corpus is the same usage failure with the same list of ids on all three surfaces,
+because the plan owns the message (M6b-19).
+
+The five tools over rpc and MCP now answer a `corpus` parameter, including
+`all` and a named id, which the previous phase refused: the refusal remains only
+where no workspace is in play, where one engine really does hold one corpus
+(M6b-12). `lineage` keeps no `corpus` parameter, and a qualified path is refused,
+because a chain is one corpus's graph (M6b-23). `status` takes no `corpus`
+parameter; its `corpora` array answers the per-corpus question, and `--workspace`
+is the flag (M6b-20).
+
+**Cases.**
+
+| Case | Evidence |
+|---|---|
+| 3.1 a read names its corpus | `case_3_1_a_read_without_a_corpus_reads_the_primary_and_names_it`, `case_3_1_the_named_corpus_answers_and_a_qualified_path_answers_the_same` |
+| 3.2 an unknown id is `usage`, listing the ids | `case_3_2_an_unknown_corpus_is_a_usage_failure_that_lists_the_ids` (the parameter and the qualifier, exit 2), `case_3_2_a_single_corpus_read_names_its_own_corpus_and_no_other` |
+| 3.3 a workspace status lists the corpora | `case_3_3_a_workspace_status_lists_each_corpus_with_its_role_and_freshness`, `case_3_3_a_single_corpus_status_keeps_its_shape` |
+| 3.4 the three surfaces agree | `case_3_4_the_five_tools_answer_the_corpus_parameter_alike` |
+| 3.5 a write is still refused | `case_3_5_a_write_tool_is_refused_whatever_the_corpus_says` |
+
+**The two bodies, stated.** The fixture holds `notes/shared.md` in both corpora.
+The primary's body is `"\n# Cache plan\n\nThe primary corpus keeps one cache in
+front of the database.\n"` and the archived body is `"\n# Cache plan\n\nThe archived
+corpus describes the retired cache fleet.\n"`. Each case asserts one of them
+literally, so a read that fell back to the primary cannot pass.
+
+**Single-corpus evidence.** With no workspace, `status` gains no field: a case
+pins the exact nine keys, and `tests/cli_status.rs` runs unchanged. `read`
+answers the bytes it always did. The claim was also checked against a build of
+`main` on a copy of the committed fixture: `status --json`, `status`, `read
+--json`, `read`, `search --json` with and without embeddings, `facts --json`,
+`lineage --json`, and a two-request rpc session produced byte-identical stdout,
+with `taken_ms` masked in the search report because it is a duration. The
+workspace fields are absent rather than null, so no golden moved.
+
+**Gates.** fmt, clippy with `-D warnings`, test (931 passed, 2 ignored), doc
+(zero warnings), the Windows cross-check. Size: logic 839, tests 535.
+
+**Size against the plan, and the split seam.** The phase budget was 400 logic,
+the estimate 300, and the delivered phase is 839 by the script. The script counts
+every inserted and deleted line of a budgeted file, comments included: the
+source diff adds 596 lines and deletes 209, of which 148 added and 20 deleted are
+comments. The deleted lines are the old `Scope` type, the old `call_tool` body
+and the two command arms the fleet replaces, so a reader holds about 430 new
+lines of code and about 150 lines of prose that explain them.
+
+The seam was measured, not skipped. Part 1 was defined as the fleet plus
+`read_document` and `janus read`: it is about 450 lines, because `search` and
+`facts` must read through the same fleet or the branch would hold two ways to
+open a workspace, which the scope of this phase forbids. Part 2 is `status` and the
+rpc/MCP parity: about 200 lines. Neither half fits the phase ceiling of 400, so
+the split would buy a second review and a rewritten `src/main.rs` without meeting
+the budget it was made for. The phase therefore ships as one change with the
+overrun stated here and in the pull request, under the `large-pr` label. The
+lesson for M6b-4 and for M7 is the one this milestone has now recorded twice: an
+estimate in this repository is a floor, and a phase that touches six surfaces
+should be planned as two from the start, not split at review time.
+
+**Not included.** `promote`, cross-corpus link resolution and every write (M7);
+a cross-corpus chain for `lineage` (M6b-23); the ranking path of `search`
+(M6b-2); the archive-as-a-role gate and the remaining SPEC corrections of §10
+(M6b-4); `[scope_groups]`.

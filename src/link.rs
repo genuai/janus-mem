@@ -185,7 +185,7 @@ fn record(
 /// A single letter before the colon is a Windows drive, not a corpus id, so it
 /// stays part of the path and later fails the confinement test. An empty
 /// remainder is not a qualified link either.
-fn split_qualifier(text: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_qualifier(text: &str) -> Option<(&str, &str)> {
     let (head, rest) = text.split_once(':')?;
     let id_like = !head.is_empty()
         && !head

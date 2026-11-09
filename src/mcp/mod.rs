@@ -4,7 +4,7 @@
 //! answers a notification. It keeps one piece of state, the handshake flag: a
 //! request before `initialize` is `-32002` and the loop stays alive (§3.6).
 //!
-//! It is a thin adapter. [`crate::engine::Engine::call`] computes every tool
+//! It is a thin adapter. [`crate::engine::Fleet::call`] computes every tool
 //! answer, and [`crate::api::write_refusal`] refuses every write name, so MCP
 //! cannot disagree with `janus rpc` or the CLI (§9.5).
 //!
@@ -21,7 +21,7 @@ use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
 
-use crate::engine::Engine;
+use crate::engine::Fleet;
 use crate::mcp::protocol::{Error, Message};
 
 /// Serves one client until its input ends (M6 §3.6).
@@ -33,9 +33,9 @@ use crate::mcp::protocol::{Error, Message};
 ///
 /// `allow_write` travels to the shared refusal and changes no answer in this
 /// release: a write tool is refused in both modes (M6-7).
-pub fn run(engine: &Engine, allow_write: bool, input: &mut dyn BufRead, out: &mut dyn Write) {
+pub fn run(fleet: &Fleet, allow_write: bool, input: &mut dyn BufRead, out: &mut dyn Write) {
     let mut session = Session {
-        engine,
+        fleet,
         allow_write,
         initialized: false,
     };
@@ -60,9 +60,9 @@ pub fn run(engine: &Engine, allow_write: bool, input: &mut dyn BufRead, out: &mu
     }
 }
 
-/// One open session: the engine, the flag, and the one handshake fact.
+/// One open session: the corpora, the flag, and the one handshake fact.
 struct Session<'a> {
-    engine: &'a Engine,
+    fleet: &'a Fleet,
     allow_write: bool,
     /// True once `initialize` has been answered.
     initialized: bool,
@@ -103,7 +103,7 @@ impl Session<'_> {
             }
             "tools/call" => {
                 self.ready()?;
-                tools::call(self.engine, params, self.allow_write)
+                tools::call(self.fleet, params, self.allow_write)
             }
             other => Err(Error::new(
                 protocol::METHOD_NOT_FOUND,

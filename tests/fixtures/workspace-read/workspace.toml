@@ -1,0 +1,24 @@
+# Fixture workspace: one document in two corpora (M6b §3.3).
+#
+# `notes/shared.md` exists in both corpora with different bytes, so a read
+# proves which corpus answered. Both bodies are short, and a test states each
+# one literally.
+#
+# The archived entry declares `read_only = false` on purpose. The role decides
+# when a corpus is read; `read_only` is a write-side fact that M7 enforces.
+# Neither key grants a write in this release, so the refusal must hold whatever
+# they say (case 3.5).
+#
+# Roots are relative, and resolve against this file's directory (M6b-8), so a
+# test copies the whole tree to a temporary directory.
+
+[[corpora]]
+id = "main"
+root = "primary"
+role = "primary"
+
+[[corpora]]
+id = "context"
+root = "archive"
+role = "archived"
+read_only = false

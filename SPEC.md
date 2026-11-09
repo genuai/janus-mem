@@ -1150,8 +1150,8 @@ A process may cache one loaded generation, and only one: the payload of `index.b
 |---|---|---|
 | `search` | `query`, `limit?`, `intent?`, `as_of?`, `corpus?`, `scope?`, `scope_only?`, `types?`, `tags?`, `include_superseded?`, `decay_half_life_days?` | Ranked results with score breakdown, age, declared + effective status, validity window, corpus, path |
 | `get_lineage` | `path?` **or** `topic?` (exactly one) | Ordered chain with relation edges and terminal state |
-| `get_authoritative_facts` | `query?`, `tags?`, `types?`, `scope?`, `limit?` | Active decisions/specs/principles only |
-| `read_document` | `path`, `max_chars?`, `chunk_id?` | Frontmatter as JSON + body (or a specific chunk's span) |
+| `get_authoritative_facts` | `query?`, `tags?`, `types?`, `scope?`, `limit?`, `corpus?` | Active decisions/specs/principles only |
+| `read_document` | `path`, `max_chars?`, `chunk_id?`, `corpus?` | Frontmatter as JSON + body (or a specific chunk's span), and the corpus it came from |
 
 `authoritative_facts` uses its own **active-only inclusion rule** — canonical type in {`decision`, `spec`, `principle`}, effective status `active`, inside its validity window, no decay, status factor 1.0 — and not the `current` intent's gate, which admits `draft` (0.7×) and `unknown` (1.0×). A weight is not an inclusion rule. Declared status alone is not enough: a document declared `active` but replaced by a link must not return as an authoritative fact.
 
@@ -1162,6 +1162,7 @@ MCP reads inherit the index refresh and the refusal. They expose no `--no-rebuil
 - `content_hash` describes the bytes the call read, never the indexed row, so a skipped refresh cannot label old bytes with a new hash.
 - `max_chars` defaults to `[mcp] max_chars` (§16.1, 4000). A request overrides it, and `0` means no limit. The cut is on a character boundary, never a byte boundary, and `truncated` says whether it happened.
 - `chunk_id` is resolved against `(path, chunk_id)` in the current generation, because a chunk id carries no document id and survives a rebuild. The span is sliced only when the file's body hash equals the indexed `body_hash`. Otherwise the call answers `not_found`, because the span no longer describes the body.
+- `corpus` names the corpus to read: `primary` (the default) or a workspace id. A path may carry the same name as a `corpus:path` qualifier instead, which the link syntax already uses. A name that matches no corpus of the workspace is `usage`, and the message lists the ids: a silent fallback to the primary would answer a different question than the one asked. The answer carries `corpus`, the name the read came from, and that field is absent in single-corpus mode, where there is only one corpus to name.
 
 **`janus_status`.** Read-only, no parameters. It reports index freshness, the embedder, the vault root and the cache counters, and it stops agents from guessing:
 
@@ -1177,6 +1178,8 @@ MCP reads inherit the index refresh and the refusal. They expose no `--no-rebuil
 ```
 
 Before the first build, `index.present` is `false` and every other `index` field is `null`. `embeddings.available` answers "can this process embed a query now", so it comes from the resolved embedder. `embeddings.model` answers "what produced the stored vectors", so it comes from the manifest. The two may disagree: a binary with embeddings compiled out can read stored vectors and cannot embed a query. `writes_enabled` is `false` until M7 adds a writer. A status call never builds and never takes the writer lock, so an agent can ask "is this fresh?" while another process holds the index.
+
+In a workspace the answer gains `workspace` and `corpora`: the workspace file's path, and one row per corpus with its `id`, `role`, `root`, `read_only`, `index_dir`, `config_present`, `index_present` and `index_stale`. The rows are the ones `janus corpora` prints, read the same way: one manifest per corpus and one walk only for the digest. Nothing is built and no lock is taken. Both fields are absent in single-corpus mode, so that answer keeps its shape. The head fields describe the primary corpus, which is the corpus an unqualified read names. A workspace's `id` and a corpus's declared `corpus_id` are two names for the same corpus; the head reports `corpus_id` and the rows report `id`, so a reader sees both when they differ.
 
 `metadata` answers the date half of "can this corpus support authority and
 decay": how many documents have a date, how many do not, and the undated share.
