@@ -296,6 +296,7 @@ fn every_tool_schema_matches_its_parameter_struct() {
         path: String::new(),
         max_chars: None,
         chunk_id: None,
+        corpus: None,
     };
     let pairs: [(&str, BTreeSet<String>); 5] = [
         ("search", dto_fields(json!(search))),

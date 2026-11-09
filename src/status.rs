@@ -23,6 +23,7 @@ use crate::index::store::{self, Manifest};
 use crate::metadata::Metadata;
 use crate::vault::resolve;
 use crate::vault::{self, WalkOptions};
+use crate::workspace::{self, Workspace};
 
 /// The answer to one status call (§2.6).
 ///
@@ -36,6 +37,28 @@ pub struct Report {
     index: Index,
     metadata: MetadataBlock,
     cache: Cache,
+    /// The workspace file that named these corpora (M6b §3.3). Absent in
+    /// single-corpus mode, so that answer keeps its shape byte for byte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace: Option<String>,
+    /// Every corpus the workspace names, with its role and freshness. Absent in
+    /// single-corpus mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corpora: Option<Vec<workspace::Row>>,
+}
+
+impl Report {
+    /// Adds the workspace's corpora to this answer (case 3.3).
+    ///
+    /// The rows are the ones `janus corpora` prints, read the same way: one
+    /// manifest per corpus and one walk only for the digest. Nothing is built
+    /// and no lock is taken, so a status call still runs beside a writer.
+    #[must_use]
+    pub fn in_workspace(mut self, found: &Workspace) -> Self {
+        self.workspace = Some(found.path.display().to_string());
+        self.corpora = Some(workspace::rows(found));
+        self
+    }
 }
 
 /// What this process can embed, and what produced the stored vectors.
@@ -168,6 +191,8 @@ pub fn compute(
             hits: cache.hits,
             misses: cache.misses,
         },
+        workspace: None,
+        corpora: None,
     })
 }
 
@@ -207,6 +232,27 @@ pub fn render(value: &Value, out: &mut dyn Write) -> io::Result<()> {
     writeln!(out, "index       {}", index_line(index))?;
     let (hits, misses) = (&value["cache"]["hits"], &value["cache"]["misses"]);
     writeln!(out, "cache       {hits} hits, {misses} misses")?;
+    // Only a workspace answer has corpora to list (case 3.3).
+    if let Some(found) = value["workspace"].as_str() {
+        writeln!(out, "workspace   {found}")?;
+        for row in value["corpora"].as_array().into_iter().flatten() {
+            writeln!(
+                out,
+                "  {}  {}  read-only: {}  index: {}",
+                text(&row["id"]),
+                text(&row["role"]),
+                if row["read_only"].as_bool() == Some(true) {
+                    "yes"
+                } else {
+                    "no"
+                },
+                workspace::index_state(
+                    row["index_present"].as_bool() == Some(true),
+                    row["index_stale"].as_bool(),
+                ),
+            )?;
+        }
+    }
     Ok(())
 }
 

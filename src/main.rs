@@ -7,13 +7,14 @@
 use std::io::{IsTerminal as _, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::Parser;
 use janus_mem::api::{Call, Failure, Tool};
 use janus_mem::cli::{Cli, Command, Progress};
 use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
-use janus_mem::engine::Engine;
+use janus_mem::engine::{Engine, Fleet};
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
 use janus_mem::search::federate;
@@ -248,22 +249,32 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             )
         }
 
-        // A read answers through the engine, so the CLI tests the function the
+        // A read answers through the fleet, so the CLI tests the function the
         // rpc loop and the MCP server call (§3.3).
-        Command::Read { path, json } => {
-            let root = vault::resolve_corpus(cli.vault)?;
-            tracing::info!(vault = %root.display(), "corpus resolved");
-            let params = serde_json::json!({ "path": path.to_string_lossy() });
-            call_tool(root, Tool::ReadDocument, params, json, read::render)
+        Command::Read {
+            path,
+            corpus,
+            workspace: explicit,
+            json,
+        } => {
+            let fleet = resolve_fleet(explicit, cli.vault, false)?;
+            let mut params = serde_json::json!({ "path": path.to_string_lossy() });
+            if let Some(corpus) = corpus {
+                params["corpus"] = serde_json::Value::String(corpus);
+            }
+            call_tool(&fleet, Tool::ReadDocument, params, json, read::render)
         }
 
         // A status call answers from the manifest and one walk. It builds
         // nothing and takes no lock, so it works while a writer holds the index.
-        Command::Status { json } => {
-            let root = vault::resolve_corpus(cli.vault)?;
-            tracing::info!(vault = %root.display(), "corpus resolved");
+        // In a workspace it also lists every corpus the workspace names.
+        Command::Status {
+            workspace: explicit,
+            json,
+        } => {
+            let fleet = resolve_fleet(explicit, cli.vault, false)?;
             call_tool(
-                root,
+                &fleet,
                 Tool::Status,
                 serde_json::json!({}),
                 json,
@@ -291,15 +302,13 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // The rpc loop answers tool calls over stdin and stdout (§3.5). A
         // startup failure exits before the loop starts; every failure after
         // that is a response line, so a caller never loses its session.
-        Command::Rpc { allow_write } => {
-            let root = vault::resolve_corpus(cli.vault)?;
-            tracing::info!(vault = %root.display(), "corpus resolved");
-
-            let config = Config::load(&root)?;
-            let (embedder, degraded) = read_embedder(&config, false);
-            let engine = Engine::new(root, config, Box::new(SystemClock), embedder, degraded);
+        Command::Rpc {
+            allow_write,
+            workspace: explicit,
+        } => {
+            let fleet = resolve_fleet(explicit, cli.vault, false)?;
             rpc::run(
-                &engine,
+                &fleet,
                 allow_write,
                 &mut std::io::stdin().lock(),
                 &mut std::io::stdout().lock(),
@@ -307,16 +316,14 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             Ok(())
         }
 
-        // The MCP server is the same engine behind a second protocol. A startup
+        // The MCP server is the same corpora behind a second protocol. A startup
         // failure exits before the loop starts; every failure after that is an
         // answer, so a client never loses its session (§3.6).
-        Command::Mcp { allow_write } => {
-            let root = vault::resolve_corpus(cli.vault)?;
-            tracing::info!(vault = %root.display(), "corpus resolved");
-
-            let config = Config::load(&root)?;
-            let (embedder, degraded) = read_embedder(&config, false);
-            let engine = Engine::new(root, config, Box::new(SystemClock), embedder, degraded);
+        Command::Mcp {
+            allow_write,
+            workspace: explicit,
+        } => {
+            let fleet = resolve_fleet(explicit, cli.vault, false)?;
             // This release serves no write, so the flag cannot grant one. It is
             // accepted anyway, so a client config does not change at M7, and it
             // says once on stderr what it did (§3.8 case 8.3). Stdout stays
@@ -325,7 +332,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                 eprintln!("writes are not implemented yet; --allow-write has no effect");
             }
             mcp::run(
-                &engine,
+                &fleet,
                 allow_write,
                 &mut std::io::stdin().lock(),
                 &mut std::io::stdout().lock(),
@@ -443,19 +450,15 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                 progress,
                 json,
             };
+            let choice = federate::Choice::parse(corpus.as_deref());
             match query_workspace(explicit, cli.vault.is_some())? {
                 Some(found) => {
-                    let scoped = Scope::of(
-                        &found,
-                        &federate::Choice::parse(corpus.as_deref()),
-                        no_embeddings,
-                    )?;
-                    let targets = scoped.targets();
-                    let notes = scoped.notes.clone();
+                    let fleet = workspace_fleet(&found, no_embeddings)?;
+                    let (targets, notes) = fleet.scope(&choice)?;
                     federate::run_search(&targets, &SystemClock, options(None), notes)
                 }
                 None => {
-                    federate::Choice::parse(corpus.as_deref()).require_single()?;
+                    choice.require_single()?;
                     let root = vault::resolve_corpus(cli.vault)?;
                     tracing::info!(vault = %root.display(), "corpus resolved");
 
@@ -504,19 +507,15 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                 progress,
                 json,
             };
+            let choice = federate::Choice::parse(corpus.as_deref());
             match query_workspace(explicit, cli.vault.is_some())? {
                 Some(found) => {
-                    let scoped = Scope::of(
-                        &found,
-                        &federate::Choice::parse(corpus.as_deref()),
-                        no_embeddings,
-                    )?;
-                    let targets = scoped.targets();
-                    let notes = scoped.notes.clone();
+                    let fleet = workspace_fleet(&found, no_embeddings)?;
+                    let (targets, notes) = fleet.scope(&choice)?;
                     federate::run_facts(&targets, &SystemClock, &options(None), notes)
                 }
                 None => {
-                    federate::Choice::parse(corpus.as_deref()).require_single()?;
+                    choice.require_single()?;
                     let root = vault::resolve_corpus(cli.vault)?;
                     tracing::info!(vault = %root.display(), "corpus resolved");
 
@@ -539,20 +538,17 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
 /// Answers one tool call as the CLI does: the envelope as JSON, or the human
 /// form. A failure comes back as an error, so `main` maps it to an exit code.
 ///
-/// The engine is built here, at the edge, with the clock and the embedder this
+/// The fleet is built here, at the edge, with the clock and the embedders this
 /// process resolved, so a rebuild a call triggers publishes this process's
 /// generation (V-21 row 5).
 fn call_tool(
-    root: PathBuf,
+    fleet: &Fleet,
     tool: Tool,
     params: serde_json::Value,
     json: bool,
     render: fn(&serde_json::Value, &mut dyn Write) -> std::io::Result<()>,
 ) -> Result<(), JanusError> {
-    let config = Config::load(&root)?;
-    let (embedder, degraded) = read_embedder(&config, false);
-    let engine = Engine::new(root, config, Box::new(SystemClock), embedder, degraded);
-    let answer = engine.answer(&Call::new(tool, params))?;
+    let answer = fleet.answer(&Call::new(tool, params))?;
     if json {
         emit_json(&answer);
         return Ok(());
@@ -560,6 +556,52 @@ fn call_tool(
     // A closed pipe is not a failure (`janus read | head`).
     let _ = render(&answer, &mut std::io::stdout().lock());
     Ok(())
+}
+
+/// The corpora one command answers from (§6.11).
+///
+/// One resolution path for every surface: a workspace when one names the
+/// command, otherwise the one corpus the command already read.
+fn resolve_fleet(
+    explicit: Option<PathBuf>,
+    root: Option<PathBuf>,
+    no_embeddings: bool,
+) -> Result<Fleet, JanusError> {
+    match query_workspace(explicit, root.is_some())? {
+        Some(found) => workspace_fleet(&found, no_embeddings),
+        None => single_fleet(root, no_embeddings),
+    }
+}
+
+/// Every corpus one workspace names, with the workspace's warnings printed.
+///
+/// The embedder stays unresolved until a corpus is read, so a query that names
+/// the primary does not load a model for an archived corpus.
+fn workspace_fleet(found: &workspace::Workspace, no_embeddings: bool) -> Result<Fleet, JanusError> {
+    for warning in &found.warnings {
+        eprintln!("warning: {warning}");
+    }
+    Fleet::of(
+        found,
+        Arc::new(SystemClock),
+        Arc::new(move |config: &Config| read_embedder(config, no_embeddings)),
+    )
+}
+
+/// One corpus, as every command read it before M6b.
+fn single_fleet(root: Option<PathBuf>, no_embeddings: bool) -> Result<Fleet, JanusError> {
+    let root = vault::resolve_corpus(root)?;
+    tracing::info!(vault = %root.display(), "corpus resolved");
+
+    let config = Config::load(&root)?;
+    let (embedder, degraded) = read_embedder(&config, no_embeddings);
+    Ok(Fleet::single(Engine::new(
+        root,
+        config,
+        Box::new(SystemClock),
+        embedder,
+        degraded,
+    )))
 }
 
 /// The workspace a query reads, when one names it (§6.11).
@@ -588,72 +630,6 @@ fn query_workspace(
         // A query that names no workspace reads one corpus, as it always has.
         Err(JanusError::Usage { .. }) => Ok(None),
         Err(error) => Err(error),
-    }
-}
-
-/// One corpus a federated query reads, as the edge resolved it.
-struct ScopedCorpus {
-    corpus: workspace::Corpus,
-    config: Config,
-    embedder: Option<Box<dyn Embedder>>,
-    reason: Option<String>,
-    factor: f64,
-}
-
-/// The corpora one query reads, with one config and one embedder each (§6.11).
-struct Scope {
-    corpora: Vec<ScopedCorpus>,
-    /// The plan's one note about the corpora this selection did not read.
-    notes: Vec<String>,
-}
-
-impl Scope {
-    /// Resolves a selection into the corpora a query reads.
-    ///
-    /// The workspace owns each corpus's index location (M6b-11), and each
-    /// corpus resolves its own embedder, because that is a corpus setting.
-    fn of(
-        found: &workspace::Workspace,
-        choice: &federate::Choice,
-        no_embeddings: bool,
-    ) -> Result<Self, JanusError> {
-        for warning in &found.warnings {
-            eprintln!("warning: {warning}");
-        }
-        let plan = federate::plan(found, choice)?;
-        let note = plan.excluded_note();
-        let mut corpora = Vec::with_capacity(plan.corpora.len());
-        for (corpus, factor) in plan.corpora {
-            let mut config = Config::load(&corpus.root)?;
-            config.index_dir = corpus.index_dir.clone();
-            let (embedder, reason) = read_embedder(&config, no_embeddings);
-            corpora.push(ScopedCorpus {
-                corpus: corpus.clone(),
-                config,
-                embedder,
-                reason,
-                factor,
-            });
-        }
-        Ok(Self {
-            corpora,
-            notes: note.into_iter().collect(),
-        })
-    }
-
-    /// The corpora as the query reads them.
-    fn targets(&self) -> Vec<federate::Target<'_>> {
-        self.corpora
-            .iter()
-            .map(|scoped| federate::Target {
-                id: &scoped.corpus.id,
-                root: &scoped.corpus.root,
-                config: &scoped.config,
-                embedder: scoped.embedder.as_deref(),
-                embedding_reason: scoped.reason.as_deref(),
-                factor: scoped.factor,
-            })
-            .collect()
     }
 }
 

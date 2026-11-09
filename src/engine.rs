@@ -25,7 +25,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -41,10 +41,13 @@ use crate::index::embed::Embedder;
 use crate::index::refresh::Signature;
 use crate::index::store::{self, Manifest};
 use crate::lineage;
+use crate::link;
 use crate::read;
 use crate::search;
+use crate::search::federate::{self, Choice, Target};
 use crate::status;
 use crate::vault::{self, WalkOptions};
+use crate::workspace::Workspace;
 
 /// What one call returned: the envelope, and the code when it failed (M6 §2.3).
 #[derive(Debug, Clone)]
@@ -55,6 +58,27 @@ pub struct Response {
     pub json: Value,
     /// The stable failure code; `None` on a success (§2.2).
     pub code: Option<&'static str>,
+}
+
+impl Response {
+    /// One computed answer, or the failure object that answered instead.
+    ///
+    /// The failure serializes without borrowing anything, so a failed encode can
+    /// only mean the value is not encodable at all.
+    fn of(result: Result<Value, JanusError>) -> Self {
+        match result {
+            Ok(json) => Self {
+                ok: true,
+                json,
+                code: None,
+            },
+            Err(error) => Self {
+                ok: false,
+                json: serde_json::to_value(Failure::from_error(&error)).unwrap_or(Value::Null),
+                code: Some(ApiCode::of(&error).code),
+            },
+        }
+    }
 }
 
 /// The cache counters of this process (M6-19).
@@ -79,7 +103,9 @@ struct Cached {
 pub struct Engine {
     root: PathBuf,
     config: Config,
-    clock: Box<dyn Clock>,
+    /// Shared with every engine a [`Fleet`] builds, so two corpora of one query
+    /// cannot disagree about today (§7.2).
+    clock: Arc<dyn Clock>,
     embedder: Option<Box<dyn Embedder>>,
     /// Why the embedder is absent, when the caller resolved none (§2.6).
     degraded: Option<String>,
@@ -102,7 +128,7 @@ impl Engine {
         Self {
             root,
             config,
-            clock,
+            clock: Arc::from(clock),
             embedder,
             degraded,
             cache: RwLock::new(None),
@@ -115,20 +141,7 @@ impl Engine {
     /// recoverable failure: the failure is the answer (§2.3, §9.5).
     #[must_use]
     pub fn call(&self, call: &Call) -> Response {
-        match self.answer(call) {
-            Ok(json) => Response {
-                ok: true,
-                json,
-                code: None,
-            },
-            Err(error) => Response {
-                ok: false,
-                // The failure object serializes without borrowing anything, so a
-                // failed encode can only mean the value is not encodable at all.
-                json: serde_json::to_value(Failure::from_error(&error)).unwrap_or(Value::Null),
-                code: Some(ApiCode::of(&error).code),
-            },
-        }
+        Response::of(self.answer(call))
     }
 
     /// The cache counters of this process, for `janus_status` (M6-19).
@@ -154,7 +167,12 @@ impl Engine {
         let started = Instant::now();
         match call.tool {
             Tool::Search => {
-                let options = search_options(&params(call)?)?;
+                let params: SearchParams = params(call)?;
+                // One engine serves one corpus and holds one load cache, so a
+                // selection that needs a workspace is refused here rather than
+                // answered from the wrong corpus (M6b §2.3, M6b-12).
+                selection(params.corpus.as_deref())?;
+                let options = search_options(&params)?;
                 // A query the schema accepts but the engine rejects is a usage
                 // failure, and it is decided before any read.
                 search::check(&options)?;
@@ -171,7 +189,9 @@ impl Engine {
                 encode(&report)
             }
             Tool::AuthoritativeFacts => {
-                let options = facts_options(&params(call)?)?;
+                let params: FactsParams = params(call)?;
+                selection(params.corpus.as_deref())?;
+                let options = facts_options(&params)?;
                 let loaded = self.load()?;
                 let listing = search::facts::compute(
                     &self.root,
@@ -216,16 +236,20 @@ impl Engine {
                 // builds nothing and takes no lock (M6-6). The `params` type is
                 // empty, so an unknown parameter is a usage failure.
                 let _: StatusParams = params(call)?;
-                let report = status::compute(
-                    &self.root,
-                    &self.config,
-                    self.embedder.is_some(),
-                    self.degraded.clone(),
-                    self.cache(),
-                )?;
-                encode(&report)
+                encode(self.status_report()?)
             }
         }
+    }
+
+    /// One status answer, unrendered: the same value the `status` arm encodes.
+    fn status_report(&self) -> Result<status::Report, JanusError> {
+        status::compute(
+            &self.root,
+            &self.config,
+            self.embedder.is_some(),
+            self.degraded.clone(),
+            self.cache(),
+        )
     }
 
     /// The cached load, when one is reusable for this call.
@@ -274,9 +298,308 @@ impl Engine {
     }
 }
 
+/// The corpora one surface answers from (M6b §3.3, §3.5).
+///
+/// No workspace resolved means one corpus, and every answer is the one this
+/// crate gave before federation existed. A workspace means every corpus it
+/// names, so a `corpus` parameter can name any of them on the command line, over
+/// rpc and over MCP alike (§9.5).
+///
+/// One [`Engine`] per corpus, built on first use: a query that reads the primary
+/// only must not resolve an embedding model for an archived corpus it left out.
+pub struct Fleet {
+    /// The corpora in workspace order; exactly one in single-corpus mode.
+    members: Vec<Member>,
+    /// The workspace these corpora came from, when one named them.
+    workspace: Option<Workspace>,
+    /// The clock every engine of this fleet shares, so two corpora of one query
+    /// cannot disagree about today (§7.2).
+    clock: Arc<dyn Clock>,
+}
+
+/// How one corpus resolves its embedder, as the edge decided it.
+type Resolver = Arc<dyn Fn(&Config) -> (Option<Box<dyn Embedder>>, Option<String>) + Send + Sync>;
+
+/// One corpus a fleet can answer from.
+struct Member {
+    /// The workspace's name for this corpus; `None` in single-corpus mode.
+    id: Option<String>,
+    root: PathBuf,
+    config: Config,
+    /// The clock and the embedder resolver every engine here shares.
+    clock: Arc<dyn Clock>,
+    resolve: Resolver,
+    engine: OnceLock<Engine>,
+}
+
+impl Member {
+    /// The engine over this corpus, built on first use.
+    ///
+    /// The embedder is resolved here rather than at construction, so a query
+    /// that reads one corpus pays for one corpus.
+    fn engine(&self) -> &Engine {
+        self.engine.get_or_init(|| {
+            let (embedder, degraded) = (self.resolve)(&self.config);
+            Engine {
+                root: self.root.clone(),
+                config: self.config.clone(),
+                clock: Arc::clone(&self.clock),
+                embedder,
+                degraded,
+                cache: RwLock::new(None),
+                hits: AtomicU64::new(0),
+                misses: AtomicU64::new(0),
+            }
+        })
+    }
+}
+
+impl Fleet {
+    /// One corpus, with the engine its caller already built.
+    #[must_use]
+    pub fn single(engine: Engine) -> Self {
+        Self {
+            clock: Arc::clone(&engine.clock),
+            members: vec![Member {
+                id: None,
+                root: engine.root.clone(),
+                config: engine.config.clone(),
+                clock: Arc::clone(&engine.clock),
+                resolve: Arc::new(|_| (None, None)),
+                engine: OnceLock::from(engine),
+            }],
+            workspace: None,
+        }
+    }
+
+    /// Every corpus one workspace names (M6b-1).
+    ///
+    /// The workspace owns each corpus's index location (M6b-11), and the plan
+    /// owns the weight of an archived corpus, so both are read from one place.
+    ///
+    /// # Errors
+    ///
+    /// A corpus `janus.toml` that cannot be loaded.
+    pub fn of(
+        found: &Workspace,
+        clock: Arc<dyn Clock>,
+        resolve: Resolver,
+    ) -> Result<Self, JanusError> {
+        let plan = federate::plan(found, &Choice::All)?;
+        let mut members = Vec::with_capacity(plan.corpora.len());
+        for (corpus, _factor) in &plan.corpora {
+            let mut config = Config::load(&corpus.root)?;
+            // A workspace's `index_dir` is the index location of a corpus it
+            // names; the corpus config's own value applies in single-corpus
+            // mode, where no workspace exists (M6b-11).
+            config.index_dir = corpus.index_dir.clone();
+            members.push(Member {
+                id: Some(corpus.id.clone()),
+                root: corpus.root.clone(),
+                config,
+                clock: Arc::clone(&clock),
+                resolve: Arc::clone(&resolve),
+                engine: OnceLock::new(),
+            });
+        }
+        Ok(Self {
+            members,
+            workspace: Some(found.clone()),
+            clock,
+        })
+    }
+
+    /// The corpora one selection reads, and the note about the ones it left out.
+    ///
+    /// # Errors
+    ///
+    /// [`JanusError::Usage`] when the selection names no corpus of this
+    /// workspace; the message lists the ids (§2.3).
+    pub fn scope(&self, choice: &Choice) -> Result<(Vec<Target<'_>>, Vec<String>), JanusError> {
+        let found = self.found()?;
+        let plan = federate::plan(found, choice)?;
+        let notes: Vec<String> = plan.excluded_note().into_iter().collect();
+        let mut targets = Vec::with_capacity(plan.corpora.len());
+        for (corpus, factor) in &plan.corpora {
+            let engine = self.engine_of(&corpus.id)?;
+            targets.push(Target {
+                id: corpus.id.as_str(),
+                root: &engine.root,
+                config: &engine.config,
+                embedder: engine.embedder.as_deref(),
+                embedding_reason: engine.degraded.as_deref(),
+                factor: *factor,
+            });
+        }
+        Ok((targets, notes))
+    }
+
+    /// Answers one tool call. Never prints and never exits: the failure is the
+    /// answer (§2.3, §9.5).
+    #[must_use]
+    pub fn call(&self, call: &Call) -> Response {
+        Response::of(self.answer(call))
+    }
+
+    /// Answers one tool call, and returns the failure as an error.
+    ///
+    /// Every surface asks here, so the `corpus` parameter means one thing and
+    /// the answers are one answer (§9.5).
+    pub fn answer(&self, call: &Call) -> Result<Value, JanusError> {
+        let mut fields = call.params.clone();
+        let choice = self.selection(call.tool, &mut fields)?;
+        let Some(found) = &self.workspace else {
+            // One corpus answers exactly as it always has: no `corpora`, no
+            // per-row `corpus`, no weight (M6b §3.5).
+            if call.tool == Tool::ReadDocument {
+                self.single_selection(&choice)?;
+            }
+            return self.members[0]
+                .engine()
+                .answer(&Call::new(call.tool, fields));
+        };
+        match call.tool {
+            Tool::Search => {
+                let options = search_options(&params::<SearchParams>(call)?)?;
+                let (targets, notes) = self.scope(&choice)?;
+                encode(federate::report_search(
+                    &targets,
+                    self.clock.as_ref(),
+                    options,
+                    notes,
+                )?)
+            }
+            Tool::AuthoritativeFacts => {
+                let options = facts_options(&params::<FactsParams>(call)?)?;
+                let (targets, notes) = self.scope(&choice)?;
+                encode(federate::report_facts(
+                    &targets,
+                    self.clock.as_ref(),
+                    &options,
+                    notes,
+                )?)
+            }
+            Tool::ReadDocument => {
+                let member = self.one(found, &choice)?;
+                let mut answer = member.engine().answer(&Call::new(call.tool, fields))?;
+                // The one place a read names its corpus (case 3.1). Absent in
+                // single-corpus mode, where there is only one to name.
+                if let Some(fields) = answer.as_object_mut() {
+                    fields.insert("corpus".to_owned(), Value::String(member.name().to_owned()));
+                }
+                Ok(answer)
+            }
+            Tool::Status => {
+                let member = self.one(found, &choice)?;
+                encode(member.engine().status_report()?.in_workspace(found))
+            }
+            // A supersession chain is one corpus's graph. A qualified path or a
+            // `corpus` parameter would need a cross-corpus chain, which no read
+            // answers yet, so it is refused instead of guessed (§0.2).
+            Tool::Lineage => {
+                self.single_selection(&choice)?;
+                self.members[0].engine().answer(call)
+            }
+        }
+    }
+
+    /// The selection one call asks for, and its parameters with any
+    /// `corpus:path` qualifier removed (§2.3, M6b-6).
+    ///
+    /// A qualifier names a corpus the same way `corpus` does, so one call cannot
+    /// ask for two.
+    fn selection(&self, tool: Tool, params: &mut Value) -> Result<Choice, JanusError> {
+        let named = params
+            .get("corpus")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if tool != Tool::ReadDocument {
+            return Ok(Choice::parse(named.as_deref()));
+        }
+        let path = params
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let Some((head, rest)) = link::split_qualifier(&path) else {
+            return Ok(Choice::parse(named.as_deref()));
+        };
+        if let Some(named) = named
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            && named != head
+        {
+            return Err(usage(format!(
+                "the path names corpus {head:?} and `corpus` names {named:?}; pass one"
+            )));
+        }
+        params["path"] = Value::String(rest.to_owned());
+        Ok(Choice::Id(head.to_owned()))
+    }
+
+    /// Refuses a selection that a single corpus cannot serve.
+    ///
+    /// A read that serves one corpus answers for it and for nothing else. The
+    /// message names the id this read serves, so a misspelt name cannot look
+    /// like a name that was silently ignored (M6b-12, case 3.2).
+    fn single_selection(&self, choice: &Choice) -> Result<(), JanusError> {
+        let declared = &self.members[0].config.corpus_id;
+        match choice {
+            Choice::Primary => Ok(()),
+            Choice::Id(id) if id == declared => Ok(()),
+            Choice::All => Err(usage(
+                "corpus \"all\" needs a workspace; this read serves one corpus",
+            )),
+            Choice::Id(id) => Err(usage(format!(
+                "unknown corpus {id:?}; this read serves {declared:?} and no workspace names another"
+            ))),
+        }
+    }
+
+    /// The workspace, for the arms that need it.
+    fn found(&self) -> Result<&Workspace, JanusError> {
+        self.workspace.as_ref().ok_or_else(|| {
+            usage("no workspace is in play; a corpus selection needs one (--workspace)")
+        })
+    }
+
+    /// The one member a selection reads, for a tool that answers for one corpus.
+    ///
+    /// The plan owns the selection, so an unknown id is the same usage failure
+    /// with the same list of ids as a query's (case 3.2).
+    fn one<'a>(&'a self, found: &Workspace, choice: &Choice) -> Result<&'a Member, JanusError> {
+        let plan = federate::plan(found, choice)?;
+        let [only] = plan.corpora.as_slice() else {
+            return Err(usage(
+                "this tool answers for one corpus; pass \"primary\" or a corpus id",
+            ));
+        };
+        self.members
+            .iter()
+            .find(|member| member.id.as_deref() == Some(only.0.id.as_str()))
+            .ok_or_else(|| usage(format!("corpus {:?} is not loaded", only.0.id)))
+    }
+
+    /// The engine over one corpus, by the workspace's name for it.
+    fn engine_of(&self, id: &str) -> Result<&Engine, JanusError> {
+        self.members
+            .iter()
+            .find(|member| member.id.as_deref() == Some(id))
+            .map(Member::engine)
+            .ok_or_else(|| usage(format!("corpus {id:?} is not loaded")))
+    }
+}
+
+impl Member {
+    /// The name a row or an answer carries for this corpus.
+    fn name(&self) -> &str {
+        self.id.as_deref().unwrap_or(&self.config.corpus_id)
+    }
+}
+
 /// True when the cached load still describes both the generation on disk and
 /// the corpus this call walked (§2.4, M6-5, M6-17).
-///
 /// Every compared field is one fact the payload was validated against. A field
 /// outside this list is either a diagnostic (`built_at`, `built_root`) or a
 /// number derived from `index_sha` and `vectors_sha`.
@@ -322,12 +645,25 @@ fn params<T: DeserializeOwned>(call: &Call) -> Result<T, JanusError> {
     })
 }
 
+/// The selection one call asks for, refused when this engine cannot serve it.
+///
+/// One engine holds one corpus and one load cache, so `all` and a named id are
+/// refused here rather than answered from the wrong corpus (M6b §2.3, M6b-12).
+fn selection(corpus: Option<&str>) -> Result<Choice, JanusError> {
+    let choice = Choice::parse(corpus);
+    choice.require_single()?;
+    Ok(choice)
+}
+
+/// A usage error: understood, but rejected before any read (§9.1 code 2).
+fn usage(message: impl Into<String>) -> JanusError {
+    JanusError::Usage {
+        message: message.into(),
+    }
+}
+
 /// One `search` call as the query engine's options.
 fn search_options(params: &SearchParams) -> Result<search::Options, JanusError> {
-    // One engine serves one corpus and holds one load cache, so a selection
-    // that needs a workspace is refused here rather than answered from the
-    // wrong corpus (M6b §2.3, M6b-12).
-    search::federate::Choice::parse(params.corpus.as_deref()).require_single()?;
     Ok(search::Options {
         query: params.query.clone(),
         intent: params.intent.clone(),
@@ -354,7 +690,6 @@ fn search_options(params: &SearchParams) -> Result<search::Options, JanusError> 
 
 /// One `get_authoritative_facts` call as the command's options.
 fn facts_options(params: &FactsParams) -> Result<search::facts::Options, JanusError> {
-    search::federate::Choice::parse(params.corpus.as_deref()).require_single()?;
     Ok(search::facts::Options {
         query: params.query.clone(),
         tags: params.tags.clone().unwrap_or_default(),
@@ -455,40 +790,14 @@ mod tests {
         // One engine holds one corpus and one cache, so `all` and a named id are
         // refused instead of answered from the wrong corpus (M6b §2.3). The
         // default and `primary` are the same selection this surface serves.
-        let mut params = SearchParams {
-            query: "cache".to_owned(),
-            limit: None,
-            intent: None,
-            as_of: None,
-            scope: None,
-            scope_only: None,
-            types: None,
-            tags: None,
-            include_superseded: None,
-            decay_half_life_days: None,
-            corpus: None,
-        };
-        assert!(search_options(&params).is_ok());
-        params.corpus = Some("primary".to_owned());
-        assert!(search_options(&params).is_ok());
+        for served in [None, Some("primary")] {
+            assert_eq!(selection(served).expect("served"), Choice::Primary);
+        }
         for refused in ["all", "context"] {
-            params.corpus = Some(refused.to_owned());
-            let error = search_options(&params).expect_err("needs a workspace");
+            let error = selection(Some(refused)).expect_err("needs a workspace");
             assert!(error.to_string().contains(refused), "{refused}: {error}");
             assert!(matches!(error, JanusError::Usage { .. }), "{refused}");
         }
-        let facts = FactsParams {
-            query: None,
-            tags: None,
-            types: None,
-            scope: None,
-            limit: None,
-            corpus: Some("all".to_owned()),
-        };
-        assert!(matches!(
-            facts_options(&facts),
-            Err(JanusError::Usage { .. })
-        ));
     }
 
     #[test]

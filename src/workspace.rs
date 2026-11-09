@@ -425,7 +425,7 @@ pub fn run(workspace: &Workspace, options: Options) -> Result<(), JanusError> {
     for warning in &workspace.warnings {
         eprintln!("warning: {warning}");
     }
-    let rows: Vec<Row> = workspace.corpora.iter().map(Row::of).collect();
+    let rows = rows(workspace);
     let mut out = io::stdout().lock();
     if options.json {
         let report = Report {
@@ -447,7 +447,7 @@ pub fn run(workspace: &Workspace, options: Options) -> Result<(), JanusError> {
             "{}  {}  read-only: {read_only}  index: {}  {}",
             row.corpus.id,
             row.corpus.role.as_str(),
-            index_state(row),
+            index_state(row.index_present, row.index_stale),
             row.corpus.root.display()
         );
     }
@@ -455,25 +455,44 @@ pub fn run(workspace: &Workspace, options: Options) -> Result<(), JanusError> {
 }
 
 #[derive(Debug, Serialize)]
-struct Report<'a> {
+struct Report {
     api: u32,
     workspace: String,
-    corpora: Vec<Row<'a>>,
+    corpora: Vec<Row>,
 }
 
 /// One corpus's declared facts and the state of its index.
+///
+/// `janus corpora` prints these rows, and `janus status` in a workspace prints
+/// them as its `corpora` block, so the two surfaces report one shape (§3.3 of
+/// the M6b plan).
 #[derive(Debug, Serialize)]
-struct Row<'a> {
+pub struct Row {
+    /// The corpus's declared facts: id, root, role, read-only and index dir.
     #[serde(flatten)]
-    corpus: &'a Corpus,
-    config_present: bool,
-    index_present: bool,
-    index_stale: Option<bool>,
+    pub corpus: Corpus,
+    /// Whether the corpus holds a `janus.toml`.
+    pub config_present: bool,
+    /// Whether the index directory holds a manifest.
+    pub index_present: bool,
+    /// Whether the corpus changed since that manifest was built; `None` when no
+    /// manifest exists or the corpus config cannot be read.
+    pub index_stale: Option<bool>,
 }
 
-impl<'a> Row<'a> {
+/// One row per corpus, in workspace order.
+///
+/// Reads at most one manifest and one walk per corpus. It builds nothing and
+/// takes no lock, which is what lets a status call run while a writer holds the
+/// index (M6-6, case 1.5).
+#[must_use]
+pub fn rows(workspace: &Workspace) -> Vec<Row> {
+    workspace.corpora.iter().map(Row::of).collect()
+}
+
+impl Row {
     /// Reads at most one manifest and one walk.
-    fn of(corpus: &'a Corpus) -> Self {
+    fn of(corpus: &Corpus) -> Self {
         let manifest = fs::read(corpus.index_dir.join(store::MANIFEST_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok());
@@ -481,7 +500,7 @@ impl<'a> Row<'a> {
             .as_ref()
             .and_then(|manifest| staleness(&corpus.root, manifest));
         Self {
-            corpus,
+            corpus: corpus.clone(),
             config_present: corpus.root.join(config::CONFIG_FILE).is_file(),
             index_present: manifest.is_some(),
             index_stale,
@@ -489,9 +508,9 @@ impl<'a> Row<'a> {
     }
 }
 
-/// How one index reads in the table.
-fn index_state(row: &Row) -> &'static str {
-    match (row.index_present, row.index_stale) {
+/// How one index reads in the table, and in a workspace `status` answer.
+pub(crate) fn index_state(present: bool, stale: Option<bool>) -> &'static str {
+    match (present, stale) {
         (false, _) => "absent; run janus index",
         (true, Some(true)) => "stale",
         (true, Some(false)) => "fresh",

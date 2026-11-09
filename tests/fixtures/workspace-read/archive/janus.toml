@@ -1,0 +1,12 @@
+# Fixture corpus: the archived half of the read fixture (M6b §3.3).
+#
+# The workspace declares `read_only = false` for this corpus, and this release
+# still serves no write: the refusal is not a property of the corpus.
+
+index_dir = ".janus"
+corpus_id = "context"
+
+# Lexical only: the three surfaces then rank from the text alone, and a case
+# compares their rows without depending on whether a model is installed.
+[embedding]
+enabled = false

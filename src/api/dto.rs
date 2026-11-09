@@ -153,4 +153,7 @@ pub struct ReadParams {
     pub max_chars: Option<usize>,
     /// Return one chunk's span text instead of the whole body.
     pub chunk_id: Option<String>,
+    /// The corpora to read: `primary` (default), or a workspace corpus id. A
+    /// path may carry the same name as a `corpus:path` qualifier instead.
+    pub corpus: Option<String>,
 }

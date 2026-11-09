@@ -209,6 +209,24 @@ pub fn run_search(
     options: Options,
     notes: Vec<String>,
 ) -> Result<(), JanusError> {
+    let json = options.json;
+    render(&report_search(targets, clock, options, notes)?, json)
+}
+
+/// One federated `search` answer, unrendered.
+///
+/// The command line renders it and an adapter encodes it, so both read one
+/// value and cannot disagree (§9.5).
+///
+/// # Errors
+///
+/// Exactly [`super::run`]'s.
+pub(crate) fn report_search(
+    targets: &[Target<'_>],
+    clock: &dyn Clock,
+    options: Options,
+    notes: Vec<String>,
+) -> Result<Report, JanusError> {
     let started = Instant::now();
     check(&options)?;
     let mut parts = Vec::with_capacity(targets.len());
@@ -257,8 +275,7 @@ pub fn run_search(
             report,
         });
     }
-    let report = merge(parts, Key::Final, options.limit, started, notes);
-    render(&report, options.json)
+    Ok(merge(parts, Key::Final, options.limit, started, notes))
 }
 
 /// Runs one federated `facts` and renders it.
@@ -272,6 +289,21 @@ pub fn run_facts(
     options: &facts::Options,
     notes: Vec<String>,
 ) -> Result<(), JanusError> {
+    let json = options.json;
+    render(&report_facts(targets, clock, options, notes)?, json)
+}
+
+/// One federated `facts` answer, unrendered, for an adapter that encodes it.
+///
+/// # Errors
+///
+/// Exactly [`super::facts::run`]'s.
+pub(crate) fn report_facts(
+    targets: &[Target<'_>],
+    clock: &dyn Clock,
+    options: &facts::Options,
+    notes: Vec<String>,
+) -> Result<Report, JanusError> {
     let started = Instant::now();
     // The usage check runs before any load, so a rejected query builds nothing.
     super::require_scope(options.scope_only, &options.scopes)?;
@@ -308,14 +340,13 @@ pub fn run_facts(
             report: listing.report,
         });
     }
-    let report = merge(
+    Ok(merge(
         parts,
         key_of(facts_order(orders)),
         options.limit,
         started,
         notes,
-    );
-    render(&report, options.json)
+    ))
 }
 
 /// The order a merged fact list uses: an authority list whenever any corpus

@@ -1,0 +1,12 @@
+# Fixture corpus: the primary half of the read fixture (M6b §3.3).
+#
+# The body of `notes/shared.md` here is the one a read without a `corpus`
+# answers, so a test can tell the two corpora apart by their bytes alone.
+
+index_dir = ".janus"
+corpus_id = "main"
+
+# Lexical only: the three surfaces then rank from the text alone, and a case
+# compares their rows without depending on whether a model is installed.
+[embedding]
+enabled = false

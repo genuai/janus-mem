@@ -140,6 +140,15 @@ pub enum Command {
         #[arg(value_name = "PATH")]
         path: PathBuf,
 
+        /// Read one corpus of a workspace: primary (default), or a corpus id
+        #[arg(long, value_name = "CORPUS")]
+        corpus: Option<String>,
+
+        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
+        /// config directory
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
         /// Emit one JSON object on stdout instead of the text
         #[arg(long)]
         json: bool,
@@ -147,6 +156,11 @@ pub enum Command {
 
     /// Report index freshness, the embedder and the cache (§2.6)
     Status {
+        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
+        /// config directory
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
         /// Emit one JSON object on stdout instead of the summary
         #[arg(long)]
         json: bool,
@@ -169,6 +183,11 @@ pub enum Command {
         /// Accepted now, and it changes no answer until writes exist (M6-7)
         #[arg(long)]
         allow_write: bool,
+
+        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
+        /// config directory
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
     },
 
     /// Serve the read tools over MCP, JSON-RPC 2.0 on stdin and stdout (§9.2)
@@ -176,6 +195,11 @@ pub enum Command {
         /// Accepted now, and it changes no answer until writes exist (M6-7)
         #[arg(long)]
         allow_write: bool,
+
+        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
+        /// config directory
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
     },
 
     /// Report the chunks the corpus produces, without building an index
