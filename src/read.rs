@@ -103,6 +103,17 @@ fn open(root: &Path, config: &Config, given: &Path) -> Result<Document, JanusErr
     // One rule for every `PATH` argument, so read refuses an escape exactly as
     // `chunks` does, and accepts the same spellings.
     let rels = resolve_argument(&root, given)?;
+    // A path the workspace pruned belongs to the corpus that owns the tree, so
+    // the answer names that corpus instead of reporting a missing document the
+    // caller can see on disk (case 5.3, M6b-26).
+    if let Some(owner) = rels.iter().find_map(|rel| config.prune_owner(rel)) {
+        return Err(JanusError::Usage {
+            message: format!(
+                "{} is in corpus {owner:?}, not this one; read it with --corpus {owner}",
+                rels.join(" or ")
+            ),
+        });
+    }
     let absent = || JanusError::DocumentNotInCorpus {
         path: given.to_path_buf(),
     };

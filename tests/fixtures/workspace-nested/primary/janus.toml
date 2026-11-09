@@ -1,0 +1,10 @@
+# Fixture corpus: the primary half of the nested fixture (M6b §12).
+#
+# No `[index] exclude`: `archive/` is pruned because the workspace declares it as
+# a corpus root, not because this file names it.
+
+index_dir = ".janus"
+corpus_id = "main"
+
+[embedding]
+enabled = false

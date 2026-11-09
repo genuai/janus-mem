@@ -388,7 +388,9 @@ impl Fleet {
         let plan = federate::plan(found, &Choice::All)?;
         let mut members = Vec::with_capacity(plan.corpora.len());
         for (corpus, _factor) in &plan.corpora {
-            let mut config = Config::load(&corpus.root)?;
+            // The workspace's own prunes come with the config, so every engine
+            // walks what its corpus owns and nothing else (M6b-26).
+            let mut config = found.config_of(corpus)?;
             // A workspace's `index_dir` is the index location of a corpus it
             // names; the corpus config's own value applies in single-corpus
             // mode, where no workspace exists (M6b-11).

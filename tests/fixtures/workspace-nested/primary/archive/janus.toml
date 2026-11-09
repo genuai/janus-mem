@@ -1,0 +1,7 @@
+# Fixture corpus: the archived tree inside the primary's root (M6b §12).
+
+index_dir = ".janus"
+corpus_id = "context"
+
+[embedding]
+enabled = false

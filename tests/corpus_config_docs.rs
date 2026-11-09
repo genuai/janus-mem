@@ -117,21 +117,28 @@ fn the_guide_blocks_parse_and_the_example_configures_the_four_rules() {
     assert_eq!(config.decay.half_life_days, 180.0);
 
     // Rule 1's workspace file: a retired tree is a role, and the real parser
-    // reads it. Its roots are relative, so they must exist beside the file.
+    // reads it. Its roots are relative, so they must exist beside the file; the
+    // archived root lies inside the primary's, which the workspace prunes.
     let block = toml_blocks(&text)
         .into_iter()
         .find(|block| block.contains("[[corpora]]"))
         .expect("rule 1 shows the workspace file that retires a tree");
     let dir = tempfile::tempdir().expect("tempdir for the block's roots");
-    for corpus in ["vault", "6.archive"] {
-        fs::create_dir_all(dir.path().join(corpus)).expect("create a corpus root");
-    }
+    fs::create_dir_all(dir.path().join("vault/6.archive")).expect("create the archived root");
     let workspace = Workspace::from_toml(block, &dir.path().join("workspace.toml"))
         .expect("the workspace block must parse");
-    assert!(
-        workspace.warnings.is_empty(),
-        "the block warns: {:?}",
+    assert_eq!(
+        workspace.warnings.len(),
+        1,
+        "the only line a nested corpus earns is its prune: {:?}",
         workspace.warnings
+    );
+    let [prune] = workspace.pruned.as_slice() else {
+        panic!("one nested root: {:?}", workspace.pruned);
+    };
+    assert_eq!(
+        [prune.parent.as_str(), prune.prefix.as_str()],
+        ["main", "6.archive"]
     );
     let roles: Vec<(&str, Role)> = workspace
         .corpora

@@ -1,0 +1,15 @@
+# Fixture workspace: a retired tree inside the primary's root (M6b §12).
+#
+# `primary/archive` lies inside the primary's root, so the primary used to index
+# the tree twice. No exclude line is written anywhere: the workspace derives the
+# prune from the two roots. `notes/shared.md` exists under both roots.
+
+[[corpora]]
+id = "main"
+root = "primary"
+role = "primary"
+
+[[corpora]]
+id = "context"
+root = "primary/archive"
+role = "archived"
