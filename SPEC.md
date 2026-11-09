@@ -1111,6 +1111,22 @@ Exit codes belong to the CLI. A command exits; a server answers. A tool failure 
 
 `--no-embeddings` is accepted by `index`, `search` and `facts`, and means two different things on purpose: on `index` it is a statement about the generation being published (vectors are carried forward, or dropped when a document's embedded text changed, §8.3), and on `search`/`facts` it is a statement about the query (`degraded`, §9.4).
 
+`janus scan` accounts for every path the walk yields, and states the unit. A skip
+count is a count of **entries**: one file is one entry, and a pruned directory is
+one entry whose contents were never visited, so the number of files beneath it is
+unknown by design. The `walk` object carries `files`, `entries`,
+`directories_pruned`, and `per_reason` with one row per rule in a fixed order.
+`skipped` keeps the map of rule to entry count that `v0.1.0` published, so a
+consumer reading `skipped.hidden` keeps working; the pruned counts are new data
+under `walk`. Two rules hold: `walk.files + walk.entries` equals the paths the
+walk yielded, and `walk.files` equals the documents plus the read skips. Paths
+hidden by `.gitignore` are outside both rules; `ignored_by_git` names how many
+markdown files the ignore rules removed, and a gitignored directory is not
+enumerated. The human output prints the same accounting in two lines, so a reader
+can reconcile the report with `find` by hand. A second traversal to count the
+files inside a pruned directory is forbidden: it would visit what the rule exists
+to avoid.
+
 `search` and `facts` refresh the index when the corpus changed since the build (§8.3), and print exactly one `refresh:` line on stderr that says what they did. `--no-rebuild` makes both refuse to write; it reads a validated generation and says it skipped. When only a cold build can cure the manifest, both exit 1 with `index needs a full build: run janus index` and the mismatch. A missing index is built on the first read; a cold mismatch is never built.
 
 A process may cache one loaded generation, and only one: the payload of `index.bin` and `vectors.f32`, never an answer. Freshness is decided on every call. The cached load is reused only when the on-disk `manifest.json` equals the cached manifest field for field and the walk digest of this call equals its `corpus_sig`. A load that declined a refresh is never cached, so a busy writer cannot be hidden.
