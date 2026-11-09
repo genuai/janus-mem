@@ -27,13 +27,22 @@ const WORKSPACE_FIXTURE: &str = concat!(
     "/tests/fixtures/workspace-query"
 );
 
+/// The first committed two-corpus fixture: one active archived note beside a
+/// superseded archived decision.
+const CORPORA_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/workspace");
+
 // ──────────────────────────────── helpers ──────────────────────────────────
 
-/// A private copy of the fixture workspace: two corpora and the file naming them.
-fn workspace() -> tempfile::TempDir {
+/// A private copy of a committed fixture workspace.
+fn copied(from: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir for the fixture copy");
-    copy_tree(Path::new(WORKSPACE_FIXTURE), dir.path());
+    copy_tree(Path::new(from), dir.path());
     dir
+}
+
+/// A private copy of the federated-query fixture.
+fn workspace() -> tempfile::TempDir {
+    copied(WORKSPACE_FIXTURE)
 }
 
 /// Copies one tree, skipping any index a previous run left behind.
@@ -212,6 +221,45 @@ fn case_2_2_all_returns_both_and_each_archived_row_carries_the_weight() {
                     "a neutral factor of 1.0 is not printed: {row}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn case_2_2_the_committed_two_corpus_fixture_shows_a_row_from_each_corpus() {
+    // The fixture a reader copies from must demonstrate the rule on a default
+    // query: one active archived note answers with the weight beside its score,
+    // and the archived decision, which is superseded, stays hidden. The role
+    // says when a corpus is read; the status says whether a document is true.
+    let dir = copied(CORPORA_FIXTURE);
+    let report = json(
+        dir.path(),
+        &[
+            "search",
+            "cache",
+            "--no-embeddings",
+            "--corpus",
+            "all",
+            "--json",
+        ],
+    );
+
+    assert_eq!(report["corpora"], serde_json::json!(["main", "context"]));
+    let corpora = corpora_of(&report);
+    assert_eq!(corpora.first(), Some(&"main"), "{report}");
+    assert!(corpora.contains(&"context"), "{report}");
+    assert!(
+        !paths(&report).contains(&"2019-01-01-cache-server.md"),
+        "a superseded document is still hidden under `current`: {report}"
+    );
+
+    for row in report["results"].as_array().expect("results") {
+        if row["corpus"] == serde_json::json!("context") {
+            assert_eq!(
+                row["scores"]["corpus"],
+                serde_json::json!(0.8),
+                "an archived row reports its weight: {row}"
+            );
         }
     }
 }

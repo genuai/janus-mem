@@ -9,6 +9,12 @@
 #
 # Nothing here grants a write. `read_only` is left out of both entries, so the
 # role decides it: archived is read-only, primary is not (case 1.4).
+#
+# The archived corpus keeps one active note and one superseded decision. A
+# default `--corpus all` query therefore returns a row from each corpus with the
+# archived weight beside its score, while the status gate still hides the
+# retired decision: the role says when a corpus is read, and the status says
+# whether a document is true now.
 
 [[corpora]]
 id = "context"
