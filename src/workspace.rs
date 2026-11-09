@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, Config};
+use crate::config::{self, Config, Prune};
 use crate::error::JanusError;
 use crate::index::refresh::Signature;
 use crate::index::store::{self, Manifest};
@@ -69,6 +69,47 @@ pub struct Corpus {
     pub index_dir: PathBuf,
 }
 
+/// A corpus root that lies inside another corpus's root (§12 M6b-5).
+///
+/// The parent would otherwise index the tree twice: once at full weight and once
+/// as the nested corpus. One of these is computed per nested root at load, and
+/// it becomes one entry of the parent's effective excludes (M6b-26).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nested {
+    /// The corpus whose walk must skip the tree.
+    pub parent: String,
+    /// The corpus that owns the tree.
+    pub nested: String,
+    /// The tree, relative to the parent's root, `/`-separated.
+    pub prefix: String,
+    /// Documents the tree contributes; `None` when it cannot be walked.
+    pub documents: Option<usize>,
+}
+
+impl Nested {
+    /// The one line a workspace prints about this prune (case 5.2).
+    ///
+    /// It names the parent, the nested corpus and the count, so a query that
+    /// silently stops reading a directory is the one outcome left impossible.
+    fn warning(&self, origin: &Path) -> String {
+        let count = self.documents.map_or_else(
+            || "an unknown number of documents".to_owned(),
+            |count| match count {
+                1 => "1 document".to_owned(),
+                count => format!("{count} documents"),
+            },
+        );
+        format!(
+            "{}: corpus {:?} is inside corpus {:?}: {count} pruned from the parent's walk; \
+             --corpus {:?} reads them",
+            origin.display(),
+            self.nested,
+            self.parent,
+            self.nested
+        )
+    }
+}
+
 /// The keys a `[[corpora]]` entry may carry.
 const CORPUS_KEYS: [&str; 5] = ["id", "root", "role", "read_only", "index_dir"];
 
@@ -118,6 +159,8 @@ pub struct Workspace {
     pub corpora: Vec<Corpus>,
     /// The federation policy of `[search]`.
     pub search: SearchPolicy,
+    /// One entry per corpus root that lies inside another's (§12 M6b-5).
+    pub pruned: Vec<Nested>,
     /// What was ignored or looked wrong, for the caller to print.
     pub warnings: Vec<String>,
 }
@@ -191,13 +234,53 @@ impl Workspace {
         // Primary first; `sort_by_key` is stable, so file order survives inside
         // each role.
         corpora.sort_by_key(|(_, corpus)| corpus.role == Role::Archived);
+        let corpora: Vec<Corpus> = corpora.into_iter().map(|(_, corpus)| corpus).collect();
+        // The prune is a fact about the workspace, so it is derived here, once,
+        // and never written to a corpus file (M6b-26).
+        let pruned = nested(&corpora);
+        let mut warnings = parser.warnings;
+        for prune in &pruned {
+            warnings.push(prune.warning(origin));
+        }
 
         Ok(Self {
             path: origin.to_path_buf(),
-            corpora: corpora.into_iter().map(|(_, corpus)| corpus).collect(),
+            corpora,
             search,
-            warnings: parser.warnings,
+            pruned,
+            warnings,
         })
+    }
+
+    /// The config one corpus is read with: its own file plus this workspace's
+    /// prune of every nested corpus root (M6b-26).
+    ///
+    /// # Errors
+    ///
+    /// [`JanusError::ConfigMissing`], [`JanusError::ConfigRead`] or
+    /// [`JanusError::ConfigParse`] for the corpus's own file.
+    pub fn config_of(&self, corpus: &Corpus) -> Result<Config, JanusError> {
+        let mut config = Config::load(&corpus.root)?;
+        self.apply_prunes(&corpus.id, &mut config);
+        Ok(config)
+    }
+
+    /// Adds the prunes this workspace derives for the corpus named `id`.
+    ///
+    /// A command that works on one corpus has a root instead of an id, which is
+    /// why this takes the id the loader already resolved.
+    pub fn apply_prunes(&self, id: &str, config: &mut Config) {
+        for prune in self.pruned_from(id) {
+            config.prune_tree(Prune {
+                prefix: prune.prefix.clone(),
+                owner: prune.nested.clone(),
+            });
+        }
+    }
+
+    /// The trees the corpus named `id` must not walk, in workspace order.
+    pub fn pruned_from<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Nested> + 'a {
+        self.pruned.iter().filter(move |prune| prune.parent == id)
     }
 }
 
@@ -373,6 +456,55 @@ fn resolve_root(declared: &str, origin: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// Every corpus root that lies inside another corpus root (M6b-26).
+///
+/// Ordered by parent, then nested, both in workspace order, so the warning lines
+/// and the `janus corpora` notes are stable across runs (§10).
+fn nested(corpora: &[Corpus]) -> Vec<Nested> {
+    let mut found = Vec::new();
+    for parent in corpora {
+        for child in corpora {
+            let prefix = child
+                .root
+                .strip_prefix(&parent.root)
+                .ok()
+                .map(relative)
+                .unwrap_or_default();
+            // An empty prefix is the corpus's own root: a workspace may name one
+            // tree twice, and then nothing nests.
+            if prefix.is_empty() {
+                continue;
+            }
+            found.push(Nested {
+                parent: parent.id.clone(),
+                nested: child.id.clone(),
+                documents: documents(&child.root),
+                prefix,
+            });
+        }
+    }
+    found
+}
+
+/// A path below a root, as a `/`-separated relative value (§8.7).
+fn relative(rest: &Path) -> String {
+    rest.components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// How many documents a nested corpus contributes: one walk of its own tree.
+///
+/// The nested corpus's config decides what it admits. The parent's `[index]
+/// exclude` patterns are relative to the parent's root, so they cannot be
+/// evaluated from the child's (M6b-27).
+fn documents(root: &Path) -> Option<usize> {
+    let config = Config::load(root).ok()?;
+    let walk = vault::walk(root, &config, WalkOptions::default()).ok()?;
+    Some(walk.files.len())
+}
+
 /// Rejects a duplicate `id` or a primary count other than one, naming the entries.
 fn check(corpora: &[(usize, Corpus)]) -> Result<(), String> {
     for (position, (index, corpus)) in corpora.iter().enumerate() {
@@ -442,9 +574,16 @@ pub fn run(workspace: &Workspace, options: Options) -> Result<(), JanusError> {
     let _ = writeln!(out, "workspace  {}", workspace.path.display());
     for row in &rows {
         let read_only = if row.corpus.read_only { "yes" } else { "no" };
+        // A parent names the corpora its walk skips, so the prune is visible
+        // beside the corpus that lost the documents (case 5.2).
+        let prunes = if row.pruned.is_empty() {
+            String::new()
+        } else {
+            format!("  prunes: {}", row.pruned.join(", "))
+        };
         let _ = writeln!(
             out,
-            "{}  {}  read-only: {read_only}  index: {}  {}",
+            "{}  {}  read-only: {read_only}  index: {}  {}{prunes}",
             row.corpus.id,
             row.corpus.role.as_str(),
             index_state(row.index_present, row.index_stale),
@@ -471,6 +610,11 @@ pub struct Row {
     /// The corpus's declared facts: id, root, role, read-only and index dir.
     #[serde(flatten)]
     pub corpus: Corpus,
+    /// The ids of the corpora whose roots this corpus's walk skips. Absent when
+    /// nothing nests, which is every single-corpus answer and every workspace
+    /// whose corpora sit side by side (§12 M6b-5).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pruned: Vec<String>,
     /// Whether the corpus holds a `janus.toml`.
     pub config_present: bool,
     /// Whether the index directory holds a manifest.
@@ -487,20 +631,32 @@ pub struct Row {
 /// index (M6-6, case 1.5).
 #[must_use]
 pub fn rows(workspace: &Workspace) -> Vec<Row> {
-    workspace.corpora.iter().map(Row::of).collect()
+    workspace
+        .corpora
+        .iter()
+        .map(|corpus| Row::of(workspace, corpus))
+        .collect()
 }
 
 impl Row {
     /// Reads at most one manifest and one walk.
-    fn of(corpus: &Corpus) -> Self {
+    fn of(workspace: &Workspace, corpus: &Corpus) -> Self {
         let manifest = fs::read(corpus.index_dir.join(store::MANIFEST_FILE))
             .ok()
             .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok());
-        let index_stale = manifest
-            .as_ref()
-            .and_then(|manifest| staleness(&corpus.root, manifest));
+        // The digest must be the one a read computes, so this walk carries the
+        // same prune the read path applies (M6b-26).
+        let index_stale = workspace
+            .config_of(corpus)
+            .ok()
+            .zip(manifest.as_ref())
+            .and_then(|(config, manifest)| staleness(&corpus.root, &config, manifest));
         Self {
             corpus: corpus.clone(),
+            pruned: workspace
+                .pruned_from(&corpus.id)
+                .map(|prune| prune.nested.clone())
+                .collect(),
             config_present: corpus.root.join(config::CONFIG_FILE).is_file(),
             index_present: manifest.is_some(),
             index_stale,
@@ -519,10 +675,9 @@ pub(crate) fn index_state(present: bool, stale: Option<bool>) -> &'static str {
 }
 
 /// Whether the corpus changed since the generation was built: the same one walk
-/// and one digest a read makes. `None` when the corpus config cannot be read.
-fn staleness(root: &Path, manifest: &Manifest) -> Option<bool> {
-    let config = Config::load(root).ok()?;
-    let walk = vault::walk(root, &config, WalkOptions::default()).ok()?;
+/// and one digest a read makes. `None` when the corpus cannot be walked.
+fn staleness(root: &Path, config: &Config, manifest: &Manifest) -> Option<bool> {
+    let walk = vault::walk(root, config, WalkOptions::default()).ok()?;
     let digest = Signature::of(&walk.files).digest();
     Some(manifest.corpus_sig.as_deref() != Some(digest.as_str()))
 }
@@ -577,5 +732,76 @@ mod tests {
                 .join(config::JANUS_DIR)
         );
         assert_eq!(workspace.search, SearchPolicy::default());
+    }
+
+    /// A workspace naming two corpora by relative root.
+    fn workspace_of(dir: &Path, primary: &str, archived: &str) -> Workspace {
+        let path = dir.join(WORKSPACE_FILE);
+        fs::write(
+            &path,
+            format!(
+                "[[corpora]]\nid = 'main'\nroot = '{primary}'\nrole = 'primary'\n\n\
+                 [[corpora]]\nid = 'context'\nroot = '{archived}'\nrole = 'archived'\n"
+            ),
+        )
+        .expect("write the workspace");
+        Workspace::load(&path).expect("the workspace loads")
+    }
+
+    /// A workspace whose archived root lies inside the primary's root.
+    fn nested_workspace(dir: &Path) -> (Workspace, PathBuf) {
+        let root = corpus(dir, "vault");
+        let nested = root.join("archive");
+        fs::create_dir_all(&nested).expect("create the nested root");
+        fs::write(
+            nested.join(config::CONFIG_FILE),
+            "corpus_id = \"context\"\n",
+        )
+        .expect("write the nested config");
+        fs::write(nested.join("old.md"), "# Old\n").expect("write the nested document");
+        (workspace_of(dir, "vault", "vault/archive"), root)
+    }
+
+    #[test]
+    fn a_nested_root_is_pruned_from_its_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (workspace, root) = nested_workspace(dir.path());
+
+        let [prune] = workspace.pruned.as_slice() else {
+            panic!("one nested root: {:?}", workspace.pruned);
+        };
+        assert_eq!(
+            (
+                prune.parent.as_str(),
+                prune.nested.as_str(),
+                prune.prefix.as_str(),
+                prune.documents
+            ),
+            ("main", "context", "archive", Some(1))
+        );
+        assert_eq!(workspace.warnings.len(), 1, "{:?}", workspace.warnings);
+
+        // The parent's effective excludes hold the prune, and the corpus's own
+        // file still says nothing about it.
+        let config = workspace
+            .config_of(&workspace.corpora[0])
+            .expect("the parent config loads");
+        assert!(config.is_excluded("archive/old.md"));
+        assert_eq!(config.prune_owner("archive/old.md"), Some("context"));
+        let declared = fs::read_to_string(root.join(config::CONFIG_FILE)).expect("read the file");
+        assert!(!declared.contains("archive"), "{declared}");
+
+        // The corpus that owns the tree is not the one that prunes.
+        assert_eq!(workspace.pruned_from("context").count(), 0);
+    }
+
+    #[test]
+    fn corpora_side_by_side_prune_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        corpus(dir.path(), "vault");
+        corpus(dir.path(), "archive");
+
+        let workspace = workspace_of(dir.path(), "vault", "archive");
+        assert!(workspace.pruned.is_empty() && workspace.warnings.is_empty());
     }
 }

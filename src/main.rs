@@ -366,7 +366,18 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             let root = vault::resolve_corpus(cli.vault)?;
             tracing::info!(vault = %root.display(), "corpus resolved");
 
-            let config = Config::load(&root)?;
+            let mut config = Config::load(&root)?;
+            // A corpus that is a parent in the ambient workspace must not
+            // publish the nested corpus's documents again: the rebuild reads the
+            // same prune a query reads (case 5.4, M6b-26).
+            if let Some(found) = ambient_workspace()? {
+                for warning in &found.warnings {
+                    eprintln!("warning: {warning}");
+                }
+                if let Some(corpus) = found.corpora.iter().find(|corpus| corpus.root == root) {
+                    found.apply_prunes(&corpus.id, &mut config);
+                }
+            }
             let progress = progress_enabled(progress);
             // `--no-embeddings` is a statement about the generation, so it skips
             // resolution entirely: no model is loaded for a lexical build, and
@@ -614,6 +625,22 @@ fn query_workspace(
     match workspace::resolve(explicit, env, &workspace_config_dir()) {
         Ok(path) => Ok(Some(workspace::Workspace::load(&path)?)),
         // A query that names no workspace reads one corpus, as it always has.
+        Err(JanusError::Usage { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The workspace the environment names, when one does (§6.11).
+///
+/// A command that works on one corpus refuses `--workspace` (M6b-24), so only the
+/// variable and the platform file can name a workspace here. The prune such a
+/// workspace derives still applies: a rebuild it triggers must not publish a
+/// nested corpus's documents a second time (M6b-26).
+fn ambient_workspace() -> Result<Option<workspace::Workspace>, JanusError> {
+    let env = std::env::var_os("JANUS_WORKSPACE").map(PathBuf::from);
+    match workspace::resolve(None, env, &workspace_config_dir()) {
+        Ok(path) => Ok(Some(workspace::Workspace::load(&path)?)),
+        // No workspace anywhere is the documented single-corpus mode.
         Err(JanusError::Usage { .. }) => Ok(None),
         Err(error) => Err(error),
     }

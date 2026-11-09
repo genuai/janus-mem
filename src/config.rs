@@ -178,6 +178,34 @@ pub struct Config {
     path_hints: Vec<PathHint>,
     /// Exclusion globs against the vault-relative path (§6.1).
     excludes: GlobSet,
+    /// Directories this walk must not enter, and the corpus that owns each one.
+    /// A workspace derives them from its own corpus roots (§6.11, M6b-26).
+    pruned: Vec<Prune>,
+}
+
+/// A directory a walk must not enter, and the corpus that owns it (§6.11).
+///
+/// A workspace derives one of these for every corpus root that lies inside
+/// another corpus root, so the parent walks the tree once, as its owner does
+/// (M6b-26). It is never written to a corpus's `janus.toml`: one corpus can be
+/// primary in one workspace and archived in another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prune {
+    /// The directory, vault-relative and `/`-separated.
+    pub prefix: String,
+    /// The id of the corpus that owns the tree, for the message a read gives.
+    pub owner: String,
+}
+
+impl Prune {
+    /// Whether `rel_path` is the pruned directory or lies below it.
+    #[must_use]
+    pub fn holds(&self, rel_path: &str) -> bool {
+        rel_path == self.prefix
+            || rel_path
+                .strip_prefix(self.prefix.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
 }
 
 impl Config {
@@ -320,14 +348,34 @@ impl Config {
             .map(|hint| hint.type_name.as_str())
     }
 
-    /// Whether `[index] exclude` hides this vault-relative path.
+    /// Whether `[index] exclude` or the workspace's prune hides this
+    /// vault-relative path.
     ///
     /// `rel_path` must use `/` separators (§8.7). Always-excluded directories
     /// are handled separately by [`is_always_excluded_dir`], because they are
     /// pruned during the walk rather than tested per file.
     #[must_use]
     pub fn is_excluded(&self, rel_path: &str) -> bool {
-        self.excludes.is_match(rel_path)
+        self.excludes.is_match(rel_path) || self.prune_owner(rel_path).is_some()
+    }
+
+    /// Adds a directory this walk must not enter (§6.11, M6b-26).
+    ///
+    /// The caller derives it from a workspace, never from this corpus's file: a
+    /// corpus is reusable across workspaces with different roles.
+    pub fn prune_tree(&mut self, prune: Prune) {
+        if !prune.prefix.is_empty() && !self.pruned.contains(&prune) {
+            self.pruned.push(prune);
+        }
+    }
+
+    /// The corpus that owns the pruned tree holding `rel_path`, if one does.
+    #[must_use]
+    pub fn prune_owner(&self, rel_path: &str) -> Option<&str> {
+        self.pruned
+            .iter()
+            .find(|prune| prune.holds(rel_path))
+            .map(|prune| prune.owner.as_str())
     }
 
     /// Builds the resolved config from the parsed file.
@@ -490,6 +538,7 @@ impl Config {
             authority,
             path_hints,
             excludes,
+            pruned: Vec::new(),
         }
     }
 }
@@ -1954,6 +2003,25 @@ mod tests {
         );
         // The valid pattern still works.
         assert!(config.is_excluded("ok/file.md"));
+    }
+
+    #[test]
+    fn a_pruned_tree_hides_its_directory_and_everything_below_it() {
+        let mut config = parse("");
+        let prune = Prune {
+            prefix: "archive".to_owned(),
+            owner: "context".to_owned(),
+        };
+        config.prune_tree(prune.clone());
+        config.prune_tree(prune);
+
+        assert!(config.is_excluded("archive") && config.is_excluded("archive/deep/old.md"));
+        assert_eq!(config.prune_owner("archive/old.md"), Some("context"));
+        // A name that merely starts with the same characters is another tree.
+        assert!(!config.is_excluded("archive-notes/old.md"));
+        assert_eq!(config.prune_owner("notes/old.md"), None);
+        // The same prune twice is one entry, so a message names it once.
+        assert_eq!(config.pruned.len(), 1);
     }
 
     // ────────────────────────────── embedding alpha ──────────────────────

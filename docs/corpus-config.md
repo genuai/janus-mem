@@ -58,7 +58,7 @@ exclude = ["tests/fixtures/**"]   # synthetic, so not part of the corpus
 A retired tree is declared in a workspace file instead, with the role `archived`:
 
 ```toml
-# workspace.toml, beside the two corpora
+# workspace.toml, beside the corpus
 [[corpora]]
 id = "main"
 root = "vault"
@@ -66,7 +66,7 @@ role = "primary"
 
 [[corpora]]
 id = "context"
-root = "6.archive"
+root = "vault/6.archive"
 role = "archived"
 
 [search]
@@ -101,18 +101,25 @@ refuses it with a usage error — `init`, `scan`, `chunks`, `index`, `doctor`,
 `ids`, `moves`, `lineage` and `suggest-links` — because a command that ignored
 the flag would report success for a corpus you did not name.
 
-**If the retired tree sits inside the primary's root,** the primary still walks
-it. Keep one exclude line for it in the primary's `janus.toml`, so the tree is
-indexed once, by its own corpus:
+**A retired tree inside the primary's root needs no exclude line.** The workspace
+prunes every corpus root that lies inside another corpus root from that parent's
+walk. So the primary indexes `6.archive/` once, as the corpus that owns it, and
+no `janus.toml` says so. The prune is derived from the workspace and kept in
+memory, never written to a corpus file: one corpus can be primary in one
+workspace and archived in another.
 
-```toml
-[index]
-exclude = ["tests/fixtures/**", "6.archive/**"]
+A workspace with a nested corpus prints one line on load, naming the parent, the
+nested corpus and the document count it pruned:
+
+```text
+warning: /home/me/vault/workspace.toml: corpus "context" is inside corpus
+"main": 226 documents pruned from the parent's walk; --corpus "context"
+reads them
 ```
 
-That line no longer decides what a query may answer from — the role does. Two
-indexes over one tree is the cost of leaving the archive in place; moving it out
-of the primary's root removes the line.
+`janus corpora` marks the parent with the child it skips (`prunes: context`). A
+read of the pruned path asked of the parent is a usage error that names the
+corpus which owns it, so the parent never answers with its old copy.
 
 ## 2. Type frontmatter-less documents by path
 
