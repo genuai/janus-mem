@@ -1114,16 +1114,18 @@ Exit codes belong to the CLI. A command exits; a server answers. A tool failure 
 `janus scan` accounts for every path the walk yields, and states the unit. A skip
 count is a count of **entries**: one file is one entry, and a pruned directory is
 one entry whose contents were never visited, so the number of files beneath it is
-unknown by design. `--json` reports `walk` with `files` and
-`directories_pruned`, and `skipped` as one row per rule with `entries` and
-`pruned_directories`, always all seven rules in a fixed order. Two rules hold:
-`walk.files + sum(entries)` equals the paths the walk yielded, and `walk.files`
-equals the documents plus the read skips. Paths hidden by `.gitignore` are
-outside both rules; `ignored_by_git` names how many markdown files the ignore
-rules removed, and a gitignored directory is not enumerated. The human output
-prints the same accounting in two lines, so a reader can reconcile the report
-with `find` by hand. A second traversal to count the files inside a pruned
-directory is forbidden: it would visit what the rule exists to avoid.
+unknown by design. The `walk` object carries `files`, `entries`,
+`directories_pruned`, and `per_reason` with one row per rule in a fixed order.
+`skipped` keeps the map of rule to entry count that `v0.1.0` published, so a
+consumer reading `skipped.hidden` keeps working; the pruned counts are new data
+under `walk`. Two rules hold: `walk.files + walk.entries` equals the paths the
+walk yielded, and `walk.files` equals the documents plus the read skips. Paths
+hidden by `.gitignore` are outside both rules; `ignored_by_git` names how many
+markdown files the ignore rules removed, and a gitignored directory is not
+enumerated. The human output prints the same accounting in two lines, so a reader
+can reconcile the report with `find` by hand. A second traversal to count the
+files inside a pruned directory is forbidden: it would visit what the rule exists
+to avoid.
 
 `search` and `facts` refresh the index when the corpus changed since the build (§8.3), and print exactly one `refresh:` line on stderr that says what they did. `--no-rebuild` makes both refuse to write; it reads a validated generation and says it skipped. When only a cold build can cure the manifest, both exit 1 with `index needs a full build: run janus index` and the mismatch. A missing index is built on the first read; a cold mismatch is never built.
 

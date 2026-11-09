@@ -569,47 +569,57 @@ expression: json
       "rel_path": "notes/non-utf8.md"
     }
   ],
-  "skipped": [
-    {
-      "entries": 1,
-      "pruned_directories": 1,
-      "reason": "always_excluded"
-    },
-    {
-      "entries": 3,
-      "pruned_directories": 0,
-      "reason": "hidden"
-    },
-    {
-      "entries": 2,
-      "pruned_directories": 0,
-      "reason": "config_exclude"
-    },
-    {
-      "entries": 1,
-      "pruned_directories": 0,
-      "reason": "not_markdown"
-    },
-    {
-      "entries": 0,
-      "pruned_directories": 0,
-      "reason": "symlinked_directory"
-    },
-    {
-      "entries": 0,
-      "pruned_directories": 0,
-      "reason": "symlink_escape"
-    },
-    {
-      "entries": 0,
-      "pruned_directories": 0,
-      "reason": "non_utf8_path"
-    }
-  ],
+  "skipped": {
+    "always_excluded": 1,
+    "config_exclude": 2,
+    "hidden": 3,
+    "non_utf8_path": 0,
+    "not_markdown": 1,
+    "symlink_escape": 0,
+    "symlinked_directory": 0
+  },
   "taken_ms": 0,
   "vault": "<vault>",
   "walk": {
     "directories_pruned": 1,
-    "files": 20
+    "entries": 7,
+    "files": 20,
+    "per_reason": [
+      {
+        "entries": 1,
+        "pruned_directories": 1,
+        "reason": "always_excluded"
+      },
+      {
+        "entries": 3,
+        "pruned_directories": 0,
+        "reason": "hidden"
+      },
+      {
+        "entries": 2,
+        "pruned_directories": 0,
+        "reason": "config_exclude"
+      },
+      {
+        "entries": 1,
+        "pruned_directories": 0,
+        "reason": "not_markdown"
+      },
+      {
+        "entries": 0,
+        "pruned_directories": 0,
+        "reason": "symlinked_directory"
+      },
+      {
+        "entries": 0,
+        "pruned_directories": 0,
+        "reason": "symlink_escape"
+      },
+      {
+        "entries": 0,
+        "pruned_directories": 0,
+        "reason": "non_utf8_path"
+      }
+    ]
   }
 }

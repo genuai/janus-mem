@@ -207,10 +207,15 @@ struct ScanReport<'a> {
     taken_ms: u64,
     /// Every document, in `rel_path` order.
     docs: Vec<DocumentDto<'a>>,
-    /// What the walk read, as two totals a consumer can reconcile.
+    /// What the walk read and refused, with the unit and the pruned counts.
     walk: WalkDto,
-    /// Walk skips per rule, one row per rule in [`SkipReason::ORDER`].
-    skipped: Vec<SkipTotalDto>,
+    /// Walk skips per rule, as a map from rule code to entry count.
+    ///
+    /// The compatibility view: this field keeps the type, the keys and the
+    /// meaning that `v0.1.0` published, so a consumer reading
+    /// `report.skipped.hidden` keeps working and `api` stays 1. The pruned
+    /// counts live under [`WalkDto::per_reason`].
+    skipped: BTreeMap<&'static str, usize>,
     /// Markdown files hidden by `.gitignore`; `null` when not attributed.
     ignored_by_git: Option<usize>,
     /// Directories or files the walker could not read at all.
@@ -242,6 +247,13 @@ impl<'a> ScanReport<'a> {
         // disagree.
         let totals = walk_totals(walk);
 
+        let mut skipped = BTreeMap::new();
+        for reason in SkipReason::ORDER {
+            // Every rule is present even at zero: a consumer should never have to
+            // distinguish "no hidden files" from "this build does not count them".
+            skipped.insert(reason.as_str(), walk.count(reason));
+        }
+
         Self {
             api: API_VERSION,
             vault: root.display().to_string(),
@@ -251,17 +263,19 @@ impl<'a> ScanReport<'a> {
             docs: documents.iter().map(DocumentDto::new).collect(),
             walk: WalkDto {
                 files: totals.files,
+                entries: totals.entries,
                 directories_pruned: totals.pruned_directories,
+                per_reason: totals
+                    .per_reason
+                    .iter()
+                    .map(|row| SkipTotalDto {
+                        reason: row.reason.as_str(),
+                        entries: row.entries,
+                        pruned_directories: row.pruned_directories,
+                    })
+                    .collect(),
             },
-            skipped: totals
-                .per_reason
-                .iter()
-                .map(|row| SkipTotalDto {
-                    reason: row.reason.as_str(),
-                    entries: row.entries,
-                    pruned_directories: row.pruned_directories,
-                })
-                .collect(),
+            skipped,
             ignored_by_git: walk.ignored_by_git,
             errors: walk.errors.iter().map(|e| e.message.as_str()).collect(),
             read_skips: read_skips.iter().map(ReadSkipDto::new).collect(),
@@ -352,13 +366,21 @@ struct SkipDto<'a> {
     reason: &'static str,
 }
 
-/// The two totals the walk produced.
+/// What the walk read and refused, with the unit named.
+///
+/// `skipped` stays a map for compatibility; these fields are the new data.
+/// `per_reason` repeats the map's counts and adds the directories pruned for
+/// each rule.
 #[derive(Debug, Serialize)]
 struct WalkDto {
     /// Markdown files the walk admitted. Each is a document or a read skip.
     files: usize,
+    /// Paths the walk refused. Equals the sum of `per_reason[].entries`.
+    entries: usize,
     /// Directories the walk refused without descending into them.
     directories_pruned: usize,
+    /// One row per rule, in [`SkipReason::ORDER`], whatever its count.
+    per_reason: Vec<SkipTotalDto>,
 }
 
 /// One rule's share of the walk's refusals.
@@ -654,11 +676,11 @@ mod tests {
         (json, String::from_utf8(out).expect("utf-8"))
     }
 
-    /// One rule's row in the `skipped` list.
+    /// One rule's row in `walk.per_reason`.
     fn skip_row<'a>(report: &'a serde_json::Value, reason: &str) -> &'a serde_json::Value {
-        report["skipped"]
+        report["walk"]["per_reason"]
             .as_array()
-            .expect("skipped list")
+            .expect("per_reason list")
             .iter()
             .find(|row| row["reason"] == reason)
             .unwrap_or_else(|| panic!("no {reason} row:\n{report}"))
@@ -690,7 +712,9 @@ mod tests {
         let dir = accounting_vault();
         let (json, table) = report_and_table(dir.path());
 
-        let rows = json["skipped"].as_array().expect("skipped list");
+        let rows = json["walk"]["per_reason"]
+            .as_array()
+            .expect("per_reason list");
         let sum = |field: &str| -> u64 {
             rows.iter()
                 .map(|row| row[field].as_u64().expect("a count"))
@@ -704,11 +728,17 @@ mod tests {
         // 1 `.txt` = 3. The three documents inside `.hidden/` are not paths the
         // walk saw.
         assert_eq!(files + entries, 3, "{json}");
+        assert_eq!(json["walk"]["entries"].as_u64(), Some(entries), "{json}");
         assert_eq!(
             json["walk"]["directories_pruned"].as_u64(),
             Some(pruned),
             "the total equals the sum of its rows:\n{json}"
         );
+        // The compatibility map reports the same entry counts as the new rows.
+        for row in rows {
+            let reason = row["reason"].as_str().expect("reason");
+            assert_eq!(json["skipped"][reason], row["entries"], "{json}");
+        }
         // The table prints the same numbers the JSON carries, because both read
         // `walk_totals`.
         assert!(
@@ -815,10 +845,16 @@ mod tests {
             false,
         );
         let json = serde_json::to_value(&report).expect("serialize");
-        let skipped = json["skipped"].as_array().expect("skipped list");
+        let skipped = json["skipped"].as_object().expect("skipped map");
 
         assert_eq!(skipped.len(), SkipReason::ORDER.len());
-        let reasons: Vec<&str> = skipped
+        assert!(skipped.values().all(|count| count == 0));
+
+        // The new data is a list under `walk`, always all seven rules.
+        let rows = json["walk"]["per_reason"]
+            .as_array()
+            .expect("per_reason list");
+        let reasons: Vec<&str> = rows
             .iter()
             .map(|row| row["reason"].as_str().expect("reason"))
             .collect();
@@ -828,12 +864,12 @@ mod tests {
             "every rule, in fixed order"
         );
         assert!(
-            skipped
-                .iter()
+            rows.iter()
                 .all(|row| row["entries"] == 0 && row["pruned_directories"] == 0),
             "{json}"
         );
         assert_eq!(json["walk"]["files"], 0, "{json}");
+        assert_eq!(json["walk"]["entries"], 0, "{json}");
         assert_eq!(json["walk"]["directories_pruned"], 0, "{json}");
         assert!(json.get("skipped_entries").is_none(), "{json}");
     }

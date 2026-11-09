@@ -200,9 +200,9 @@ fn every_skip_rule_is_reported_in_a_fixed_order() {
     let vault = fixture_vault();
     let report = scan_json(vault.path(), &[]);
 
-    let reasons: Vec<&str> = report["skipped"]
+    let reasons: Vec<&str> = report["walk"]["per_reason"]
         .as_array()
-        .expect("skipped list")
+        .expect("per_reason list")
         .iter()
         .map(|row| row["reason"].as_str().expect("reason"))
         .collect();
@@ -228,7 +228,9 @@ fn the_skip_report_reconciles_with_the_files_on_disk() {
     let report = scan_json(vault.path(), &[]);
 
     let files = report["walk"]["files"].as_u64().expect("walk.files");
-    let rows = report["skipped"].as_array().expect("skipped list");
+    let rows = report["walk"]["per_reason"]
+        .as_array()
+        .expect("per_reason list");
     let sum = |field: &str| -> u64 {
         rows.iter()
             .map(|row| row[field].as_u64().expect("a count"))
@@ -242,6 +244,7 @@ fn the_skip_report_reconciles_with_the_files_on_disk() {
     assert_eq!(files, 20, "{report}");
     assert_eq!(sum("entries"), 7, "{report}");
     assert_eq!(sum("pruned_directories"), 1, "{report}");
+    assert_eq!(report["walk"]["entries"], 7, "{report}");
     assert_eq!(report["walk"]["directories_pruned"], 1, "{report}");
     // Every path the walk yielded is admitted once or skipped once.
     assert_eq!(files + sum("entries"), 27, "{report}");
@@ -258,11 +261,40 @@ fn the_skip_report_reconciles_with_the_files_on_disk() {
     assert_eq!(report["ignored_by_git"], 1, "{report}");
 }
 
-/// One rule's row in the `skipped` list.
-fn skip_row<'a>(report: &'a Value, reason: &str) -> &'a Value {
-    report["skipped"]
+#[test]
+fn the_skip_map_keeps_the_published_shape() {
+    let vault = fixture_vault();
+    let report = scan_json(vault.path(), &[]);
+
+    // A consumer of v0.1.0 reads `report.skipped.hidden` as a number. Keep that
+    // promise: same type, same keys, same values. The new counts live under
+    // `walk`, so `api` stays 1.
+    let skipped = report["skipped"].as_object().expect("skipped map");
+    assert_eq!(skipped.len(), 7, "{report}");
+    assert_eq!(skipped["always_excluded"], 1, "{report}");
+    assert_eq!(skipped["hidden"], 3, "{report}");
+    assert_eq!(skipped["config_exclude"], 2, "{report}");
+    assert_eq!(skipped["not_markdown"], 1, "{report}");
+    for zero in ["symlinked_directory", "symlink_escape", "non_utf8_path"] {
+        assert_eq!(skipped[zero], 0, "{zero}: {report}");
+    }
+    assert_eq!(report["api"], 1, "{report}");
+
+    // The map and the new rows cannot disagree.
+    for row in report["walk"]["per_reason"]
         .as_array()
-        .expect("skipped list")
+        .expect("per_reason list")
+    {
+        let reason = row["reason"].as_str().expect("reason");
+        assert_eq!(skipped[reason], row["entries"], "{reason}: {report}");
+    }
+}
+
+/// One rule's row in `walk.per_reason`.
+fn skip_row<'a>(report: &'a Value, reason: &str) -> &'a Value {
+    report["walk"]["per_reason"]
+        .as_array()
+        .expect("per_reason list")
         .iter()
         .find(|row| row["reason"] == reason)
         .unwrap_or_else(|| panic!("no {reason} row:\n{report}"))
