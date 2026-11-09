@@ -249,7 +249,7 @@ Rules:
 - Missing `status` → `active` for every type (never `draft` by default).
 - Missing `date` → the date ladder. First the frontmatter date key (`date`, `created`, `decided`), then a date prefix in the file name, then a date in the deepest folder name, then no date. A prefix is `YYYY-MM-DD`, `YYYY-MM` or `YYYY`, year 1970–2099, and must be a whole token: `2026-08-22_notes.md` matches, `2026-08-22x.md` and `1.0.md` do not. A quarter prefix is `YYYY-qN`, `YYYYQN`, `YYYY.qN`, `YYYY_qN`, `qN-YYYY`, `qN_YYYY`, `qN.YYYY` or `qNYYYY`, with `N` in 1–4. `2026-q5`, `2026-q0`, `2026-q04` and a quarter without a year are not dates. **A file's modification time is not on this ladder.**
 - Each result records the *source* of its date — `frontmatter | filename | filename_month | filename_year | filename_quarter | folder | folder_month | folder_year | folder_quarter | absent` — and surfaces it in responses so the agent can judge confidence (§9.4). The source also carries the precision, so one field answers "where" and "how exact".
-- A month date is anchored on the first day of its month, a year date on the first day of its year, and a quarter date on the first day of that quarter at day precision. A document with no date has no anchor: its decay factor is the median age of the dated documents in the corpus, and `1.0` when no document is dated. It is still treated as always current.
+- A month date is anchored on the first day of its month, a year date on the first day of its year, and a quarter date on the first day of that quarter at day precision. A document with no date has no anchor, so its decay factor is `1.0`: a missing date is missing metadata, not age. `[decay] undated = "median"` restores the older rule, which ages an undated document by the median age of the dated documents (and by nothing when none is dated). The measurement behind the default is in the R1 phase log. The document is always treated as current.
 - `effective_from` / `effective_to` are optional valid-time keys with their own semantics (§6.10). They never fall back to mtime; if absent, the window is derived from `date` and the supersession chain. A document with no date at all has no trustworthy valid time and is excluded from `as_of` queries with a `no_validity` note.
 - Unknown `status` is not an error: it maps to `status: unknown` and gets a neutral 1.0× gate factor plus a `doctor` note. Unknown `type` keeps its name (types are an open registry, §6.6.1) and gets the neutral fallback weight 1.00 plus a `doctor` note. Fail-open on read, fail-closed on write.
 - Files with no frontmatter are fully supported and are **never** mutated to add one unless the user explicitly calls `write_document` with frontmatter for that path.
@@ -672,7 +672,7 @@ title_boost = clamp(1 + w · title_cov, 1.0, 2.0)         w = [scoring] title_bo
 relevance  = blend · title_boost                         ∈ [0, 2]
 authority  = AUTHORITY[type] · STATUS_FACTOR[status]
 decay      = exp(−ln(2) · age_days / half_life_days)     = 1.0 if timeless or half_life ≤ 0
-                                                        or if an undated document has no dated corpus
+                                                        or if the document has no date (§6.3)
 final      = relevance · authority · decay
 ```
 
@@ -683,7 +683,7 @@ final      = relevance · authority · decay
 - **The boost is computed once per document per query**, beside the document list, and indexed inside the chunk loop. It never runs per chunk.
 - **`[scoring] title_boost` is clamped to `[0, 1]`** with a config warning, and the warning is tested on the configured value. `0.0` reproduces the pre-boost ranking exactly. `facts` passes `1.0`, because an authority-ordered list cannot be reordered by a multiplier.
 - **Retrieval is candidate-scoped.** The scorer signature is effectively `score(query, candidates: Option<&CandidateSet>)`, where a candidate set is a bitset or sorted `ChunkId` list. v1 always passes `None` (all chunks). This exists so a future graph expansion, tag filter, or “only these docs” restriction reuses the exact same scoring path instead of growing a second one (§8.9).
-- `age_days` uses `effective_from` (falling back to `date`) and the injected `DecayBasis.today`, clamped at 0 (future-dated docs get decay = 1.0). For a document with no date, `age_days` is the corpus median of the same anchor across every document in the generation. The median is built once per query, before `--types`, `--tags` or `--scope`, so a filter never changes another document's score.
+- `age_days` uses `effective_from` (falling back to `date`) and the injected `DecayBasis.today`, clamped at 0 (future-dated docs get decay = 1.0). A document with no date has no `age_days`, so it decays `1.0` (§6.3). Under `[decay] undated = "median"` its `age_days` is instead the corpus median of the same anchor across every document in the generation; that median is built once per query, before `--types`, `--tags` or `--scope`, so a filter never changes another document's score.
 - `as_of` requests bypass the status gate and set `decay = 1.0`; inclusion is decided by the valid-time window alone. The response still reports declared and effective status so the agent can see what the document's standing was.
 - **Scope is a filter, never a weight.** Similarity cannot separate two orgs' otherwise-similar documents; only a hard filter can (§6.12).
 - When multiple corpora are explicitly queried, `final` is multiplied by `search.archived_weight` and the corpus name is reported per result. Primary-only queries apply no corpus weight.
@@ -692,7 +692,7 @@ final      = relevance · authority · decay
 - Optional MMR-style diversity pass (`--diversity 0.3`, default off) to avoid five chunks of the same doc.
 - Ties break by `final`, then `date` desc, then `chunk_id`; for documents the order is completed by `DocId` asc and then `rel_path` asc (a `ChunkId` excludes the document, so two documents can otherwise tie on every listed key), and within one document by `chunk_id` then the occurrence's `ordinal`. The extra keys only order hits the first three leave tied.
 
-**Hard requirement:** `score()` is a pure function with a `DecayBasis` (which carries `today` and the corpus median) and config as inputs. Its tests are table-driven and cover: decay monotonicity (`age↑ ⇒ decay↓`), authority ordering, status gating, α endpoints, future dates, missing dates, the corpus median, and `timeless` override. Property tests with `proptest` assert `final ≥ 0`, `relevance ≤ 2.0` and `final ≤ 1.5 · 1.0 · 1.0 · 2.0`.
+**Hard requirement:** `score()` is a pure function with a `DecayBasis` (which carries `today` and the corpus median) and config as inputs. Its tests are table-driven and cover: decay monotonicity (`age↑ ⇒ decay↓`), authority ordering, status gating, α endpoints, future dates, missing dates under both `[decay] undated` rules, the corpus median, and `timeless` override. Property tests with `proptest` assert `final ≥ 0`, `relevance ≤ 2.0` and `final ≤ 1.5 · 1.0 · 1.0 · 2.0`.
 
 **Two independent layers, not alternatives.** `fastembed` provides the *semantic* vector (M4); BM25 provides the *lexical* signal (M3). Neither replaces the other:
 
@@ -1323,7 +1323,7 @@ Hand-written BM25 (inverted index, tokenizer, optional stemmer); scoring module 
 
 ### M4B — Works on a vault you did not prepare (2 PRs)
 The date ladder uses authored and name-derived dates only: a frontmatter date key, a date prefix in the file name, a date in the deepest folder name. mtime leaves the ladder, because a value that differs between two copies of one vault cannot affect a ranking. Month (`2026-08`) and year (`2026`) precision join day precision in file and folder names, so `format_version` becomes 3. Every search and facts result carries `date_source` with the rung that answered, one `notes` line counts the results that have no date, `facts` explains a corpus that declares no fact type, and `scan` counts names that look like a date but are not in ISO order.
-**Done when:** shifting every mtime changes no order and no score; `search --json` and `facts --json` name the source of every date; a document with no date reports `absent` and decays by the corpus median (`1.0` when none is dated); `facts` on a vault with no fact types says why and lists the newest documents; `scan` reports the near-miss count.
+**Done when:** shifting every mtime changes no order and no score; `search --json` and `facts --json` name the source of every date; a document with no date reports `absent` and decays by the corpus median (`1.0` when none is dated) — **superseded by §6.3, which makes `1.0` the default and `median` an opt-in**; `facts` on a vault with no fact types says why and lists the newest documents; `scan` reports the near-miss count.
 **Learn:** fallback ladders as data, `Option` inside a serialized format, an additive DTO change that keeps the API version.
 
 ### M5 — Temporal graph (3–4 days)
@@ -1580,6 +1580,7 @@ idea = 0.85
 
 [decay]
 half_life_days = 180
+undated = "none"              # none | median; decay for a document with no date
 timeless_types = ["decision", "spec", "principle"]
 
 [decay.by_type]
