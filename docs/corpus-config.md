@@ -112,7 +112,9 @@ A workspace with a nested corpus prints one line on load, naming the parent, the
 nested corpus and the document count it pruned:
 
 ```text
-warning: workspace.toml: corpus "context" is inside corpus "main": 226 documents pruned from the parent's walk; --corpus "context" reads them
+warning: /home/me/vault/workspace.toml: corpus "context" is inside corpus
+"main": 226 documents pruned from the parent's walk; --corpus "context"
+reads them
 ```
 
 `janus corpora` marks the parent with the child it skips (`prunes: context`). A

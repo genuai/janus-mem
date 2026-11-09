@@ -264,6 +264,40 @@ command and says it cannot federate. The refusal does not depend on where the fl
 - `corpus_id` stays the declared identity in `janus.toml`; a workspace's `id` is a separate
   name for the same corpus, and the report carries both when they differ.
 
+### 3.6 The nested corpus root (P5)
+
+**Statement.** A corpus root that lies inside another corpus root is pruned from
+the parent's walk. The workspace derives the prune from its own entries at load,
+so the parent's effective excludes are one list, computed once and applied to
+every read of that corpus. Nothing is written to a corpus file: a corpus is
+reusable across workspaces with different roles (§6.11).
+
+**Case 5.1.** A default query on a workspace whose archived root lies inside the
+primary's root returns zero rows from that tree. `--corpus <id>` returns the same
+document at `archived_weight`, and the primary still answers for the documents it
+owns.
+
+**Case 5.2.** The workspace prints one warning line per nested root, naming the
+parent, the nested corpus and the count of documents pruned. `janus corpora`
+marks the parent with the child it skips, in the table and in the `pruned` field
+of `--json`.
+
+**Case 5.3.** `read_document` of the pruned path, asked of the parent, is a
+`usage` failure that names the corpus which owns it. It is never `not_found`, and
+never the parent's copy.
+
+**Case 5.4.** The prune reaches every path that reads the corpus: `search`,
+`facts`, the refresh a read triggers, `janus index`, and `read`. An index built
+before the workspace existed is pruned by the rebuild the first read triggers,
+and `janus index` publishes the same document count.
+
+**Case 5.5.** The prune is derived and kept in memory. With no workspace the
+parent walks its whole tree, as it always has, and no command writes the prune
+into a corpus's `janus.toml`.
+
+**Case 5.6.** A workspace whose corpora sit side by side prunes nothing and warns
+about nothing, so no existing workspace changes shape.
+
 ## 4. Decisions
 
 | ID | Decision | Why |
@@ -292,7 +326,10 @@ command and says it cannot federate. The refusal does not depend on where the fl
 | M6b-22 | A `corpus:path` qualifier and a `corpus` parameter that name different corpora is a usage error | One call cannot read two corpora. Resolving the contradiction silently would answer a question nobody asked, which is the failure M6b-14 refuses for a root and a workspace. |
 | M6b-23 | `lineage` keeps no `corpus` parameter, and a qualified path is refused | A supersession chain is one corpus's graph. A cross-corpus chain is a write-side fact, because the edge changes windows and status across corpora, so it stays in M7. |
 | M6b-24 | `--workspace` is a global flag, and a command that works on one corpus refuses it with `usage` | One flag in one position, beside `--vault`. The parser then accepts it everywhere, so the refusal is what stops a command answering about one corpus while looking like it read the workspace. The guard names the commands that read a workspace, so a command added later refuses the flag until someone writes it to read one. |
-| M6b-25 | A retired tree inside the primary's root keeps one exclude line in the primary; the role is what keeps it out of answers | The walk is not workspace-aware: the primary walks every directory under its root, so a nested archived corpus is indexed twice unless the primary excludes it. The guide states this. Deferred: a loader warning for a corpus root inside another corpus root. |
+| M6b-25 | *Deleted by M6b-5. Its ID is not reused.* A retired tree inside the primary's root no longer keeps an exclude line: the workspace prunes it (M6b-26). | The workaround answered a duplicate with an exclude line, and M6b-26 removes the duplicate instead. |
+| M6b-26 | A corpus root inside another corpus root is pruned from the parent's effective excludes; the workspace derives it at load and keeps it in memory | The walk is not workspace-aware, so the parent indexed a retired tree twice and won: the copy at full weight outranked its owner at `archived_weight`. The fact belongs to the workspace, not to the corpus, because one corpus can be primary in one workspace and archived in another. Writing it into a corpus file would also be a write to the user's vault, which this release does not have. |
+| M6b-27 | The pruned count is the nested corpus's own admitted documents, measured once per workspace load | The parent's `[index] exclude` patterns are relative to the parent's root and cannot be evaluated from the child's, so the honest number is the child's walk. The count is what makes the prune visible instead of silent. |
+| M6b-28 | A read of a pruned path, asked of the parent, is a `usage` failure that names the owning corpus | `not_found` would send the caller hunting for a typo in a file they can see on disk. The path is known, the owner is known, and answering with the parent's copy is the defect this phase removes. |
 
 ## 5. Phases
 
@@ -369,7 +406,30 @@ not state one placement while the code had two. That work touches `src/cli.rs`,
 `src/main.rs` and `tests/cli_workspace_flag.rs`, which the original file list did not name,
 and it adds cases 4.4 and 4.5. `tests/corpus_config_docs.rs` also changes: it parses the
 guide's new workspace block with the real workspace parser, so the guide cannot drift from
-the code that reads it (M6b-24, M6b-25).
+the code that reads it (M6b-24).
+
+### Phase 5 — A nested corpus root (defect fix)
+
+**Files.** `src/workspace.rs` (the nested-root list, the effective config of a
+corpus, the `pruned` field of a row), `src/config.rs` (`Prune`, `prune_tree`,
+`prune_owner`), `src/engine.rs` (every fleet member reads through the
+workspace's config), `src/read.rs` (the owner of a pruned path),
+`src/main.rs` (`janus index` reads the ambient workspace),
+`tests/workspace_nested.rs` (new), `tests/fixtures/workspace-nested/` (new),
+`tests/corpus_config_docs.rs`, `docs/corpus-config.md`, this file.
+
+**Build.** Derive one prune per nested corpus root at load, report it once, apply
+it to the parent's effective excludes, and refuse a read of the pruned path with
+the corpus that owns it.
+
+**Tests.** Cases 5.1–5.6.
+
+**Accept.** A default query returns zero rows from the nested tree, before and
+after a rebuild. The archive answers at 0.8 through its own id. Both ceilings
+hold.
+
+**Split seam.** Part 1 is the prune and its tests; part 2 is the reporting and the
+guide. Measured and not taken: see §12.
 
 ## 6. Cross-cutting requirements
 
@@ -404,6 +464,7 @@ phase log and the gate record.
 | M6b-2 federated query | 600 | ~500 | 900 | ~600 |
 | M6b-3 other tools | 400 | ~300 | 600 | ~350 |
 | M6b-4 archive role + gate | 200 | ~100 | 300 | ~100 |
+| M6b-5 nested corpus root | 300 | ~220 | 450 | ~260 |
 
 Estimates run two to three times low in this repository. Each phase names its split seam.
 
@@ -433,6 +494,12 @@ states the arithmetic.
 300. The estimate was 120 and 100. The test number is one new file: two cases
 over nine commands, a fixture copy, and a session helper each for rpc and MCP.
 The phase holds both ceilings, and the test ceiling is reached exactly.
+
+**Delivered, M6b-5.** 278 logic against a ceiling of 300, and 437 tests against
+450. The estimate was 220 and 260, so this is the first phase of the milestone
+whose estimate held. The test number fell twice during the phase: the first draft
+of `tests/workspace_nested.rs` was 475 lines, and two of its cases were merged
+because they shared one setup. §12 states what was cut.
 
 ## 10. SPEC corrections
 
@@ -763,15 +830,19 @@ by the three commands that make the difference visible: `corpora`, a default
 stay in the text: 9 of the 10 questions wrong on the fixture, and 226 archived
 documents that appeared in the top three for 3 questions.
 
-The guide also states the one case where an exclude line stays. A retired tree
-inside the primary's root is still walked by the primary, because the walk is not
+The guide also stated the one case where an exclude line stays. A retired tree
+inside the primary's root was still walked by the primary, because the walk is not
 workspace-aware: a test run of this branch, on a vault holding `6.archive/` with
 its own `janus.toml` and a workspace declaring it, returned
-`6.archive/old.md` with `corpus: main` from a default query. So the tree is
+`6.archive/old.md` with `corpus: main` from a default query. So the tree was
 excluded in the primary and read through its own corpus, and the line no longer
-decides what a query may answer from (M6b-25). A loader warning for a corpus root
-inside another corpus root is deliberately open; it is a code change with its own
-cases, and this phase's budget is the flag and the documents.
+decided what a query may answer from (M6b-25). A loader warning for a corpus root
+inside another corpus root was left open; it is a code change with its own cases,
+and this phase's budget was the flag and the documents.
+
+**Retired by M6b-5.** The exclude line is gone. The workspace prunes a nested
+corpus root from the parent's walk (M6b-26), so the guide no longer asks for that
+line, and M6b-25 is deleted.
 
 **The SPEC corrections.** §6.11 gains three statements: exactly one corpus is
 primary, naming an archived corpus does not promote it, and a qualified
@@ -812,6 +883,112 @@ helper each for rpc and MCP. The logic number is the guard (three small
 functions) plus the flag's move, and the 35 deleted lines of the seven old flag
 fields.
 
+### M6b-5 — A nested corpus root is pruned from its parent
+
+**State.** Complete. Branch `m6b-5-nested-root`, one pull request. It closes the
+defect M6b-25 recorded a workaround for; M6b-25 is deleted, and its ID is not
+reused.
+
+**The defect, measured three ways.** A retired tree nested inside the primary's
+root was indexed twice: once by the primary's walk at weight 1.0, and once by its
+own archived corpus at 0.8. The primary copy always won, so a default query
+returned retired documents, and the archived copy never reached the top three.
+
+| Measurement | Result |
+|---|---|
+| a default query on a 2,107-document corpus | one archived document at rank 2, `corpus: main` |
+| the same document's `final` as a primary row, and as an archive row | `1.3552` against `0.465`, so the parent's copy always wins |
+| the previous phase's fixture | a default query returned `6.archive/old.md` as `corpus: main` |
+
+**Files.** `src/workspace.rs` (`Nested`, the `pruned` list, `config_of`,
+`apply_prunes`, `pruned_from`, the `pruned` row field and the table note),
+`src/config.rs` (`Prune`, `prune_tree`, `prune_owner`, and `is_excluded` reading
+them), `src/engine.rs` (`Fleet::of` reads each member's config through the
+workspace), `src/read.rs` (`open` names the corpus that owns a pruned path),
+`src/main.rs` (`ambient_workspace`, and the `index` arm that applies it),
+`tests/workspace_nested.rs` (new), `tests/fixtures/workspace-nested/` (new),
+`tests/corpus_config_docs.rs`, `docs/corpus-config.md`, this file.
+
+**What runs.** The workspace computes one `Nested` per corpus root that lies
+inside another corpus root, at load, and renders one warning line for each. The
+parent's config gains that directory as a prune, and `Config::is_excluded` reads
+the prune beside `[index] exclude`, so the directory is never descended. Every
+engine a fleet builds for that corpus carries the same list, which is what makes
+`search`, `facts`, the refresh a read triggers, `read` and `status` agree.
+`janus index` refuses `--workspace`, so it reads the workspace from the variable
+or the platform file and applies the same prune.
+
+**Why the prune is not in the corpus file.** One corpus can be primary in one
+workspace and archived in another (§6.11), so a nested root is a fact about a
+workspace. A write to a corpus file would also be a write to the user's vault,
+which this release does not have. The list is derived at load and dropped with
+the process, and `case_5_5_…` asserts the corpus file is byte-identical after a
+command that pruned.
+
+**Cases.**
+
+| Case | Evidence |
+|---|---|
+| 5.1 a default query reads nothing from the nested tree | `case_5_1_a_default_query_reads_nothing_from_the_nested_tree` |
+| 5.2 one warning, and the listing marks the parent | `case_5_2_the_prune_is_reported_once_and_marked_in_the_listing` |
+| 5.3 a pruned path names its owner | `case_5_3_a_nested_path_asked_of_the_parent_names_the_corpus_that_owns_it` |
+| 5.4 the prune reaches the rebuild and `janus index` | `case_5_4_a_stale_index_is_pruned_by_the_rebuild_and_by_janus_index` |
+| 5.5 the prune is derived and writes nothing | `case_5_5_the_prune_is_derived_from_the_workspace_and_writes_nothing` |
+| 5.6 corpora side by side prune nothing | `workspace::tests::corpora_side_by_side_prune_nothing`, and the two untouched sibling fixtures |
+
+**The fixture, stated.** `tests/fixtures/workspace-nested/primary/archive` is the
+archived root inside the primary's root. Both roots hold `notes/shared.md`, with
+different bodies: the primary's says it keeps one cache in front of the database,
+and the archive's says it describes the retired cache fleet. Each case asserts one
+of them, so a read that fell back to the parent cannot pass. The archived body's
+only distinctive word is `retired`, which is the query a default search must not
+answer.
+
+**Case 4.1 becomes provable.** The phase that closed M6b could not claim "the
+archive appears in none of the top three" on a nested tree, because the parent's
+copy answered as `corpus: main`. With the prune, a default query reads zero rows
+from the tree, which is the mechanism behind the 0-of-10 count. The count itself
+stays in the private corpus's project and in the gate record.
+
+**Single-corpus evidence.** With no workspace, `Config` gains no prune, so every
+walk, digest and golden is unchanged: `tests/golden_search.rs`,
+`tests/golden_scan.rs`, `tests/golden_chunks.rs`, `tests/cli_status.rs`,
+`tests/cli_corpora.rs` and `tests/workspace_query.rs` pass without a snapshot
+change. The two new fields are absent rather than empty: `Row.pruned` is skipped
+when it is empty, and the table grows a `prunes:` note only on a parent.
+
+**The count, and what it costs.** The warning needs a document count, and the one
+honest number is the nested corpus's own admitted documents (M6b-27). The loader
+therefore walks each nested tree once, which is smaller than the parent and is one
+walk per workspace load. A walk that fails leaves the count unknown, and the line
+says so instead of printing `0`.
+
+**Gates.** fmt, clippy with `-D warnings`, test (941 passed, 2 ignored), doc (zero
+warnings), the Windows cross-check. Size: logic 278, tests 437.
+
+**Size against the plan, and the split seam.** The budget was 300 logic and 450
+tests; the estimate was 220 and 260. The delivery is 278 and 437, so both
+ceilings hold and the estimates were close for the first time in this milestone.
+
+The test number did not hold at first. The first draft was 567, and three edits
+brought it to 437 without losing an assertion: the fixture files lost the
+paragraphs that repeated the log, the workspace unit test stopped checking what
+the integration cases already check, and two cases that shared one setup became
+one. What did not change is the substance: six cases, two corpus bodies, and a
+document count read from the manifest.
+
+The split seam — part 1 the prune, part 2 the reporting and the guide — was
+measured and not taken. Part 2 is about 60 lines and part 1 about 210, so the seam
+is real, but a first review would then read a warning with no prune behind it and
+a second review would read the same list twice. The phase is 278 logic, which a
+reviewer can hold, so it ships as one change and this note records the seam for
+the next phase that needs it.
+
+**Not included.** `promote`, cross-corpus links and every write (M7); a general
+`exclude a subdirectory` key, which would be a second instrument for a fact the
+workspace already knows; a prune derived for `scan`, `doctor`, `chunks`, `ids`,
+`moves`, `lineage` and `suggest-links`, which read one corpus and no workspace.
+
 ## 13. M6b close-out
 
 Six done-when rows from §8. Five are met in this repository. Row 1's number is
@@ -828,13 +1005,15 @@ measured in the private corpus's project, and this log does not invent it.
 
 **What is deliberately open.**
 
-- A loader warning for a corpus root inside another corpus root (M6b-25). The
-  guide states the rule; the code does not warn yet.
+- ~~A loader warning for a corpus root inside another corpus root (M6b-25).~~
+  Closed by M6b-5: the workspace prunes the tree and warns once per nested root
+  (M6b-26, case 5.2).
 - `promote`, every write, and a resolved cross-corpus link (M7). §6.11 and §16.2
   now say so, and `allow_cross_corpus_links` is read and reserved.
 - `[scope_groups]`, HTTP transport and watch mode: unchanged from §0.2.
 
 **The milestone, in one line.** A workspace federates `search` and `facts`, an
 archived corpus is hard-excluded unless a query names it, `read` and `status`
-understand a workspace, the three surfaces agree, and the guide recommends a role
-instead of an exclude line.
+understand a workspace, the three surfaces agree, the guide recommends a role
+instead of an exclude line, and a corpus root nested inside another is pruned from
+the parent so one tree is indexed once.
