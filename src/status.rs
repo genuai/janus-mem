@@ -1,8 +1,8 @@
 //! `janus_status`: is this corpus fresh, and what can this process do?
 //!
-//! The answer comes from the manifest and one walk. A status call never builds
-//! and never takes `.janus/lock` (M6-6), so an agent can ask "is this fresh?"
-//! while a writer holds the index.
+//! The answer comes from the manifest, one walk, and the metadata the resolved
+//! documents carry. A status call never builds and never takes `.janus/lock`
+//! (M6-6), so an agent can ask "is this fresh?" while a writer holds the index.
 //!
 //! Two embedding facts answer two questions and may disagree (§2.6):
 //! `available` is this process, from the embedder it resolved; `model` is the
@@ -20,6 +20,8 @@ use crate::engine::CacheStats;
 use crate::error::JanusError;
 use crate::index::refresh::Signature;
 use crate::index::store::{self, Manifest};
+use crate::metadata::Metadata;
+use crate::vault::resolve;
 use crate::vault::{self, WalkOptions};
 
 /// The answer to one status call (§2.6).
@@ -32,6 +34,7 @@ pub struct Report {
     writes_enabled: bool,
     embeddings: Embeddings,
     index: Index,
+    metadata: MetadataBlock,
     cache: Cache,
 }
 
@@ -85,6 +88,24 @@ impl Index {
     }
 }
 
+/// How many documents carry a date, so an agent can ask "is this corpus
+/// metadata-poor?" without a second command.
+///
+/// The share's denominator is `dated + undated`, the documents this walk
+/// resolved. Not `index.docs`: the manifest is null before the first build, and
+/// a stale manifest describes an older corpus. The question is about the corpus
+/// as it is now.
+#[derive(Debug, Serialize)]
+struct MetadataBlock {
+    /// Documents whose date resolved to any source.
+    dated: usize,
+    /// Documents whose date resolved to nothing.
+    undated: usize,
+    /// `undated / (dated + undated)`, rounded to whole percent and divided by
+    /// one hundred, so it equals the percentage `scan` prints.
+    share_undated: f64,
+}
+
 /// The one-load cache counters of this process (§2.6).
 #[derive(Debug, Serialize)]
 struct Cache {
@@ -111,7 +132,13 @@ pub fn compute(
     let dir = config::resolve_index_dir(root, &config.index_dir);
     let manifest = manifest(&dir.join(store::MANIFEST_FILE))?;
     // Freshness is the same one walk and one digest a read makes.
-    let digest = Signature::of(&vault::walk(root, config, WalkOptions::default())?.files).digest();
+    let walk = vault::walk(root, config, WalkOptions::default())?;
+    let digest = Signature::of(&walk.files).digest();
+    // The metadata question needs the frontmatter, so the files this walk
+    // already found are resolved. Not a second walk: the same file list is read
+    // once, no generation is written, and no lock is taken (R1-14).
+    let (documents, _) = resolve::resolve_all(&walk.files, config);
+    let metadata = Metadata::of(&documents, config);
     Ok(Report {
         vault: root.display().to_string(),
         corpus_id: config.corpus_id.clone(),
@@ -131,6 +158,11 @@ pub fn compute(
         index: match &manifest {
             Some(manifest) => Index::of(manifest, &digest),
             None => Index::absent(),
+        },
+        metadata: MetadataBlock {
+            dated: metadata.dated,
+            undated: metadata.undated,
+            share_undated: metadata.share_undated(),
         },
         cache: Cache {
             hits: cache.hits,

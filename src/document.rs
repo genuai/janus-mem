@@ -202,6 +202,26 @@ pub enum DateSource {
 }
 
 impl DateSource {
+    /// Every source, in report order.
+    ///
+    /// A metadata report lists each one, at zero when it never fired, so a
+    /// consumer never confuses "no folder dates" with "this build does not
+    /// count them". Frontmatter comes first because it is the strongest
+    /// evidence; [`DateSource::None`] comes last because it is the absence of
+    /// one.
+    pub const ALL: [Self; 10] = [
+        Self::Frontmatter,
+        Self::Filename,
+        Self::FilenameMonth,
+        Self::FilenameYear,
+        Self::FilenameQuarter,
+        Self::Folder,
+        Self::FolderMonth,
+        Self::FolderYear,
+        Self::FolderQuarter,
+        Self::None,
+    ];
+
     /// The stable lowercase name used in JSON output (§9.4).
     #[must_use]
     pub const fn as_str(&self) -> &'static str {

@@ -393,3 +393,27 @@ fn init_then_scan_works_in_a_fresh_directory() {
         "the sidecar is pruned, not enumerated:\n{report}"
     );
 }
+
+#[test]
+fn case_3_1_the_metadata_counts_reconcile_on_the_fixture() {
+    let vault = fixture_vault();
+    let report = scan_json(vault.path(), &[]);
+    let metadata = &report["metadata"];
+
+    // Hand-derived from the fixture's 19 documents: 12 take a frontmatter date,
+    // 6 take one from the file name, and `notes/undated.md` has none. The
+    // default type is `note`, so 12 notes are not typed and the 4 decisions, 2
+    // path-typed specs and 1 `speculative` are.
+    assert_eq!(metadata["typed"], 7, "{metadata}");
+    assert_eq!(metadata["dated"], 18, "{metadata}");
+    assert_eq!(metadata["undated"], 1, "{metadata}");
+    assert_eq!(metadata["by_source"]["frontmatter"], 12, "{metadata}");
+    assert_eq!(metadata["by_source"]["filename"], 6, "{metadata}");
+    assert_eq!(metadata["by_source"]["absent"], 1, "{metadata}");
+
+    let documents = u64::try_from(report["docs"].as_array().expect("docs").len()).expect("small");
+    assert_eq!(
+        metadata["dated"].as_u64().expect("dated") + metadata["undated"].as_u64().expect("undated"),
+        documents
+    );
+}

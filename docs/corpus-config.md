@@ -1,0 +1,183 @@
+# Configuring a real corpus
+
+A retrieval score is a product: relevance, then authority from the document's
+type, then status, then decay from its date. A corpus that declares no type and
+no date multiplies every document by the same constants, and no ranking setting
+can recover the difference. In the gate of 2026-11-08, 13.8% of a
+2,320-document corpus declared a type, 7.3% declared a frontmatter date, and 34%
+had neither. Authority times status times decay was near-constant across that
+corpus, and the tool said nothing about it.
+
+This document is the four configuration decisions that fixed it on two corpora.
+Each rule names the finding it prevents.
+
+## Check the corpus first
+
+Two read-only commands answer "can this corpus support authority and decay?":
+
+```bash
+janus scan            # every document with its type, status and date source,
+                      # then one line: metadata: 28 typed, 39 dated, 16 undated (29%)
+janus status --json   # metadata.dated, metadata.undated, metadata.share_undated
+```
+
+**Typed means one thing here, in `scan`, and in `status`:** the document's
+resolved type is not the configured default type. A document that falls back to
+`[defaults] type` is not typed for this measure, although it has a type. So a
+corpus at "0 typed" has no authority signal at all, however many documents it
+holds. `scan --json` also reports `by_source`, one count per date source, so you
+can see whether the dates come from frontmatter or from file names.
+
+If more than half the documents are undated, or nobody is typed, fix the corpus
+before you touch a weight. A weight you tune against a wrong denominator is a
+tuned mistake.
+
+## 1. Exclude synthetic and retired trees
+
+Synthetic fixtures and retired archives are documents with strong metadata and
+no claim on the present. They win queries about the real corpus.
+
+**The finding it prevents.** In this repository a fixture `decision` at authority
+1.50 and a 2020 date outranked every real design document: **9 of the 10 graded
+questions were answered wrong**. One exclude line fixed it. A retired `6.archive/`
+tree behaved the same way in the larger corpus: 226 documents of type `spec`,
+timeless by default, served as current doctrine and appearing in the top three
+for 3 questions.
+
+```toml
+[index]
+exclude = ["tests/fixtures/**", "6.archive/**"]
+```
+
+Excluding is a corpus decision, so record it where the next reader finds it.
+A tree that is genuinely historical should be excluded here until a corpus role
+exists for it; excluding it is reversible, and serving it as current is not.
+
+## 2. Type frontmatter-less documents by path
+
+A spec, a decision listing and a journal entry usually differ by where they live,
+not by what their frontmatter says. `[paths]` types them without editing one
+file.
+
+**The finding it prevents.** Every plan document and every `docs/*.md` in this
+repository carries no frontmatter, so each resolved to the default type `note` at
+authority 0.90, below every file that declared `spec`. Adding `[paths]` alone
+moved this repository from **1 of 10 to 5 of 10 top-1 answers**. On the
+2,320-document corpus, typing by path after the tree split moved **1 of 10 to 6
+of 10**.
+
+```toml
+[paths]
+"SPEC.md" = "spec"
+"docs/" = "spec"
+"decisions/" = "decision"
+"journals/" = "journal"
+```
+
+The hint is consulted only when frontmatter declares no type, and the longest
+matching pattern wins, so a nested folder can refine a broad one. A bare
+`folder/` form matches that directory anywhere in the tree.
+
+## 3. Check that the authority order matches what you want to be true
+
+`[authority]` is a claim about which document wins when two documents disagree.
+The default order suits a code base: a decision beats a spec, a spec beats a
+journal. A personal knowledge base usually wants the opposite, because the
+journal is the primary record and the doctrine is a summary of it.
+
+**The finding it prevents.** The larger corpus scored research notes at 1.10 and
+journals at 1.00, so a summary note outranked the record it summarised:
+**doctrine beat the personal record in 2 of the 10 graded questions**.
+
+```toml
+[authority]
+decision = 1.50
+journal = 1.10
+finding = 1.00
+```
+
+Read the list as a sentence: "when these two disagree, I want the first one to
+win". Then check the two or three questions where that claim is not obviously
+true. Do not move a weight to fix one answer; move it when the order is wrong
+for the whole corpus.
+
+## 4. Decide the undated rule, and know which one you shipped
+
+A document with no date must still be scored. `[decay] undated` takes two values:
+
+| value | what an undated document gets | when it is right |
+|---|---|---|
+| `median` | decay `exp(-ln2 · median_age / half_life)`, the corpus's own median age | a missing date is an omission, and the corpus average is the best guess |
+| `none` | decay 1.0, so no loss from the missing date | a missing date is missing metadata, not age |
+
+```toml
+[decay]
+undated = "median"
+```
+
+**The finding it prevents.** An undated document lost 37% of its score before
+relevance was counted (decay 0.632 against 0.99 for a dated one), and that
+multiplier alone decided one of the ten gate answers. The two rules were measured
+on two corpora: `median` kept **6** top-1 answers on the 2,320-document corpus,
+`none` kept **5** and dropped two ranks where a dated record is the answer.
+`median` is the default, because the measurement selected it.
+
+Decide deliberately. `none` is one line away, and it is a legitimate answer for a
+corpus of timeless notes; it is a wrong answer if the corpus has a real aging
+story and the dates were simply not written down.
+
+## A worked example
+
+This configuration is read by the parser in a test, so it cannot drift from the
+code. It suits a mixed vault: a code-adjacent `docs/` tree, a journal, and a
+retired archive.
+
+```toml
+index_dir = ".janus"
+corpus_id = "main"
+
+[defaults]
+type = "note"
+status = "active"
+
+[types]
+adr = "decision"
+rfc = "spec"
+log = "journal"
+research = "finding"
+
+[authority]
+decision = 1.50
+spec = 1.35
+journal = 1.10
+finding = 1.00
+note = 0.90
+
+[decay]
+half_life_days = 180
+undated = "median"
+timeless_types = ["decision", "spec"]
+
+[paths]
+"SPEC.md" = "spec"
+"docs/" = "spec"
+"decisions/" = "decision"
+"journals/" = "journal"
+
+[index]
+exclude = ["tests/fixtures/**", "6.archive/**"]
+```
+
+Run `janus scan` again after editing. The `metadata:` line should move: `typed`
+rises when the `[paths]` hints cover the frontmatter-less tree, and `undated`
+falls only when the documents themselves gain dates. `janus scan` never writes
+to the vault and never repairs a document.
+
+## What this document does not decide
+
+- **No default moves.** The guide names the levers; the built-in defaults stay as
+  shipped. Change a weight only for a reason your corpus states.
+- **No date from a modification time.** A copied file is not a new decision.
+  A document with no authored date stays undated.
+- **No repair.** janus-mem reports metadata quality and never edits a file
+  outside an explicit write command.

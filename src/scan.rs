@@ -36,6 +36,7 @@ use crate::config::{CONFIG_FILE, Config};
 use crate::document::{DocNote, Document, NoteDto};
 use crate::error::JanusError;
 use crate::index::store;
+use crate::metadata::Metadata;
 use crate::vault::resolve::{self, ReadSkip};
 use crate::vault::{self, SkipReason, WalkOptions, WalkResult, identity};
 
@@ -207,6 +208,12 @@ struct ScanReport<'a> {
     taken_ms: u64,
     /// Every document, in `rel_path` order.
     docs: Vec<DocumentDto<'a>>,
+    /// How many documents carry a type and a date (R1-3).
+    ///
+    /// This is the denominator behind every authority and decay weight. A
+    /// corpus where `typed` and `dated` are near zero scores every document the
+    /// same way, whatever the weights say.
+    metadata: MetadataDto,
     /// What the walk read and refused, with the unit and the pruned counts.
     walk: WalkDto,
     /// Walk skips per rule, as a map from rule code to entry count.
@@ -261,6 +268,7 @@ impl<'a> ScanReport<'a> {
             config: root.join(CONFIG_FILE).display().to_string(),
             taken_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             docs: documents.iter().map(DocumentDto::new).collect(),
+            metadata: MetadataDto::new(&Metadata::of(documents, config)),
             walk: WalkDto {
                 files: totals.files,
                 entries: totals.entries,
@@ -364,6 +372,43 @@ struct SkipDto<'a> {
     rel_path: &'a str,
     is_dir: bool,
     reason: &'static str,
+}
+
+/// How many documents carry a type and a date.
+#[derive(Debug, Serialize)]
+struct MetadataDto {
+    /// Documents whose resolved type is not the configured default type.
+    ///
+    /// A document that falls back to `[defaults] type` is **not** typed here,
+    /// although it has a type. Declaring one in frontmatter, or naming one with
+    /// a `[paths]` hint, is what moves this count. The definition is the same in
+    /// `status` and in `docs/corpus-config.md` (R1-13).
+    typed: usize,
+    /// The same count as `typed`, spelled with its definition.
+    ///
+    /// Two names for one number, never two measures: `typed` is the short name
+    /// the human line prints, and this one states the rule in the field name, so
+    /// no reader can take `typed` for "declares a `type` key". One test pins
+    /// them equal.
+    typed_non_default: usize,
+    /// Documents whose date resolved to any source.
+    dated: usize,
+    /// Documents whose date resolved to nothing.
+    undated: usize,
+    /// One count per date source, every source present, at zero if unused.
+    by_source: BTreeMap<&'static str, usize>,
+}
+
+impl MetadataDto {
+    fn new(metadata: &Metadata) -> Self {
+        Self {
+            typed: metadata.typed,
+            typed_non_default: metadata.typed,
+            dated: metadata.dated,
+            undated: metadata.undated,
+            by_source: metadata.by_source.clone(),
+        }
+    }
 }
 
 /// What the walk read and refused, with the unit named.
@@ -479,6 +524,12 @@ fn write_human(
         "{} document(s), {} bytes",
         documents.len(),
         bytes_total
+    );
+    // One count, one definition, for both outputs: see `crate::metadata`.
+    let _ = writeln!(
+        out,
+        "metadata: {}",
+        Metadata::of(documents, config).summary()
     );
 
     // Two lines that reconcile, both read from `walk_totals`: every path the

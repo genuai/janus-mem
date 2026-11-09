@@ -262,3 +262,41 @@ fn case_10_3_only_the_cli_renderers_write_to_stdout() {
         }
     }
 }
+
+// ──────────────────────────── metadata quality ─────────────────────────────
+
+#[test]
+fn case_3_2_status_reports_the_undated_share_without_building() {
+    let dir = scratch("quality");
+    let root = dir.path();
+    // The scratch corpus holds one dated document; add one without a date.
+    write_document(
+        root,
+        "notes/undated.md",
+        "---\ntitle: Undated\n---\n\nno date here\n",
+    );
+
+    let report = common::json_ok(root, &["status", "--json"]);
+    assert_eq!(
+        report["metadata"],
+        json!({ "dated": 1, "undated": 1, "share_undated": 0.5 }),
+        "the same numbers scan reports, from the walk status already makes"
+    );
+    assert!(
+        !root.join(".janus").exists(),
+        "a status call must not build, with or without the metadata block"
+    );
+}
+
+#[test]
+fn case_3_2_status_counts_the_fixture_the_same_way_scan_does() {
+    let dir = fixture_vault();
+    let status = common::json_ok(dir.path(), &["status", "--json"]);
+    let scan = common::scan_json(dir.path(), &[]);
+
+    assert_eq!(status["metadata"]["dated"], scan["metadata"]["dated"]);
+    assert_eq!(status["metadata"]["undated"], scan["metadata"]["undated"]);
+    assert_eq!(scan["metadata"]["undated"], json!(1));
+    // 1 of 19 is 5%, and the share is that percentage over one hundred.
+    assert_eq!(status["metadata"]["share_undated"], json!(0.05));
+}
