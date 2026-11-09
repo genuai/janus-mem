@@ -10,7 +10,10 @@
 > entries equal the entries the walk saw, with pruned directories counted separately.
 
 **Words used here.** **Gate**: the dogfood measurement of five numbers and ten graded
-questions. **Undated**: a document whose date resolves to nothing (`DateSource::None`).
+questions. **Undated**: a document with **no decay anchor**, which means neither
+`effective_from` nor `date` resolves. A document with no authored date but a declared
+`effective_from` is anchored and decays by its age, exactly as scoring requires
+(`effective_from ?? date`); it is not undated for this measure.
 **Skip**: an entry the walk admitted to inspection and then refused. **Prune**: a
 directory the walk never descends into.
 
@@ -75,11 +78,12 @@ The `scan --json` report gains fields (additive, `api` stays 1):
 
 ```json
 "walk": {
-  "files": 55, "entries": 15, "directories_pruned": 7,
+  "files": 20, "entries": 7, "directories_pruned": 1,
   "per_reason": [
-    { "reason": "always_excluded", "entries": 7, "pruned_directories": 7 },
-    { "reason": "hidden", "entries": 6, "pruned_directories": 6 },
-    { "reason": "not_markdown", "entries": 2, "pruned_directories": 0 }
+    { "reason": "always_excluded", "entries": 1, "pruned_directories": 1 },
+    { "reason": "hidden", "entries": 3, "pruned_directories": 0 },
+    { "reason": "config_exclude", "entries": 2, "pruned_directories": 0 },
+    { "reason": "not_markdown", "entries": 1, "pruned_directories": 0 }
   ]
 },
 "skipped": { "always_excluded": 7, "hidden": 6, "not_markdown": 2, "…": 0 },
@@ -146,8 +150,8 @@ them. The rule above is unchanged, and the second corpus decides. That corpus is
 private workspace, and it was measured in its own project; its counts are in the phase
 log.
 
-**Statement.** A document with no date is scored by a rule the corpus chose and can name,
-not by an accident of the walk. The answer says how many returned results were undated
+**Statement.** A document with no decay anchor is scored by a rule the corpus chose and can
+name, not by an accident of the walk. The answer says how many returned results were undated
 and which rule applied.
 
 **Case 2.1.** An undated document scores with the decay the chosen rule gives it — `1.0`
@@ -285,10 +289,38 @@ by a test.
 - After each phase merges, rebuild the local install (§AGENTS "Dogfooding install") and
   re-run the ten questions of this repository, recording the A/B/C line in the log.
 
-## 7. Definition of done
+## 7. The evaluation packet
 
-1. This repository answers **at least 7 of 10** at top-1, measured with the recorded ten
-   questions, up from 5/10.
+The ten questions, their expected document, and the command that produced the number are
+in `tests/eval/repo-ten.jsonl`, one object per line: `query`, `intent`, `expect` (the
+documents that answer it, any one of which counts). It is committed, so a reader can
+reproduce every A/B/C count in this plan.
+
+```bash
+janus index --rebuild
+jq -c . tests/eval/repo-ten.jsonl | while read -r line; do
+  q=$(jq -r .query <<<"$line")
+  janus search "$q" --intent current --limit 3 --no-embeddings --json
+done
+```
+
+Grade by hand against `expect`, and record the binary revision and the clock with the
+counts: `janus --version`, and the date of the run. A/B/C means: **A** the top hit is in
+`expect`, **B** a hit in the top three is, **C** none is.
+
+The private workspace corpus has its own ten questions. They are not committed, and must
+not be: they describe personal material. Its counts are recorded in the phase log and in
+the gate record outside this repository, and they are supplementary evidence, never a
+condition a change must satisfy in isolation.
+
+## 8. Definition of done
+
+1. This repository **does not regress**: at least 4 of 10 at top-1 and 10 of 10 in the
+   top three, measured with `tests/eval/repo-ten.jsonl`. The row was written as 7 of 10
+   and it is unmet, for a reason the plan did not see: every document here is a `spec`
+   (`janus.toml`), `spec` is timeless, and a timeless document already decays `1.0`. The
+   undated rule cannot move this corpus, and no phase of R1 could have reached 7. Ordering
+   is the gap, not recall, so 7 of 10 belongs to a milestone that changes ordering.
 2. The workspace answers **at least 5 of 10** at top-1, measured by a thread in that
    project and reported as counts only, up from 2/10.
 3. `scan` reconciles: `walk.files == admitted + file-skips`, with pruned directories
@@ -298,7 +330,7 @@ by a test.
 5. `format_version` 6, `api` 1, no exit code moved.
 6. `cargo doc` has zero warnings.
 
-## 8. PR plan and size budget
+## 9. PR plan and size budget
 
 | phase | logic ceiling | estimate | test ceiling | estimate |
 |---|---|---|---|---|
@@ -309,7 +341,7 @@ by a test.
 Estimates run low by two to three times in this repository. Each phase names its split
 seam; split before the ceiling.
 
-## 9. SPEC corrections
+## 10. SPEC corrections
 
 1. **§9.1 `janus scan`.** State that skip counts are entries, that a pruned directory is
    one entry with its file count unknown by design, and that `walk.files` plus the skip
@@ -324,7 +356,7 @@ seam; split before the ceiling.
 the definition of `typed`, the two invariants that reconcile it, and the denominator of
 the status share. `status` reports the date side; `scan` reports both halves. (P3.)
 
-## 10. Handoff
+## 11. Handoff
 
 - M6b inherits the archive role, which makes `6.archive/**` a corpus question instead of
   an exclude line.
@@ -332,7 +364,7 @@ the status share. `status` reports the date side; `scan` reports both halves. (P
 - The next gate run reuses the same ten questions per corpus, recorded outside the
   repository, so the numbers stay comparable.
 
-## 11. Implementation logs
+## 12. Implementation logs
 
 ### Phase 1 — Skip accounting
 
@@ -547,7 +579,7 @@ invariants. §9.2's `janus_status` example gains `metadata` and the denominator 
 metadata fixer, because a report is the most this tool may do before M7. Any move of an
 authority default: the guide names the lever and does not move it.
 
-## 12. R1 close-out
+## 13. R1 close-out
 
 Six done-when rows from §7. Five are met. Row 1 is not, and the number is stated rather
 than rounded up.

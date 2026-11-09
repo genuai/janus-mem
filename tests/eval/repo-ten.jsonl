@@ -1,0 +1,10 @@
+{"query": "why does the score gate on effective status", "intent": "current", "expect": ["docs/m5-breakdown.md"]}
+{"query": "how does the identity ladder survive a file move", "intent": "current", "expect": ["docs/m5-breakdown.md"]}
+{"query": "what makes a cache key reusable", "intent": "current", "expect": ["docs/m6-breakdown.md"]}
+{"query": "what is the PR size budget", "intent": "current", "expect": ["AGENTS.md"]}
+{"query": "which error code does a stale etag return", "intent": "current", "expect": ["SPEC.md"]}
+{"query": "how does the walk decide to skip a file", "intent": "current", "expect": ["docs/m1-breakdown.md"]}
+{"query": "what stops a cycle in the supersession graph", "intent": "current", "expect": ["docs/m5-breakdown.md"]}
+{"query": "when does format_version bump", "intent": "current", "expect": ["AGENTS.md"]}
+{"query": "how does --as-of interact with --intent", "intent": "current", "expect": ["docs/m5-breakdown.md"]}
+{"query": "what does the plan say about M7 writes", "intent": "current", "expect": ["docs/m6-breakdown.md"]}
