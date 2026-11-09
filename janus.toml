@@ -76,6 +76,14 @@ journal = 180
 idea = 90
 
 [paths]
+# SPEC.md, AGENTS.md and the plan documents carry no frontmatter, so the path
+# names their type. Without these lines a frontmatter-less spec read as `note`
+# at 0.90 while a fixture decision read as 1.50.
+"SPEC.md" = "spec"
+"AGENTS.md" = "spec"
+"README.md" = "spec"
+"docs/" = "spec"
+
 # Optional path hints, consulted only when frontmatter declares no type.
 # A bare `folder/` form matches that directory anywhere in the tree; patterns
 # containing a wildcard are matched as globs against the vault-relative path.
@@ -100,7 +108,14 @@ idea = 90
 # directory. Uncomment what applies to your vault:
 #   "**/build/**", "**/dist/**", "**/vendor/**", "**/Pods/**",
 #   "**/.venv/**", "**/.next/**", "**/.gradle/**", "**/.terraform/**",
-exclude = ["archive/private/**", "**/*.draft.md"]
+exclude = [
+  "archive/private/**",
+  "**/*.draft.md",
+  # Synthetic documents. A fixture `decision` is dated 2020 and carries
+  # authority 1.50, so it outranked the real design documents for every
+  # question about them.
+  "tests/fixtures/**",
+]
 
 [links]
 # A supersession link between documents whose scopes do not intersect is stored
