@@ -257,8 +257,12 @@ seam; split before the ceiling.
 1. **§9.1 `janus scan`.** State that skip counts are entries, that a pruned directory is
    one entry with its file count unknown by design, and that `walk.files` plus the skip
    entries reconcile. (P1.)
-2. **§6.3 and §6.10 rule 9.** Replace the undated decay sentence with the rule the
-   measurement selected, and keep the reason beside it. (P2.)
+2. **§6.3, the §7 scoring rule, and §11 M4B.** The undated rule is stated three times:
+   `SPEC.md:252` (§6.3), `SPEC.md:686` (the `age_days` bullet in §7), and the M4B
+   done-when at `SPEC.md:1310`. Replace all three with the rule the measurement
+   selected, and keep the reason beside it. The M4B line is a milestone record, so it
+   keeps its place and gains one clause naming §6.3 as the rule that supersedes it: a
+   reader must not trust a rule R1 replaced. (P2.)
 3. **§9.2 `janus_status`.** Add the metadata block: typed, dated, undated. (P3.)
 
 ## 10. Handoff
