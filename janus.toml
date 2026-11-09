@@ -65,6 +65,10 @@ idea = 0.85
 [decay]
 # Global half-life in days. 0 disables time decay globally.
 half_life_days = 180
+# Decay for a document whose date resolves to nothing: `none` (decay 1.0, the
+# measured default) or `median` (age it by the median age of the dated
+# documents). A missing date is missing metadata, not age (SPEC §6.3).
+undated = "none"
 # Types that never decay. This list REPLACES the default set, so a vault that
 # wants findings to be timeless can simply add `finding` to it.
 timeless_types = ["decision", "spec", "principle"]

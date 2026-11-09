@@ -369,6 +369,7 @@ fn case_13_4_an_undated_document_decays_by_the_median_age() {
     // 2025-03-02 is 30. A decision half-life is 180 days:
     // exp(-ln2 · 20 / 180) = exp(-0.077016) = 0.9258747 → 0.9259 at 4 dp.
     let vault = median_corpus();
+    set_undated_rule(&vault, "median");
     index(vault.path());
     let expected = (-std::f64::consts::LN_2 * 20.0 / 180.0).exp();
     assert!(
@@ -401,6 +402,7 @@ fn case_13_5_an_even_count_takes_the_lower_middle() {
             "---\ntype: decision\nstatus: active\n---\ncache\n",
         ),
     ]);
+    set_undated_rule(&vault, "median");
     index(vault.path());
     let expected = (-std::f64::consts::LN_2 * 10.0 / 180.0).exp();
     assert!(
@@ -421,6 +423,7 @@ fn case_13_6_a_corpus_with_no_dated_document_decays_by_one_and_says_so() {
         "undated-decision.md",
         "---\ntype: decision\nstatus: active\n---\ncache\n",
     )]);
+    set_undated_rule(&vault, "median");
     index(vault.path());
     let report = search_json(
         vault.path(),
@@ -452,6 +455,7 @@ fn case_13_7_a_type_filter_does_not_move_the_median() {
     // median built after the filter would be the lower middle of [10, 30] = 10
     // and decay 0.9622. The generation median stays 20 and decay stays 0.9259.
     let vault = median_corpus();
+    set_undated_rule(&vault, "median");
     index(vault.path());
     let mut options = p8_options("cache");
     options.types = vec!["decision".to_owned()];
@@ -469,6 +473,7 @@ fn case_13_7b_a_scope_filter_does_not_move_the_median() {
     // The 20-day note is `org:acme`; `--scope org:beta` drops it from the rows.
     // A median built after the filter would be 10. The generation median is 20.
     let vault = median_corpus();
+    set_undated_rule(&vault, "median");
     index(vault.path());
     let mut options = p8_options("cache");
     options.scopes = vec!["org:beta".to_owned()];
@@ -508,4 +513,131 @@ fn case_13_8_a_history_query_has_no_median_note() {
         !notes.iter().any(|note| note.contains("corpus median")),
         "history does not decay, so it must not name the median: {notes:?}"
     );
+}
+
+// ─────────────────────── R1 P2: the `undated` rule ───────────────────────
+
+/// Rewrites the corpus config to one undated rule.
+///
+/// `written` ends its file inside the `[decay]` table, so the key lands there.
+/// The shipped default is `none`, so a test of `median` must say so.
+fn set_undated_rule(dir: &tempfile::TempDir, rule: &str) {
+    let path = dir.path().join("janus.toml");
+    let text = fs::read_to_string(&path).expect("read config");
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("undated ="))
+        .collect();
+    fs::write(path, format!("{}\nundated = \"{rule}\"\n", kept.join("\n"))).expect("write config");
+}
+
+/// The `notes` of a rendered search.
+fn notes_of(report: &serde_json::Value) -> Vec<String> {
+    report["notes"]
+        .as_array()
+        .expect("notes")
+        .iter()
+        .map(|note| note.as_str().expect("note").to_owned())
+        .collect()
+}
+
+#[test]
+fn case_2_1_the_none_rule_gives_an_undated_document_decay_one() {
+    // The same corpus as case 13.4: ages 10, 20 and 30 days, median 20. Under
+    // `median` the undated decision decays 0.9259; under `none` it does not
+    // decay at all.
+    let vault = median_corpus();
+    set_undated_rule(&vault, "none");
+    index(vault.path());
+    let report = search_json(
+        vault.path(),
+        &["cache", "--intent", "current", "--no-embeddings"],
+    );
+    let decay = undated_decay(vault.path(), &p8_options("cache"));
+
+    assert_eq!(decay, 1.0, "the none rule invents no age");
+    // The note names the value the breakdown carries, so the two cannot differ.
+    assert!(
+        notes_of(&report).contains(&"1 result(s) have no date; decay is 1.0".to_owned()),
+        "{report}"
+    );
+}
+
+#[test]
+fn case_2_2_a_dated_only_answer_names_no_undated_rule() {
+    let vault = median_corpus();
+    set_undated_rule(&vault, "none");
+    index(vault.path());
+    let report = search_json(
+        vault.path(),
+        &[
+            "cache",
+            "--intent",
+            "current",
+            "--types",
+            "note",
+            "--no-embeddings",
+        ],
+    );
+
+    assert!(
+        !notes_of(&report)
+            .iter()
+            .any(|note| note.contains("no date")),
+        "no returned result is undated, so there is nothing to report: {report}"
+    );
+}
+
+#[test]
+fn case_2_3_an_as_of_or_history_query_names_no_undated_rule() {
+    // `none` is the rule that could leak: its note does not depend on a median.
+    // Both queries run with decay off, so neither may name a decay rule even
+    // though an undated document is present.
+    let vault = median_corpus();
+    set_undated_rule(&vault, "none");
+    index(vault.path());
+
+    let history = search_json(
+        vault.path(),
+        &["cache", "--intent", "history", "--no-embeddings"],
+    );
+    assert!(
+        result_paths(&history)
+            .iter()
+            .any(|path| path == "undated-decision.md"),
+        "the undated document must be returned for the check to mean anything: {history}"
+    );
+    assert!(
+        !notes_of(&history)
+            .iter()
+            .any(|note| note.contains("no date")),
+        "history does not decay: {history}"
+    );
+
+    let as_of = search_json(
+        vault.path(),
+        &["cache", "--as-of", "2025-04-01", "--no-embeddings"],
+    );
+    assert!(
+        !notes_of(&as_of).iter().any(|note| note.contains("no date")),
+        "as-of does not decay: {as_of}"
+    );
+}
+
+#[test]
+fn case_2_4_the_median_rule_still_names_the_median() {
+    let vault = median_corpus();
+    set_undated_rule(&vault, "median");
+    index(vault.path());
+    let report = search_json(
+        vault.path(),
+        &["cache", "--intent", "current", "--no-embeddings"],
+    );
+
+    assert!(
+        notes_of(&report)
+            .contains(&"1 result(s) have no date; decay uses the corpus median".to_owned()),
+        "{report}"
+    );
+    assert_ne!(undated_decay(vault.path(), &p8_options("cache")), 1.0);
 }

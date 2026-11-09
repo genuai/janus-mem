@@ -37,7 +37,7 @@ use std::cmp::Ordering;
 use chrono::NaiveDate;
 use serde::Serialize;
 
-use crate::config::TypeSpec;
+use crate::config::{TypeSpec, UndatedDecay};
 use crate::document::{Document, Status};
 use crate::graph::EffectiveStatus;
 use crate::id::{ChunkId, DocId};
@@ -262,6 +262,8 @@ pub struct DecayBasis {
     /// The median age in days of every document with a decay anchor, or `None`
     /// when the generation has no dated document.
     pub undated_age_days: Option<f64>,
+    /// The configured rule for a document whose date resolves to nothing.
+    pub undated: UndatedDecay,
 }
 
 impl DecayBasis {
@@ -281,6 +283,7 @@ impl DecayBasis {
             return Self {
                 today,
                 undated_age_days: None,
+                undated: UndatedDecay::default(),
             };
         }
         ages.sort_unstable();
@@ -288,6 +291,26 @@ impl DecayBasis {
         Self {
             today,
             undated_age_days: Some(ages[middle] as f64),
+            undated: UndatedDecay::default(),
+        }
+    }
+
+    /// Sets the rule an undated document scores under (§6.3, R1-2).
+    #[must_use]
+    pub fn with_undated(self, undated: UndatedDecay) -> Self {
+        Self { undated, ..self }
+    }
+
+    /// The rule that actually decided an undated document's decay, or `None`
+    /// when no rule applied: `median` has no median to name on a corpus with no
+    /// dated document, and a disabled intent reaches neither rule.
+    ///
+    /// The note and the score both read this, so they cannot disagree.
+    #[must_use]
+    pub fn undated_rule(&self) -> Option<UndatedDecay> {
+        match self.undated {
+            UndatedDecay::None => Some(UndatedDecay::None),
+            UndatedDecay::Median => self.undated_age_days.map(|_| UndatedDecay::Median),
         }
     }
 }
@@ -356,10 +379,10 @@ pub fn score(input: &ScoreInput<'_>) -> Breakdown {
 /// `exp(-ln2 * age_days / half_life_days)`, or `1.0` when decay does not apply.
 ///
 /// Decay is off when the intent disables it, the type is `timeless`, the
-/// half-life is `<= 0` (or `NaN`), or an undated document has no corpus median.
+/// half-life is `<= 0` (or `NaN`), or an undated document has no age to use.
 /// A dated document's age is `today - (effective_from ?? date)`, clamped at `0`,
 /// so a future-dated document decays `1.0`. An undated document's age is the
-/// corpus median (§3.13, §6.10 rule 9).
+/// corpus median under `median`, and no age at all under `none` (§6.3).
 fn decay(input: &ScoreInput<'_>, enabled: bool) -> f64 {
     let doc = input.doc;
     if !enabled || doc.type_spec.timeless {
@@ -373,15 +396,23 @@ fn decay(input: &ScoreInput<'_>, enabled: bool) -> f64 {
         return 1.0;
     }
 
-    let age_days = doc
-        .effective_from
-        .or(doc.date)
-        .map_or(input.decay_basis.undated_age_days, |anchor| {
-            Some((input.decay_basis.today - anchor).num_days().max(0) as f64)
-        });
-    let Some(age_days) = age_days else {
-        return 1.0;
+    let age_days = match doc.effective_from.or(doc.date) {
+        Some(anchor) => (input.decay_basis.today - anchor).num_days().max(0) as f64,
+        // No date is missing metadata, not age (§6.3). `median` ages the
+        // document by the corpus; `none` refuses to invent an age at all.
+        None => match input.decay_basis.undated {
+            UndatedDecay::None => return 1.0,
+            UndatedDecay::Median => match input.decay_basis.undated_age_days {
+                Some(median) => median,
+                None => return 1.0,
+            },
+        },
     };
+    decay_factor(age_days, half_life)
+}
+
+/// `exp(-ln2 * age_days / half_life_days)` for one age in days.
+fn decay_factor(age_days: f64, half_life: f64) -> f64 {
     (-std::f64::consts::LN_2 * age_days / half_life).exp()
 }
 
@@ -1058,7 +1089,8 @@ mod tests {
         let corpus = DecayBasis::new(
             today(),
             [Some(days_ago(10)), Some(days_ago(20)), Some(days_ago(30))],
-        );
+        )
+        .with_undated(UndatedDecay::Median);
         assert_eq!(corpus.undated_age_days, Some(20.0));
 
         let undated = with_date(doc(1, Status::Active), None);
@@ -1075,6 +1107,48 @@ mod tests {
         // The lower middle of an even count: [10, 30] takes 10.
         let even = DecayBasis::new(today(), [Some(days_ago(10)), Some(days_ago(30))]);
         assert_eq!(even.undated_age_days, Some(10.0));
+    }
+
+    #[test]
+    fn the_none_rule_gives_an_undated_document_no_age() {
+        // Same corpus and same half-life as the median case: the dated document
+        // still decays 0.5, and only the undated one changes, from 0.9259 to 1.
+        let corpus = DecayBasis::new(today(), [Some(days_ago(10)), Some(days_ago(20))])
+            .with_undated(UndatedDecay::None);
+        let undated = with_date(doc(1, Status::Active), None);
+        let scored = score(&ScoreInput {
+            decay_basis: corpus,
+            ..input(&undated, Intent::Current, false)
+        });
+        assert_eq!(scored.decay, 1.0);
+        assert_eq!(
+            score_doc(&with_date(doc(1, Status::Active), Some(days_ago(180)))).decay,
+            0.5
+        );
+    }
+
+    #[test]
+    fn the_reported_undated_rule_is_the_one_that_scored() {
+        let one_dated = [Some(days_ago(10))];
+        let none_dated: [Option<NaiveDate>; 1] = [None];
+
+        // `none` always has something to report, because it needs no median.
+        let none = DecayBasis::new(today(), none_dated).with_undated(UndatedDecay::None);
+        assert_eq!(none.undated_rule(), Some(UndatedDecay::None));
+
+        // `median` reports nothing on a corpus with no dated document: the age
+        // it would name does not exist, so the decay is 1.0 and unremarked.
+        let empty = DecayBasis::new(today(), none_dated).with_undated(UndatedDecay::Median);
+        assert_eq!(empty.undated_rule(), None);
+
+        let median = DecayBasis::new(today(), one_dated).with_undated(UndatedDecay::Median);
+        assert_eq!(median.undated_rule(), Some(UndatedDecay::Median));
+
+        // The default is the measured winner, so a basis built without a rule
+        // reports `none` and needs no median.
+        let default = DecayBasis::new(today(), one_dated);
+        assert_eq!(default.undated, UndatedDecay::None);
+        assert_eq!(default.undated_rule(), Some(UndatedDecay::None));
     }
 
     #[test]

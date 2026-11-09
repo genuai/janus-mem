@@ -401,8 +401,11 @@ impl Config {
             }
         }
 
+        let undated = resolve_undated(raw.decay.undated.as_deref(), &mut warnings);
+
         let decay = DecayConfig {
             half_life_days,
+            undated,
             timeless_types: raw
                 .decay
                 .timeless_types
@@ -544,11 +547,49 @@ pub struct Defaults {
     pub status: Status,
 }
 
+/// What decay an undated document receives (§6.3).
+///
+/// A document with no date has no age. `median` ages it by the corpus, `none`
+/// leaves it undecayed. The two rules exist so a corpus can be measured under
+/// both, and the chosen rule stays visible in `janus.toml` (R1-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UndatedDecay {
+    /// Age it by the median age of the dated documents.
+    Median,
+    /// Give it decay 1.0: a missing date is missing metadata, not age.
+    #[default]
+    None,
+}
+
+impl UndatedDecay {
+    /// Both rules, in the order the documentation lists them.
+    pub const ALL: [Self; 2] = [Self::Median, Self::None];
+
+    /// The config spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Median => "median",
+            Self::None => "none",
+        }
+    }
+
+    /// Parses the config spelling; `None` means the value is not one of them.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|rule| rule.as_str() == raw.trim())
+    }
+}
+
 /// Decay parameters (§6.6).
 #[derive(Debug, Clone)]
 pub struct DecayConfig {
     /// Global half-life in days; `0` disables decay for every type.
     pub half_life_days: f64,
+    /// Decay for a document whose date resolves to nothing (§6.3).
+    pub undated: UndatedDecay,
     /// Types exempt from decay regardless of their half-life.
     pub timeless_types: BTreeSet<String>,
     /// Per-type half-life overrides.
@@ -839,6 +880,12 @@ pub enum ConfigWarning {
         /// The configured value.
         value: String,
     },
+    /// `[decay] undated` was neither `median` nor `none`; the resolved config
+    /// uses `median`.
+    UnknownUndatedDecay {
+        /// The configured value.
+        value: String,
+    },
 }
 
 impl fmt::Display for ConfigWarning {
@@ -878,6 +925,10 @@ impl fmt::Display for ConfigWarning {
             Self::UnknownRefresh { value } => write!(
                 f,
                 "`index.refresh` is `{value}`; expected `auto` or `manual`, so `auto` is used"
+            ),
+            Self::UnknownUndatedDecay { value } => write!(
+                f,
+                "`decay.undated` is `{value}`; expected `median` or `none`, so `median` is used"
             ),
         }
     }
@@ -965,6 +1016,7 @@ struct RawDefaults {
 #[serde(default)]
 struct RawDecay {
     half_life_days: Option<f64>,
+    undated: Option<String>,
     timeless_types: Option<Vec<String>>,
     by_type: BTreeMap<String, f64>,
 }
@@ -1152,6 +1204,19 @@ fn validate_corpus_id(value: &str, warnings: &mut Vec<ConfigWarning>) {
 ///
 /// An unknown value is a typo, not a reason to refuse to start: warn once and
 /// keep the default, which refreshes.
+/// Resolves `[decay] undated`, warning on a value neither rule spells.
+fn resolve_undated(value: Option<&str>, warnings: &mut Vec<ConfigWarning>) -> UndatedDecay {
+    match value {
+        None => UndatedDecay::default(),
+        Some(raw) => UndatedDecay::parse(raw).unwrap_or_else(|| {
+            warnings.push(ConfigWarning::UnknownUndatedDecay {
+                value: raw.to_owned(),
+            });
+            UndatedDecay::default()
+        }),
+    }
+}
+
 fn resolve_refresh(value: Option<&str>, warnings: &mut Vec<ConfigWarning>) -> Refresh {
     match value {
         None | Some("auto") => Refresh::Auto,
@@ -1753,6 +1818,38 @@ mod tests {
             !config.resolve_type("decision").spec.timeless,
             "replacing the list must remove the default entries"
         );
+    }
+
+    #[test]
+    fn the_undated_rule_defaults_to_none_and_parses_median() {
+        // `none` is the measured winner (R1-2), so it is the default.
+        assert_eq!(parse("").decay.undated, UndatedDecay::None);
+        let config = parse("[decay]\nundated = \"median\"\n");
+        assert_eq!(config.decay.undated, UndatedDecay::Median);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn an_unknown_undated_rule_warns_and_keeps_the_default() {
+        let config = parse("[decay]\nundated = \"always\"\n");
+
+        assert_eq!(config.decay.undated, UndatedDecay::None);
+        assert_eq!(
+            config.warnings,
+            vec![ConfigWarning::UnknownUndatedDecay {
+                value: "always".to_owned()
+            }]
+        );
+    }
+
+    #[test]
+    fn the_undated_rule_spellings_round_trip() {
+        for rule in UndatedDecay::ALL {
+            assert_eq!(UndatedDecay::parse(rule.as_str()), Some(rule));
+        }
+        assert_eq!(UndatedDecay::parse(" median "), Some(UndatedDecay::Median));
+        assert_eq!(UndatedDecay::parse("median "), Some(UndatedDecay::Median));
+        assert_eq!(UndatedDecay::parse("None"), None);
     }
 
     #[test]
