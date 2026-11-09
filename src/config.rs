@@ -550,14 +550,14 @@ pub struct Defaults {
 /// What decay an undated document receives (§6.3).
 ///
 /// A document with no date has no age. `median` ages it by the corpus, `none`
-/// leaves it undecayed. The two rules exist so a corpus can be measured under
-/// both, and the chosen rule stays visible in `janus.toml` (R1-2).
+/// leaves it undecayed. Both stay available: the rule was measured on two
+/// corpora, and a corpus can re-measure it with one line (R1-2, R1-12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UndatedDecay {
     /// Age it by the median age of the dated documents.
+    #[default]
     Median,
     /// Give it decay 1.0: a missing date is missing metadata, not age.
-    #[default]
     None,
 }
 
@@ -1821,11 +1821,11 @@ mod tests {
     }
 
     #[test]
-    fn the_undated_rule_defaults_to_none_and_parses_median() {
-        // `none` is the measured winner (R1-2), so it is the default.
-        assert_eq!(parse("").decay.undated, UndatedDecay::None);
-        let config = parse("[decay]\nundated = \"median\"\n");
-        assert_eq!(config.decay.undated, UndatedDecay::Median);
+    fn the_undated_rule_defaults_to_median_and_parses_none() {
+        // `median` is the measured winner (R1-2), so it is the default.
+        assert_eq!(parse("").decay.undated, UndatedDecay::Median);
+        let config = parse("[decay]\nundated = \"none\"\n");
+        assert_eq!(config.decay.undated, UndatedDecay::None);
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
@@ -1833,7 +1833,7 @@ mod tests {
     fn an_unknown_undated_rule_warns_and_keeps_the_default() {
         let config = parse("[decay]\nundated = \"always\"\n");
 
-        assert_eq!(config.decay.undated, UndatedDecay::None);
+        assert_eq!(config.decay.undated, UndatedDecay::Median);
         assert_eq!(
             config.warnings,
             vec![ConfigWarning::UnknownUndatedDecay {
