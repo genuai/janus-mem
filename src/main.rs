@@ -17,7 +17,8 @@ use janus_mem::engine::Engine;
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
 use janus_mem::{
-    chunk, doctor, ids, index, lineage, mcp, moves, read, rpc, scan, search, status, suggest, vault,
+    chunk, doctor, ids, index, lineage, mcp, moves, read, rpc, scan, search, status, suggest,
+    vault, workspace,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -45,6 +46,23 @@ fn model_cache() -> PathBuf {
         None => std::env::temp_dir(),
     };
     base.join("fastembed")
+}
+
+/// The platform config directory for janus (§6.11): `$XDG_CONFIG_HOME/janus`,
+/// `%APPDATA%\janus`, else `~/.config/janus`. Read here, once.
+fn workspace_config_dir() -> PathBuf {
+    let env = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let base = env("XDG_CONFIG_HOME")
+        .or_else(|| env("APPDATA"))
+        .map_or_else(
+            || {
+                env("HOME")
+                    .map_or_else(std::env::temp_dir, PathBuf::from)
+                    .join(".config")
+            },
+            PathBuf::from,
+        );
+    base.join("janus")
 }
 
 /// Resolves config × feature × model availability once, at the edge (§3.2).
@@ -250,6 +268,23 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                 json,
                 status::render,
             )
+        }
+
+        // The first command that reads a workspace. Resolution happens here,
+        // at the edge, and arrives below as a value (§5.1 of SPEC, §6.11).
+        Command::Corpora {
+            workspace: explicit,
+            json,
+        } => {
+            let path = workspace::resolve(
+                explicit,
+                std::env::var_os("JANUS_WORKSPACE").map(PathBuf::from),
+                &workspace_config_dir(),
+            )?;
+            tracing::info!(workspace = %path.display(), "workspace resolved");
+
+            let resolved = workspace::Workspace::load(&path)?;
+            workspace::run(&resolved, workspace::Options { json })
         }
 
         // The rpc loop answers tool calls over stdin and stdout (§3.5). A

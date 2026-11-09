@@ -55,6 +55,21 @@ pub enum JanusError {
         source: toml::de::Error,
     },
 
+    /// The workspace file cannot be used: it is absent, unreadable, not valid
+    /// TOML, missing a required key, holding a duplicate `id`, or naming more
+    /// than one primary corpus (§6.11, §2.1 of the M6b plan). The message names
+    /// the file and the entry.
+    ///
+    /// Refused rather than patched: "primary" is what an unqualified query
+    /// means, so guessing which entry was meant would answer the wrong question.
+    #[error("invalid workspace {path}: {message}")]
+    WorkspaceInvalid {
+        /// The workspace file's full path.
+        path: PathBuf,
+        /// What is wrong, naming the entry when one is to blame.
+        message: String,
+    },
+
     /// The path could not be turned into an absolute path (missing, permission denied).
     /// Carries the path so the user knows *which* directory failed.
     #[error("cannot resolve vault directory {path}")]
@@ -241,7 +256,7 @@ impl JanusError {
 
             // Understood and rejected before doing anything: the caller can fix
             // the invocation, and a retry without the change is pointless.
-            Self::Usage { .. } => 2,
+            Self::Usage { .. } | Self::WorkspaceInvalid { .. } => 2,
         }
     }
 }

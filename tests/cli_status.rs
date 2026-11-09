@@ -209,7 +209,7 @@ fn case_9_4b_a_model_that_needs_the_feature_is_named_as_missing() {
 // ───────────────────────────── stdout discipline ───────────────────────────
 
 /// The modules allowed to write to stdout: each owns a command's renderer.
-const RENDERERS: [&str; 12] = [
+const RENDERERS: [&str; 13] = [
     "src/chunk/dump.rs",
     "src/doctor.rs",
     "src/ids.rs",
@@ -222,6 +222,7 @@ const RENDERERS: [&str; 12] = [
     "src/scan.rs",
     "src/search/mod.rs",
     "src/suggest.rs",
+    "src/workspace.rs",
 ];
 
 /// Every `.rs` file below `dir`, recursively.

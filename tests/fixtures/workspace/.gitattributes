@@ -1,0 +1,2 @@
+# Asserted bytes: never let git rewrite a fixture's line endings.
+* -text

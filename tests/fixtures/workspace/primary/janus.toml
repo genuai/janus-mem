@@ -1,0 +1,8 @@
+# Fixture corpus: the primary half of the workspace fixture.
+#
+# Two documents, both dated in the past, so no assertion depends on the day it
+# runs. The config is deliberately small: a workspace reads its own policy, and
+# this file must never carry one (§6.11).
+
+index_dir = ".janus"
+corpus_id = "main"

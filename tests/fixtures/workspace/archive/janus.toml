@@ -1,0 +1,7 @@
+# Fixture corpus: the archived half of the workspace fixture.
+#
+# A retired tree keeps its own config, because it describes how to read that
+# tree. Its role lives in the workspace file, not here (§6.11).
+
+index_dir = ".janus"
+corpus_id = "context"

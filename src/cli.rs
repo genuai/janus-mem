@@ -152,6 +152,18 @@ pub enum Command {
         json: bool,
     },
 
+    /// List the corpora a workspace names, with each index's freshness (§6.11)
+    Corpora {
+        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
+        /// config directory
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
+        /// Emit one JSON object on stdout instead of the table
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Answer tool calls as line-delimited JSON on stdin and stdout (§9.5)
     Rpc {
         /// Accepted now, and it changes no answer until writes exist (M6-7)
