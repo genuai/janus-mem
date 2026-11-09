@@ -274,8 +274,13 @@ one predicate serves both surfaces.
   "embeddings": { "available": true, "model": "hash-64", "degraded": null },
   "index": { "present": true, "stale": false, "docs": 24, "chunks": 210,
              "built_at": "…", "format_version": 6, "index_sha": "…" },
+  "metadata": { "dated": 0, "undated": 24, "share_undated": 1.0 },
   "cache": { "hits": 2, "misses": 1 } }
 ```
+
+The block above is the shape this milestone shipped. SPEC §9.2 is the current shape: it
+adds `metadata`, which reports the date side of metadata quality so an agent can tell a
+corpus that decays from one that does not.
 
 `embeddings.available` means **this process can embed a query now**, so it comes
 from `embed::resolve`. A `hash-<n>` model resolves without the `embeddings`

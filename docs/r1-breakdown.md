@@ -87,6 +87,15 @@ The `scan --json` report gains fields (additive, `api` stays 1):
               "by_source": { "frontmatter": 33, "filename": 6, "absent": 16 } }
 ```
 
+`metadata` is additive: `api` stays 1 and no existing field changes type. `by_source`
+lists every date source, at zero when it never fired, like `walk.per_reason` (R1-15);
+the excerpt above shows only the three that occurred. `janus_status` carries
+`metadata: { dated, undated, share_undated }` from the same definition, because a
+decay question must not need a second command (R1-14).
+
+**Typed** means the document's resolved type is not the configured default type. A
+document that falls back to `[defaults] type` is not typed for this measure (R1-13).
+
 Today `skipped` is a map of reason to a number with no unit. It keeps that type
 and those keys (R1-9): `v0.1.0` is published, and `api` is one constant for every
 report, so changing a published field would either break a consumer or relabel
@@ -160,11 +169,24 @@ field.
 
 ### 3.3 Metadata quality is visible (P3)
 
-**Case 3.1.** `scan --json` reports typed, dated, undated and the per-source counts, and
-the four numbers sum correctly: `dated + undated == docs.len()`.
+**Statement.** Authority needs a type and decay needs a date. A user can see, from two
+read commands, whether the corpus carries either. No command writes to the vault
+(R1-3).
 
-**Case 3.2.** `janus status` reports the same undated count and its share, so an agent
-can ask "is this corpus metadata-poor?" without a second command.
+**Typed** means the document's resolved type is not the configured default type. The
+same words appear in the field comment, in the guide and in the close-out, so a reader
+cannot tune a corpus against a second denominator (R1-13).
+
+**Case 3.1.** `scan --json` reports `typed`, `typed_non_default`, `dated`, `undated` and
+`by_source`, and the numbers reconcile: `dated + undated == docs.len()`, `by_source`
+sums to the same number, and `typed_non_default == typed`. `by_source` lists every
+source at zero when it never fired (R1-15).
+
+**Case 3.2.** `status --json` reports `metadata: { dated, undated, share_undated }` from
+the walk it already makes, so an agent can ask "is this corpus metadata-poor?" without a
+second command. It builds nothing and takes no lock. Its denominator is the documents
+that call resolved, not `index.docs`, because the manifest is null before the first
+build (R1-14).
 
 **Case 3.3.** The human `scan` table prints one line: `metadata: 28 typed, 39 dated, 16
 undated (29%)`.
@@ -202,6 +224,9 @@ a test parses the guide's example block as a config.
 | R1-10 | The repository corpus cannot separate the undated rules: all 16 admitted documents are undated, so `median` already decays them 1.0 | There is no dated document, so there is no median. On that corpus the rules tie. The decision therefore rests on the workspace corpus. Stated, so the next gate does not read an identical table as a broken measurement. |
 | R1-11 | `[decay] undated` stays after the phase, and its default is the measured winner, `median` | The key is what allowed the A/B measurement with one config line. Keeping it lets either corpus run the same table, and lets a corpus opt into `none` without a release. |
 | R1-12 | The workspace corpus is reported as counts only, in this log, and its documents are never copied here | The corpus is private. Three counts per setting answer the rule's question, and the per-question paths stay in the project that owns them. |
+| R1-13 | **Typed** means the document's resolved type is not the configured default type; `typed` and `typed_non_default` carry that one count under two names | The gate's 13.8% counted declared `type` keys. A path hint types a document too, and a fallback type adds no authority, so the report counts what authority reads. One definition, one test that pins the two fields equal, so no reader can tune a corpus against a second denominator. |
+| R1-14 | `status` resolves the files of the walk it already makes, and its undated share divides by the documents that call resolved | The metadata question needs the frontmatter, not a second walk, so `status` pays one read per document and still builds nothing and locks nothing. `index.docs` is null before the first build and describes an older corpus when stale, so it cannot be the denominator. The block carries the date side only: `scan` already reports both halves. |
+| R1-15 | `by_source` lists every date source, at zero when it never fired | A consumer must never have to distinguish "no folder dates" from "this build does not count them". The rule is the same one `walk.per_reason` and `skipped` already follow. |
 
 ## 5. Phases
 
@@ -239,8 +264,10 @@ as written, and every moved golden row shows one decay value.
 
 ### Phase 3 — Metadata quality and the config guide
 
-**Files.** `src/scan.rs`, `src/status.rs`, `src/api/dto.rs`, `docs/corpus-config.md`
-(new), `tests/cli_scan.rs`, `tests/cli_status.rs`, `tests/corpus_config_docs.rs` (new).
+**Files.** `src/metadata.rs` (new), `src/scan.rs`, `src/status.rs`, `src/document.rs`
+(`DateSource::ALL`), `src/api/dto.rs` if a DTO changes, `docs/corpus-config.md` (new),
+`docs/r1-breakdown.md`, `SPEC.md`, `tests/cli_scan.rs`, `tests/cli_status.rs`,
+`tests/fixture_scan.rs`, `tests/corpus_config_docs.rs` (new), and the scan golden.
 
 **Build.** The metadata block in `scan` and `status`; the guide, with its example parsed
 by a test.
@@ -293,7 +320,9 @@ seam; split before the ceiling.
    selected, and keep the reason beside it. The M4B line is a milestone record, so it
    keeps its place and gains one clause naming §6.3 as the rule that supersedes it: a
    reader must not trust a rule R1 replaced. (P2.)
-3. **§9.2 `janus_status`.** Add the metadata block: typed, dated, undated. (P3.)
+3. **§9.1 `janus scan` and §9.2 `janus_status`.** State the metadata block of both,
+the definition of `typed`, the two invariants that reconcile it, and the denominator of
+the status share. `status` reports the date side; `scan` reports both halves. (P3.)
 
 ## 10. Handoff
 
@@ -446,3 +475,93 @@ round-tripping through the config parser.
 
 **Not done here.** The `scan` metadata report (R1-3), which would have shown 16 undated
 documents before this phase had to measure them.
+
+### Phase 3 — Metadata quality and the config guide
+
+**Built.** `src/metadata.rs` holds the one counting routine. `Metadata::of` counts a
+resolved document set against a config: `typed`, `dated`, `undated`, and `by_source`
+with one row per `DateSource`, every row present at zero (R1-15). `scan --json` gains a
+`metadata` object with `typed`, `typed_non_default`, `dated`, `undated` and `by_source`;
+the human table gains one line. `status --json` gains
+`metadata: { dated, undated, share_undated }` from the walk it already makes (R1-14).
+`DateSource::ALL` gives both outputs one report order.
+
+**The one definition, in four places.** A document whose type falls back to
+`[defaults] type` is not typed. The words are identical in the field comment, in
+`Metadata`, in the guide and in this log. A unit test resolves the same two documents
+under two defaults: the count follows the default, not the presence of a `type` key
+(R1-13).
+
+**Measured, this repository.** `janus scan` on the tree this PR ships: 17 documents,
+`metadata: 17 typed, 0 dated, 17 undated (100%)`. `by_source` has `absent` 17 and the
+other nine rows 0. `janus status --json` reports
+`{"dated": 0, "undated": 17, "share_undated": 1.0}`. Every document takes its type from
+`[paths]` (`docs/`, `SPEC.md`, `AGENTS.md`, `README.md`), and no document declares or
+implies a date. **The corpus supports authority and cannot support decay at all**:
+`[decay] undated` and every half-life are inert on it. Phase 2 found that by hand
+(R1-10); one line prints it now. The count was 16 before this phase; the guide is the
+seventeenth document.
+
+**Measured, the fixture.** `metadata: 7 typed, 18 dated, 1 undated (5%)`. `by_source`:
+frontmatter 12, filename 6, absent 1, the other seven rows 0. The 4 decisions, 2
+path-typed specs and 1 `speculative` are typed; 12 notes take the default type and do
+not count. `19 = 18 + 1`, hand-derived from the fixture.
+
+**Measured, a three-document vault.** One frontmatter date, one name date, one undated,
+one declared `decision`: `metadata: 1 typed, 2 dated, 1 undated (33%)`. A two-document
+vault of the same shape reports `share_undated: 0.5` from `status`, and an empty one
+reports `0.0` rather than dividing by zero.
+
+**The guide.** `docs/corpus-config.md` states the four decisions with the number each
+one prevented: exclude synthetic and retired trees (a fixture decision at 1.50 made 9 of
+10 answers wrong), type frontmatter-less documents by path (1/10 to 5/10 here, 1/10 to
+6/10 on 2,320 documents), check that the authority order matches the corpus (finding
+1.10 over journal 1.00 put doctrine over the record in 2 of 10), and choose the undated
+rule (6 top-1 answers against 5). Its worked example is a complete config.
+`tests/corpus_config_docs.rs` reads the Markdown, extracts every fenced `toml` block and
+parses each one with `Config::from_toml`, then asserts the parsed values behind each
+rule: the two excludes, the four `[paths]` hints, `journal` above `finding`, and
+`undated = "median"` (cases 3.4 and 3.5).
+
+**Golden diff, field by field.** One snapshot moves,
+`tests/snapshots/golden_scan__scan.snap`: 18 lines added and none changed. The addition
+is the `metadata` block alone — `typed` 7, `typed_non_default` 7, `dated` 18, `undated`
+1, and ten `by_source` keys. No document row, no `walk` row, no `skipped` key and no
+other field moves. `search` and `chunk` goldens are untouched.
+
+**Tests.** `src/metadata.rs` covers the reconciliation, the default-type definition, the
+path hint, the empty corpus and the share. `tests/cli_scan.rs` covers the numbers from
+the CLI on a three-document vault and the human line (cases 3.1 and 3.3).
+`tests/fixture_scan.rs` covers the same sum on the committed fixture.
+`tests/cli_status.rs` covers the status block, the agreement with `scan`, and the fact
+that no index directory appears (case 3.2). `tests/corpus_config_docs.rs` covers the
+guide. No test reads the wall clock or sleeps.
+
+**SPEC.** §9.1 states the scan metadata block, the definition of `typed` and the two
+invariants. §9.2's `janus_status` example gains `metadata` and the denominator rule.
+`api` stays 1 and `format_version` stays 6.
+
+**Size.** logic 237 / 250, tests 350 / 350. Markdown is not budgeted.
+
+**Not done here.** A human `status` line; the block is JSON only. A repair command or a
+metadata fixer, because a report is the most this tool may do before M7. Any move of an
+authority default: the guide names the lever and does not move it.
+
+## 12. R1 close-out
+
+Six done-when rows from §7. Five are met. Row 1 is not, and the number is stated rather
+than rounded up.
+
+| # | Done when | Evidence | State |
+|---|---|---|---|
+| 1 | This repository answers at least 7 of 10 at top-1, up from 5/10 | Phase 2 log, corpus A: A 4, B 6, C 0 with both undated rules — 4 top-1 answers on the tree that phase measured | **Not met: 4 of 10.** R1 changed the corpus instrument and one scoring rule. The rule cannot separate from its fallback on this corpus (R1-10), so the score is the one the PR #87 config produced on an older tree; the plan and its log are now corpus documents, and that moves term statistics (§6). Semantic ranking is R2's, per §0.2. |
+| 2 | The workspace answers at least 5 of 10 at top-1 | Phase 2 log, corpus B: `median` A 6, B 1, C 3; `none` A 5, B 2, C 3. Counts only, per R1-12 | Met: 6 of 10 |
+| 3 | `scan` reconciles: `walk.files == admitted + file-skips`, pruned directories counted separately and named | Phase 1 log: 20 admitted + 7 skipped = 27 paths, 20 = 19 documents + 1 read skip, 1 pruned directory. Tests `tests/fixture_scan.rs::the_skip_report_reconciles_with_the_files_on_disk` and `src/scan.rs::the_table_line_and_the_json_totals_agree` | Met |
+| 4 | The undated rule is the one the pre-written rule selected, and the loser's numbers are in the log | Phase 2 log, both corpora's A/B/C tables; `tests/date_ladder.rs::case_2_1_the_none_rule_gives_an_undated_document_decay_one` and `::case_13_4_an_undated_document_decays_by_the_median_age` | Met: `median`, loser `none` A 5, B 2, C 3 |
+| 5 | `format_version` 6, `api` 1, no exit code moved | `src/index/mod.rs:49` `FORMAT_VERSION: u16 = 6`; `tests/cli_status.rs::case_9_2_a_built_index_reports_the_manifest_and_goes_stale`; `tests/cli_scan.rs::scan_json_is_a_versioned_report_with_one_entry_per_document` asserts `api` 1; `tests/cli_scan.rs::scan_rejects_an_unknown_flag_with_the_usage_exit_code` | Met |
+| 6 | `cargo doc` has zero warnings | `cargo doc --no-deps`, run on this branch | Met: zero warnings |
+
+Row 1 is the milestone's acceptance number and it is not reached. R1 still fixed what it
+set out to fix: the report reconciles, the undated rule is measured and named, and the
+metadata that authority and decay read is visible in two commands. What is left is
+ranking quality, and the plan gives that to R2.
