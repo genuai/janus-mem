@@ -23,6 +23,7 @@ use chrono::NaiveDate;
 use serde::Serialize;
 
 use crate::clock::Clock;
+use crate::config::UndatedDecay;
 use crate::config::{self, Config, TypeSpec};
 use crate::document::{DateSource, Status};
 use crate::error::JanusError;
@@ -304,7 +305,8 @@ pub(crate) fn rank(
     let rows = doc_rows(&prepared.snapshot, config);
     // The undated median is corpus-wide. Build it from the generation, before
     // `--types`, `--tags` or `--scope` narrows the rows (§3.13, M5-17).
-    let decay_basis = DecayBasis::new(clock.today(), rows.iter().map(DocRow::decay_anchor));
+    let decay_basis = DecayBasis::new(clock.today(), rows.iter().map(DocRow::decay_anchor))
+        .with_undated(config.decay.undated);
     let scopes = ScopeFilter::new(&options.scopes, options.scope_only);
     // One graph and one pair of maps per query, never per row: the gate must
     // not walk the successors again for every document (P3 scope 10).
@@ -424,7 +426,9 @@ pub(crate) fn rank(
             selection.no_validity
         ));
     }
-    if score::policy(scoring_intent, options.include_superseded).decay
+    let decay_on = score::policy(scoring_intent, options.include_superseded).decay;
+    if decay_on
+        && config.decay.undated == UndatedDecay::Median
         && decay_basis.undated_age_days.is_none()
     {
         notes.push("the corpus has no dated document; an undated document decays 1.0".to_owned());
@@ -450,11 +454,16 @@ pub(crate) fn rank(
         notes.push("--scope-only: global and shared-only matches excluded".to_owned());
     }
 
-    let median_decay = score::policy(scoring_intent, options.include_superseded).decay
-        && decay_basis.undated_age_days.is_some();
+    // The rule the answer ran under, and only when it moved an undated score:
+    // an intent with decay off reports nothing (§3.2 case 2.3).
+    let undated_rule = if decay_on {
+        decay_basis.undated_rule()
+    } else {
+        None
+    };
     // §3.5's provenance line. It lives in the answer, not in a renderer, so the
     // table and the JSON cannot disagree about the notes.
-    add_provenance(&rows, &selected, &hits, median_decay, &mut notes);
+    add_provenance(&rows, &selected, &hits, undated_rule, &mut notes);
 
     Ok(Ranked {
         rows,
@@ -1191,26 +1200,35 @@ pub(crate) fn render(report: &Report, json: bool) -> Result<(), JanusError> {
 /// The count is over the documents that were actually returned, after `--limit`
 /// and the status gates: the line states a fact about these results, not about
 /// the corpus. It never asks the user to edit a file. `search` and `facts` both
-/// call this, so neither can omit the line the other prints.
+/// call this, so neither can omit the line the other prints. `undated_rule` is
+/// the rule that ran, so the line names the decay the result actually got.
 fn add_provenance(
     rows: &[DocRow],
     selected: &[usize],
     hits: &[Hit],
-    median_decay: bool,
+    undated_rule: Option<UndatedDecay>,
     notes: &mut Vec<String>,
 ) {
+    let Some(rule) = undated_rule else {
+        return;
+    };
     let undated = hits
         .iter()
         .filter(|hit| rows[selected[hit.doc_index]].date_source == DateSource::None)
         .count();
-    if undated > 0 && median_decay {
-        notes.push(undated_note(undated));
+    if undated > 0 {
+        notes.push(undated_note(undated, rule));
     }
 }
 
-/// The `notes` line for `undated` returned results.
-fn undated_note(undated: usize) -> String {
-    format!("{undated} result(s) have no date; decay uses the corpus median")
+/// The `notes` line for `undated` returned results under `rule`.
+fn undated_note(undated: usize, rule: UndatedDecay) -> String {
+    match rule {
+        UndatedDecay::Median => {
+            format!("{undated} result(s) have no date; decay uses the corpus median")
+        }
+        UndatedDecay::None => format!("{undated} result(s) have no date; decay is 1.0"),
+    }
 }
 
 /// The `index` block of the JSON report: what the answer came from (M4D §3.1).
@@ -1550,14 +1568,18 @@ mod tests {
     }
 
     #[test]
-    fn the_undated_note_names_the_count() {
+    fn the_undated_note_names_the_count_and_the_rule() {
         assert_eq!(
-            undated_note(1),
+            undated_note(1, UndatedDecay::Median),
             "1 result(s) have no date; decay uses the corpus median"
         );
         assert_eq!(
-            undated_note(3),
+            undated_note(3, UndatedDecay::Median),
             "3 result(s) have no date; decay uses the corpus median"
+        );
+        assert_eq!(
+            undated_note(3, UndatedDecay::None),
+            "3 result(s) have no date; decay is 1.0"
         );
     }
 

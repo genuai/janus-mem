@@ -31,7 +31,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::clock::Clock;
-use crate::config::Config;
+use crate::config::{Config, UndatedDecay};
 use crate::document::Status;
 use crate::error::JanusError;
 use crate::graph::Graph;
@@ -149,7 +149,8 @@ pub(crate) fn compute(
     let graph = Graph::for_snapshot(&prepared.snapshot, config);
     let today = clock.today();
     // The undated median is corpus-wide and filter-independent (§3.13, M5-17).
-    let decay_basis = DecayBasis::new(today, rows.iter().map(super::DocRow::decay_anchor));
+    let decay_basis = DecayBasis::new(today, rows.iter().map(super::DocRow::decay_anchor))
+        .with_undated(config.decay.undated);
     // The trigger is corpus-wide and is about types only: a vault whose one
     // `decision` is still a draft does declare a fact type, so it keeps the
     // fact list (and an empty result) rather than a fallback list.
@@ -200,11 +201,18 @@ pub(crate) fn compute(
     if options.query.is_none() && !fallback {
         notes.push("no --query: ordered by type authority, not by relevance".to_owned());
     }
-    if order == Order::Newest && decay_basis.undated_age_days.is_none() {
+    if order == Order::Newest
+        && config.decay.undated == UndatedDecay::Median
+        && decay_basis.undated_age_days.is_none()
+    {
         notes.push("the corpus has no dated document; an undated document decays 1.0".to_owned());
     }
-    let median_decay = order == Order::Newest && decay_basis.undated_age_days.is_some();
-    super::add_provenance(&rows, &selected, &hits, median_decay, &mut notes);
+    let undated_rule = if order == Order::Newest {
+        decay_basis.undated_rule()
+    } else {
+        None
+    };
+    super::add_provenance(&rows, &selected, &hits, undated_rule, &mut notes);
 
     Ok(Report::new(&super::Answer {
         root,

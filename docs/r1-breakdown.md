@@ -129,6 +129,13 @@ Choose `none` when it gives at least as many top-1 answers on both corpora and l
 top-three answer on either. Otherwise keep `median`. Ties go to `none`, because it
 invents no date.
 
+**Amendment (R1-10), recorded after the measurement.** The repository corpus holds 16
+admitted documents, and all 16 have `date_source: absent`. With no dated document there
+is no median, so `median` already gave every one of them decay 1.0. The two settings
+therefore return the same ten answers with the same scores: this corpus cannot separate
+them. The rule above is unchanged. Its second corpus is the private workspace, and that
+measurement runs in its own project. The tie clause decides what this phase ships.
+
 **Statement.** A document with no date is not degraded for having no date. The answer
 says how many results were undated and what rule applied.
 
@@ -189,6 +196,8 @@ a test parses the guide's example block as a config.
 | R1-7 | The pruned-directory count is derived from the per-entry skip list, not stored beside it | Two copies of one number drift apart; one source makes a total and its rows agree by construction. |
 | R1-8 | A `.gitignore`d tree stays outside the accounting; only its markdown files are counted | The walk never yields those paths, and R1-1 changes no walk rule. Named, so the next gate does not read the gap as a counting bug. |
 | R1-9 | `skipped` keeps its published map type; the unit and the pruned counts live under `walk` | `v0.1.0` is published and `api` is one constant for every report. Changing the type of a published field would either break a consumer or relabel tools that did not change. |
+| R1-10 | The repository corpus cannot separate the undated rules: all 16 admitted documents are undated, so `median` already decays them 1.0 | There is no dated document, so there is no median. §3.2's tie clause then selects `none`. The workspace half of the condition stays owed to that project. Stated, so the next gate does not read an identical table as a broken measurement. |
+| R1-11 | `[decay] undated` stays after the phase, and its default is the measured winner | The key is what allowed the A/B measurement with one config line. Keeping it lets the workspace run the same table, and lets a corpus opt back into `median` without a release. |
 
 ## 5. Phases
 
@@ -329,3 +338,88 @@ SPEC §9.1 now states the unit, the two rules, the prune rule, and the shape.
 **Not done here.** A gitignored directory still produces no skip entry; R1-8
 names the limit rather than changing a walk rule. The dogfood re-run follows the
 merge (§6), after the local binary is rebuilt from the merged commit.
+
+### Phase 2 — The undated rule
+
+**Built.** `[decay] undated` takes `none` or `median`, and any other value warns and
+keeps the default. `none` gives an undated document decay 1.0. `median` keeps the old
+rule and is the only setting that builds a corpus median. The scorer reads the rule from
+`DecayBasis`, so a query builds one basis and every chunk reads it. The note names the
+rule that ran: `N result(s) have no date; decay is 1.0`, or `… decay uses the corpus
+median`. It prints once, only when a returned result is undated. It never prints on a
+`history` or `--as-of` query, and it never prints `median` when the corpus has no dated
+document to take a median from; the older `the corpus has no dated document` note covers
+that case. The shipped `janus.toml` documents the key beside the other decay keys (R1-11).
+
+**Measured.** Release binary built from commit `a33a97f` of this branch, run as
+`./target/release/janus`, index rebuilt before each run, one config line changed between
+them. Corpus: 16 documents admitted, 0 skipped for content, all type `spec`, all
+`date_source: absent` (`janus scan --json`). Per question:
+`janus search "<question>" --limit 3 --no-embeddings --json`.
+
+`undated = "median"` — A 4, B 6, C 0:
+
+| # | grade | returned paths, in order |
+|---|---|---|
+| 1 | A | `docs/m5-breakdown.md`, `SPEC.md`, `docs/m3-breakdown.md` |
+| 2 | B | `docs/m4b-breakdown.md`, `SPEC.md`, `docs/m5-breakdown.md` |
+| 3 | A | `docs/m6-breakdown.md`, `docs/m4-breakdown.md`, `docs/m3-breakdown.md` |
+| 4 | A | `AGENTS.md`, `docs/m4-breakdown.md`, `docs/m4b-breakdown.md` |
+| 5 | B | `AGENTS.md`, `docs/m6-breakdown.md`, `SPEC.md` |
+| 6 | B | `docs/m4d-breakdown.md`, `docs/m1-breakdown.md`, `docs/r1-breakdown.md` |
+| 7 | B | `SPEC.md`, `docs/m5-breakdown.md`, `docs/m1-breakdown.md` |
+| 8 | B | `docs/m4c-breakdown.md`, `SPEC.md`, `AGENTS.md` |
+| 9 | A | `docs/m5-breakdown.md`, `docs/m4b-breakdown.md`, `SPEC.md` |
+| 10 | B | `README.md`, `SPEC.md`, `docs/m6-breakdown.md` |
+
+`undated = "none"` — A 4, B 6, C 0:
+
+| # | grade | returned paths, in order |
+|---|---|---|
+| 1 | A | `docs/m5-breakdown.md`, `SPEC.md`, `docs/m3-breakdown.md` |
+| 2 | B | `docs/m4b-breakdown.md`, `SPEC.md`, `docs/m5-breakdown.md` |
+| 3 | A | `docs/m6-breakdown.md`, `docs/m4-breakdown.md`, `docs/m3-breakdown.md` |
+| 4 | A | `AGENTS.md`, `docs/m4-breakdown.md`, `docs/m4b-breakdown.md` |
+| 5 | B | `AGENTS.md`, `docs/m6-breakdown.md`, `SPEC.md` |
+| 6 | B | `docs/m4d-breakdown.md`, `docs/m1-breakdown.md`, `docs/r1-breakdown.md` |
+| 7 | B | `SPEC.md`, `docs/m5-breakdown.md`, `docs/m1-breakdown.md` |
+| 8 | B | `docs/m4c-breakdown.md`, `SPEC.md`, `AGENTS.md` |
+| 9 | A | `docs/m5-breakdown.md`, `docs/m4b-breakdown.md`, `SPEC.md` |
+| 10 | B | `README.md`, `SPEC.md`, `docs/m6-breakdown.md` |
+
+The two runs differ in no path and in no score field. Every `decay` in both is 1.0. The
+only difference is one `notes` line. The cause is measured, not assumed: the corpus has
+no dated document, so the median basis is empty and `median` falls back to 1.0 as it
+always did.
+
+**The rule, applied.** The condition is "at least as many top-1 answers on both corpora
+and no top-three loss on either". On this corpus `none` loses no top-three answer and
+ties on top-1, so the condition holds for the measurable half. The workspace half is not
+measured here. The measurable half ties, so the tie clause applies: set `none`, because
+it invents no date. Winner: `none`. Loser: `median`, with A 4, B 6, C 0 — the same
+numbers. The loser is not worse on this evidence; it is not better either, and it
+invents an age for a document that has none.
+
+**Default.** `none`. `median` stays one line away. No third rule was considered.
+
+**SPEC.** One rule now stands at §6.3 (line 252), in the §7 formula and `age_days`
+bullet (lines 674 and 686), and at the M4B done-when (§11, line 1326), which keeps its
+place and gains one clause naming §6.3 as the rule that supersedes it. §16.1's config
+example documents the key. The §7 "hard requirement" now asks the scorer's tests to
+cover both rules.
+
+**Goldens.** None moved. `golden_search` runs `--intent history` and every other golden
+queries the fixture vault, where the undated document already received a median because
+the fixture is dated. The score fields in the snapshots are unchanged.
+
+**Tests.** Both rules are tested end to end from `janus.toml`: decay 1.0 under `none`,
+`exp(-ln2·20/180)` under `median`, the note text for each, no note on a dated-only
+answer, no note under `history` or `--as-of`, and both spellings round-tripping through
+the config parser. The pre-R1 median cases now state `undated = "median"`, because the
+default moved under them.
+
+**Size.** logic 186 / 250, tests 219 / 400.
+
+**Not done here.** The workspace measurement of §3.2's second corpus, which belongs to
+that project. The `scan` metadata report (R1-3), which would have shown 16 undated
+documents before this phase had to measure them.
