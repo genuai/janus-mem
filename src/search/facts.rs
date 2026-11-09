@@ -41,9 +41,9 @@ use crate::score::{self, DecayBasis, Intent, ScopeFilter, ScoreDoc, ScoreInput, 
 // One loader, one filter, one renderer: only the predicate and the order differ.
 use super::{Filter, Gate, Hit, Report, prepare, query_scores, require_scope, select};
 
-/// How the included documents are ranked.
+/// How the included documents are ranked (M6b §3.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Order {
+pub(crate) enum Order {
     /// Type authority first: the §3.6 order for a real fact list.
     Authority,
     /// `current`'s order: by the §3.1 total order, so newest first at zero score.
@@ -108,7 +108,7 @@ pub fn run(
         options.no_rebuild,
         options.progress,
     )?;
-    let report = compute(
+    let listing = compute(
         root,
         config,
         clock,
@@ -117,7 +117,17 @@ pub fn run(
         options,
         started,
     )?;
-    super::render(&report, options.json)
+    super::render(&listing.report, options.json)
+}
+
+/// One answer and the order it was built in, so a caller that merges several
+/// corpora can merge by the same key (M6b §3.2).
+pub(crate) struct Listing {
+    /// The report both renderers read.
+    pub(crate) report: Report,
+    /// The order the rows were merged in. An authority-ordered list is never
+    /// reordered by a weight, so the caller must keep this value.
+    pub(crate) order: Order,
 }
 
 /// Answers `janus facts` without printing it (M6 §2.4).
@@ -133,7 +143,7 @@ pub(crate) fn compute(
     prepared: &super::Prepared,
     options: &Options,
     started: Instant,
-) -> Result<Report, JanusError> {
+) -> Result<Listing, JanusError> {
     require_scope(options.scope_only, &options.scopes)?;
     let load_embedder = embedder;
     let mut degraded = super::degraded_reasons(
@@ -214,24 +224,27 @@ pub(crate) fn compute(
     };
     super::add_provenance(&rows, &selected, &hits, undated_rule, &mut notes);
 
-    Ok(Report::new(&super::Answer {
-        root,
-        config,
-        snapshot: &prepared.snapshot,
-        rows: &rows,
-        selected: &selected,
-        hits: &hits,
-        started,
-        query: options.query.as_deref(),
-        intent: None,
-        as_of: None,
-        filter: &filter,
-        limit: options.limit,
-        alpha: 0.0,
-        degraded: &degraded,
-        notes: &notes,
-        stale: prepared.stale,
-    }))
+    Ok(Listing {
+        report: Report::new(&super::Answer {
+            root,
+            config,
+            snapshot: &prepared.snapshot,
+            rows: &rows,
+            selected: &selected,
+            hits: &hits,
+            started,
+            query: options.query.as_deref(),
+            intent: None,
+            as_of: None,
+            filter: &filter,
+            limit: options.limit,
+            alpha: 0.0,
+            degraded: &degraded,
+            notes: &notes,
+            stale: prepared.stale,
+        }),
+        order,
+    })
 }
 
 /// Picks each document's representative chunk and orders documents.

@@ -1282,6 +1282,13 @@ caller that needs one asks `janus_status`. `content_hash` is the etag field name
 `expected_hash` asks for that same value under the name a write request needs,
 and there is no second name for it.
 
+**Corpus.** Every result row carries `corpus` when a workspace is in play, and
+the report lists the corpora it read in `corpora`. `scores.corpus` is the factor
+the row's corpus applied to `final`: `1.0` for a primary corpus, and the
+workspace's `archived_weight` for an archived one the query included. A factor
+of `1.0` is not printed, so a single-corpus report is byte-identical to the one
+before federation existed.
+
 ---
 
 ## 10. Testing and quality

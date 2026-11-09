@@ -16,6 +16,7 @@ use janus_mem::config::{self, Config};
 use janus_mem::engine::Engine;
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
+use janus_mem::search::federate;
 use janus_mem::{
     chunk, doctor, ids, index, lineage, mcp, moves, read, rpc, scan, search, status, suggest,
     vault, workspace,
@@ -414,46 +415,65 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             decay_half_life,
             include_superseded,
             as_of,
+            corpus,
+            workspace: explicit,
             no_rebuild,
             no_embeddings,
             progress,
             json,
         } => {
-            let root = vault::resolve_corpus(cli.vault)?;
-            tracing::info!(vault = %root.display(), "corpus resolved");
-
             // Parsed and expanded at the edge, so the answer already holds the
             // first day of a short form and the echo cannot disagree (§3.8).
             let as_of = as_of.as_deref().map(search::parse_as_of).transpose()?;
-            let config = Config::load(&root)?;
             let progress = progress_enabled(progress);
-            // A read passes the embedder so a rebuild it triggers still produces
-            // the generation this process would build (V-21 row 5); whether it
-            // asks for the rows is `search`'s decision from α.
-            let (embedder, embedding_reason) = read_embedder(&config, no_embeddings);
-            search::run(
-                &root,
-                &config,
-                &SystemClock,
-                embedder.as_deref(),
-                search::Options {
-                    query,
-                    intent,
-                    scopes: scope,
-                    scope_only,
-                    limit,
-                    types,
-                    tags,
-                    decay_half_life,
-                    include_superseded,
-                    as_of,
-                    no_rebuild,
-                    no_embeddings,
-                    embedding_reason,
-                    progress,
-                    json,
-                },
-            )
+            let options = |embedding_reason: Option<String>| search::Options {
+                query: query.clone(),
+                intent: intent.clone(),
+                scopes: scope.clone(),
+                scope_only,
+                limit,
+                types: types.clone(),
+                tags: tags.clone(),
+                decay_half_life,
+                include_superseded,
+                as_of,
+                no_rebuild,
+                no_embeddings,
+                embedding_reason,
+                progress,
+                json,
+            };
+            match query_workspace(explicit, cli.vault.is_some())? {
+                Some(found) => {
+                    let scoped = Scope::of(
+                        &found,
+                        &federate::Choice::parse(corpus.as_deref()),
+                        no_embeddings,
+                    )?;
+                    let targets = scoped.targets();
+                    let notes = scoped.notes.clone();
+                    federate::run_search(&targets, &SystemClock, options(None), notes)
+                }
+                None => {
+                    federate::Choice::parse(corpus.as_deref()).require_single()?;
+                    let root = vault::resolve_corpus(cli.vault)?;
+                    tracing::info!(vault = %root.display(), "corpus resolved");
+
+                    let config = Config::load(&root)?;
+                    // A read passes the embedder so a rebuild it triggers still
+                    // produces the generation this process would build (V-21
+                    // row 5); whether it asks for the rows is `search`'s
+                    // decision from α.
+                    let (embedder, embedding_reason) = read_embedder(&config, no_embeddings);
+                    search::run(
+                        &root,
+                        &config,
+                        &SystemClock,
+                        embedder.as_deref(),
+                        options(embedding_reason),
+                    )
+                }
+            }
         }
 
         Command::Facts {
@@ -463,36 +483,54 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             scope,
             scope_only,
             limit,
+            corpus,
+            workspace: explicit,
             no_rebuild,
             no_embeddings,
             progress,
             json,
         } => {
-            let root = vault::resolve_corpus(cli.vault)?;
-            tracing::info!(vault = %root.display(), "corpus resolved");
-
-            let config = Config::load(&root)?;
             let progress = progress_enabled(progress);
-            let (embedder, embedding_reason) = read_embedder(&config, no_embeddings);
-            search::facts::run(
-                &root,
-                &config,
-                &SystemClock,
-                embedder.as_deref(),
-                &search::facts::Options {
-                    query,
-                    tags,
-                    types,
-                    scopes: scope,
-                    scope_only,
-                    limit,
-                    no_rebuild,
-                    no_embeddings,
-                    embedding_reason,
-                    progress,
-                    json,
-                },
-            )
+            let options = |embedding_reason: Option<String>| search::facts::Options {
+                query: query.clone(),
+                tags: tags.clone(),
+                types: types.clone(),
+                scopes: scope.clone(),
+                scope_only,
+                limit,
+                no_rebuild,
+                no_embeddings,
+                embedding_reason,
+                progress,
+                json,
+            };
+            match query_workspace(explicit, cli.vault.is_some())? {
+                Some(found) => {
+                    let scoped = Scope::of(
+                        &found,
+                        &federate::Choice::parse(corpus.as_deref()),
+                        no_embeddings,
+                    )?;
+                    let targets = scoped.targets();
+                    let notes = scoped.notes.clone();
+                    federate::run_facts(&targets, &SystemClock, &options(None), notes)
+                }
+                None => {
+                    federate::Choice::parse(corpus.as_deref()).require_single()?;
+                    let root = vault::resolve_corpus(cli.vault)?;
+                    tracing::info!(vault = %root.display(), "corpus resolved");
+
+                    let config = Config::load(&root)?;
+                    let (embedder, embedding_reason) = read_embedder(&config, no_embeddings);
+                    search::facts::run(
+                        &root,
+                        &config,
+                        &SystemClock,
+                        embedder.as_deref(),
+                        &options(embedding_reason),
+                    )
+                }
+            }
         }
     };
     result.map(|()| ExitCode::SUCCESS)
@@ -522,6 +560,101 @@ fn call_tool(
     // A closed pipe is not a failure (`janus read | head`).
     let _ = render(&answer, &mut std::io::stdout().lock());
     Ok(())
+}
+
+/// The workspace a query reads, when one names it (§6.11).
+///
+/// `--workspace`, then `JANUS_WORKSPACE`, then the platform file. A corpus root
+/// named by `--vault` or `JANUS_VAULT` is a more specific subject than the
+/// platform file, so it selects single-corpus mode; naming a root and a
+/// workspace together is a usage error, because one query cannot read both.
+fn query_workspace(
+    explicit: Option<PathBuf>,
+    root_named: bool,
+) -> Result<Option<workspace::Workspace>, JanusError> {
+    let env = std::env::var_os("JANUS_WORKSPACE").map(PathBuf::from);
+    if root_named {
+        if explicit.is_some() || env.is_some() {
+            return Err(JanusError::Usage {
+                message: "a corpus root (--vault) and a workspace (--workspace) cannot both \
+                          name this query; pass one"
+                    .to_owned(),
+            });
+        }
+        return Ok(None);
+    }
+    match workspace::resolve(explicit, env, &workspace_config_dir()) {
+        Ok(path) => Ok(Some(workspace::Workspace::load(&path)?)),
+        // A query that names no workspace reads one corpus, as it always has.
+        Err(JanusError::Usage { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// One corpus a federated query reads, as the edge resolved it.
+struct ScopedCorpus {
+    corpus: workspace::Corpus,
+    config: Config,
+    embedder: Option<Box<dyn Embedder>>,
+    reason: Option<String>,
+    factor: f64,
+}
+
+/// The corpora one query reads, with one config and one embedder each (§6.11).
+struct Scope {
+    corpora: Vec<ScopedCorpus>,
+    /// The plan's one note about the corpora this selection did not read.
+    notes: Vec<String>,
+}
+
+impl Scope {
+    /// Resolves a selection into the corpora a query reads.
+    ///
+    /// The workspace owns each corpus's index location (M6b-11), and each
+    /// corpus resolves its own embedder, because that is a corpus setting.
+    fn of(
+        found: &workspace::Workspace,
+        choice: &federate::Choice,
+        no_embeddings: bool,
+    ) -> Result<Self, JanusError> {
+        for warning in &found.warnings {
+            eprintln!("warning: {warning}");
+        }
+        let plan = federate::plan(found, choice)?;
+        let note = plan.excluded_note();
+        let mut corpora = Vec::with_capacity(plan.corpora.len());
+        for (corpus, factor) in plan.corpora {
+            let mut config = Config::load(&corpus.root)?;
+            config.index_dir = corpus.index_dir.clone();
+            let (embedder, reason) = read_embedder(&config, no_embeddings);
+            corpora.push(ScopedCorpus {
+                corpus: corpus.clone(),
+                config,
+                embedder,
+                reason,
+                factor,
+            });
+        }
+        Ok(Self {
+            corpora,
+            notes: note.into_iter().collect(),
+        })
+    }
+
+    /// The corpora as the query reads them.
+    fn targets(&self) -> Vec<federate::Target<'_>> {
+        self.corpora
+            .iter()
+            .map(|scoped| federate::Target {
+                id: &scoped.corpus.id,
+                root: &scoped.corpus.root,
+                config: &scoped.config,
+                embedder: scoped.embedder.as_deref(),
+                embedding_reason: scoped.reason.as_deref(),
+                factor: scoped.factor,
+            })
+            .collect()
+    }
 }
 
 /// Writes one object to stdout as pretty JSON. A closed pipe is not a command

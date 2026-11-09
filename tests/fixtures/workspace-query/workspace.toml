@@ -1,0 +1,25 @@
+# Fixture workspace for the federated query (M6b §3.2).
+#
+# Two corpora, one primary and one archived, and one policy key. The archived
+# entry comes first on purpose: a query reads them in the workspace's order, so a
+# reader can see the primary lead whatever the file order is (§2.2).
+#
+# The weight is spelled out here, and a test rewrites it to 1.0 to prove that
+# `archived_weight` multiplies `final` and changes nothing else.
+#
+# Roots are relative, and resolve against this file's directory (M6b-8), so the
+# test copies the whole tree to a temporary directory.
+
+[[corpora]]
+id = "context"
+root = "archive"
+role = "archived"
+
+[[corpora]]
+id = "main"
+root = "primary"
+role = "primary"
+
+[search]
+archived_weight = 0.8
+allow_cross_corpus_links = false

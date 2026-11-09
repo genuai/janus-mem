@@ -250,6 +250,11 @@ fn schema(tool: Tool) -> Value {
                     "type": "number",
                     "description": "Override the per-type decay half-life, in days. \
                                     Default: the corpus setting."
+                },
+                "corpus": {
+                    "type": "string",
+                    "description": "Corpora to read: primary, all, or a workspace corpus id. \
+                                    Default primary."
                 }
             },
             "required": ["query"],
@@ -297,6 +302,11 @@ fn schema(tool: Tool) -> Value {
                 "limit": {
                     "type": "integer",
                     "description": "Maximum facts returned. Default 10."
+                },
+                "corpus": {
+                    "type": "string",
+                    "description": "Corpora to read: primary, all, or a workspace corpus id. \
+                                    Default primary."
                 }
             },
             "required": [],

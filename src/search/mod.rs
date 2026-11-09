@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod facts;
+pub mod federate;
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::time::Instant;
@@ -1247,6 +1248,11 @@ struct IndexDto {
 pub(crate) struct Report {
     vault: String,
     corpus_id: String,
+    /// The workspace ids this answer read, in selection order (M6b §3.2).
+    /// Absent when no workspace is in play, so a single-corpus report is
+    /// byte-identical to the one before federation existed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    corpora: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     query: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1269,6 +1275,7 @@ impl Report {
         Self {
             vault: answer.root.display().to_string(),
             corpus_id: answer.config.corpus_id.clone(),
+            corpora: Vec::new(),
             query: answer.query.map(str::to_owned),
             intent: answer.intent.map(intent_name),
             as_of: answer.as_of.map(|date| date.to_string()),
@@ -1300,6 +1307,10 @@ struct HitDto {
     path: String,
     rel_path: String,
     title: String,
+    /// The workspace's name for the corpus this row came from (M6b §3.2).
+    /// Absent outside a workspace, so no single-corpus row moves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    corpus: Option<String>,
     #[serde(rename = "type")]
     type_name: String,
     status: &'static str,
@@ -1336,6 +1347,7 @@ impl HitDto {
             path: answer.root.join(&row.rel_path).display().to_string(),
             rel_path: row.rel_path.clone(),
             title: row.title.clone(),
+            corpus: None,
             type_name: row.type_name.clone(),
             status: row.status.as_str(),
             date: row.date.map(|date| date.to_string()),
@@ -1377,7 +1389,11 @@ fn intent_name(intent: Intent) -> &'static str {
 // ── human ───────────────────────────────────────────────────────────────────
 
 fn write_human(out: &mut impl io::Write, r: &Report) {
-    let _ = writeln!(out, "corpus:  {}", r.vault);
+    if r.corpora.is_empty() {
+        let _ = writeln!(out, "corpus:  {}", r.vault);
+    } else {
+        let _ = writeln!(out, "corpora: {}", r.corpora.join(", "));
+    }
     match (&r.query, r.intent, &r.as_of) {
         (Some(query), Some(intent), Some(as_of)) => {
             let _ = writeln!(
@@ -1412,47 +1428,64 @@ fn write_human(out: &mut impl io::Write, r: &Report) {
     if r.results.is_empty() {
         let _ = writeln!(out, "no results");
     } else {
-        let mut rows: Vec<[String; 5]> = vec![[
+        // The corpus factor is a column only when a row has one that is not
+        // neutral: a single-corpus table and a primary-only table never show a
+        // factor of 1.0 (M6b §2.4).
+        let weighted = r.results.iter().any(|hit| hit.scores.corpus != 1.0);
+        let mut rows: Vec<Vec<String>> = vec![vec![
             "score".to_owned(),
             "authority".to_owned(),
+            "corpus".to_owned(),
             "status".to_owned(),
             "date".to_owned(),
             "path".to_owned(),
         ]];
+        if !weighted {
+            for row in &mut rows {
+                row.remove(2);
+            }
+        }
         for hit in &r.results {
             let crumb = hit.breadcrumb.join(" > ");
-            rows.push([
+            // A workspace row names its corpus in the qualified-path form a
+            // cross-corpus link already uses (§3.2, M6b-6).
+            let rel_path = match &hit.corpus {
+                Some(id) => format!("{id}:{}", hit.rel_path),
+                None => hit.rel_path.clone(),
+            };
+            let mut row = vec![
                 format!("{:.4}", hit.scores.final_score),
                 format!("{:.2}", hit.scores.authority),
+                format!("{:.2}", hit.scores.corpus),
                 hit.status.to_owned(),
                 hit.date.clone().unwrap_or_else(|| "-".to_owned()),
                 if crumb.is_empty() {
-                    hit.rel_path.clone()
+                    rel_path
                 } else {
-                    format!("{}  {crumb}", hit.rel_path)
+                    format!("{rel_path}  {crumb}")
                 },
-            ]);
+            ];
+            if !weighted {
+                row.remove(2);
+            }
+            rows.push(row);
         }
-        let mut widths = [0_usize; 4];
+        let mut widths: Vec<usize> = vec![0; rows.first().map_or(0, Vec::len)];
         for row in &rows {
             for (width, cell) in widths.iter_mut().zip(row) {
                 *width = (*width).max(cell.chars().count());
             }
         }
         for row in &rows {
-            let _ = writeln!(
-                out,
-                "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}",
-                row[0],
-                row[1],
-                row[2],
-                row[3],
-                row[4],
-                w0 = widths[0],
-                w1 = widths[1],
-                w2 = widths[2],
-                w3 = widths[3],
-            );
+            let mut line = String::new();
+            for (index, cell) in row.iter().enumerate() {
+                if index > 0 {
+                    line.push_str("  ");
+                }
+                let width = widths[index];
+                line.push_str(&format!("{cell:<width$}"));
+            }
+            let _ = writeln!(out, "{}", line.trim_end());
         }
     }
 

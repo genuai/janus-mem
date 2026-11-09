@@ -1,0 +1,17 @@
+# Fixture corpus: the primary half of the federated-query fixture.
+#
+# `title_boost = 0.0` and no embedder make `relevance` the lexical value alone,
+# so a test can state the arithmetic of `final` without hidden factors.
+#
+# The decision is the lower-authority row of the pair the facts case compares:
+# 1.20 here against 1.50 for the archived principle.
+
+index_dir = ".janus"
+corpus_id = "main"
+
+[authority]
+decision = 1.20
+note = 0.90
+
+[scoring]
+title_boost = 0.0

@@ -271,6 +271,13 @@ are not committed, because they describe personal material.
 | M6b-9 | An `id` that breaks the pattern is an error, not a warning | `--corpus <id>` must be able to name every corpus. A name the command line cannot pass is a corpus no query can select. |
 | M6b-10 | A value of the wrong type is an error naming the entry; an unknown key is a warning | A key a newer janus writes is forward compatibility. A value that cannot be read is not. |
 | M6b-11 | A workspace's `index_dir` is the index location for a corpus in that workspace | §6.11 gives the workspace that key. The corpus config's own value applies in single-corpus mode, where no workspace exists. |
+| M6b-12 | A read surface that holds one corpus refuses `all` and a named id | One `Engine` holds one corpus and one load cache. Answering a corpora question from the primary would answer a different question than the one asked; the multi-corpus engine arrives with the other read surfaces (§2.3). |
+| M6b-13 | `primary` and `all` are reserved words in `--corpus` | §2.3 defines both. The workspace parser does not reserve them, so a corpus declared with either name cannot be selected by name, and the resolver reads the keyword first. |
+| M6b-14 | A named corpus root wins over the platform workspace file, and naming both a root and a workspace is a usage error | A root is a specific subject and the platform file is a default. One query cannot read a root and a corpora list at once, so the contradiction is refused instead of resolved silently. |
+| M6b-15 | At an equal order value the merge keeps corpus order, then the corpus's own order | §3.2 says the merge cannot reorder two documents one corpus already ordered. `facts` orders a fact list by authority, date, chunk id and id before the path, so re-sorting ties by path would reorder a same-corpus pair. The merge is a stable sort over per-corpus ranked lists, and case 2.4 proves it against the full union. |
+| M6b-16 | A neutral `scores.corpus` of `1.0` is omitted from JSON, and the human table shows the column only when a row carries a weight | §2.4 asks for the field and for it to appear only when it is not neutral. Omitting the neutral value is what keeps every existing golden byte-identical. |
+| M6b-17 | A merged `facts` list uses the authority order whenever any selected corpus listed facts | Authority is why the command exists (§7.1). A corpus with no fact type falls back for itself; its rows still merge by their own authority value. |
+| M6b-18 | A merged report takes its head fields from the first selected corpus and lists every selected id in `corpora`; a human row prints its corpus as `id:rel_path` | The query, the intent and the date are the same in every part. `alpha` is each corpus's own setting, so the head reports the first and every row keeps the score its own corpus gave it. The qualified path is the form a cross-corpus link already uses (M6b-6). |
 
 ## 5. Phases
 
@@ -364,6 +371,18 @@ phase log and the gate record.
 
 Estimates run two to three times low in this repository. Each phase names its split seam.
 
+**Delivered, M6b-2.** 936 logic against a ceiling of 600, and 818 tests against
+900. The ceiling counts every inserted and deleted line of a budgeted file,
+comments included; the phase's non-test Rust is 580 lines, its comments 252, and
+the rewritten `search` and `facts` command arms carry 106 deleted lines. The
+split seam was measured and not taken: part 1 (selection, note, primary-only
+execution) needs the same workspace resolution, the same two command arms and
+the same report fields, which is 400 to 450 lines on its own, and part 2 would
+rewrite those arms to add `all`, the weight and the merge. The split would
+therefore move plumbing into a first review and make the second review read it
+again, so the phase ships as one change under the `large-pr` label. The numbers
+and the whole argument are in §12.
+
 ## 10. SPEC corrections
 
 1. **§9.2.** Add `corpus?` to `read_document` and to `janus_status`'s response, and state
@@ -437,3 +456,111 @@ target.
 field (M6b-2); `read_document` and `janus_status` in a workspace (M6b-3);
 `promote`, cross-corpus links and every write (M7); `[scope_groups]`; and a
 `--workspace` flag on commands that read no workspace yet.
+
+### M6b-2 — The federated query
+
+**State.** Complete. Branch `m6b-phase2-federated`, one pull request.
+
+**Files.** `src/search/federate.rs` (new: the selection, the weight, the merge),
+`src/search/mod.rs` (the `corpora` head field, the per-row `corpus`, the human
+table), `src/search/facts.rs` (the answer and the order it ran in),
+`src/score.rs` (`scores.corpus` and the one place a corpus changes a score),
+`src/main.rs` (workspace resolution for a query, one config and one embedder per
+corpus), `src/cli.rs` (`--corpus` and `--workspace` on `search` and `facts`),
+`src/api/dto.rs` and `src/mcp/tools.rs` (the `corpus` parameter),
+`src/engine.rs` (the parameter, and the refusal of a selection it cannot serve),
+`tests/workspace_query.rs` (new) and `tests/fixtures/workspace-query/` (new: two
+corpora, one archived, with a weight the cases can state exactly).
+
+**What runs.** A query resolves a set of corpora, and every corpus answers with
+its own top-`N` through the same ranking function a single-corpus query uses.
+The merge is one stable sort over those ranked lists, keyed by the tool's own
+order value: `final` for `search` and for the `facts` fallback list,
+`type_authority` for a `facts` fact list. `archived_weight` multiplies `final`
+once, at the merge, and is reported as `scores.corpus`.
+
+**The merge contract, in one paragraph.** A document in the global top-`N` is
+necessarily inside its own corpus's top-`N`, because that corpus's list is
+ordered by the same key and holds at least `N` rows. So merging the per-corpus
+lists and cutting to `N` is exact: it cannot drop a document that belongs in the
+answer and it cannot reorder two documents one corpus already ordered. At an
+equal value the merge keeps corpus order across corpora and the corpus's own
+order inside one corpus, so no second tie-break exists anywhere (M6b-15).
+
+**Selection.** `primary` (default) reads the primary corpus and prints one note
+naming how many archived corpora it excluded. `all` reads every corpus and
+prints no such note. An id reads that corpus, and an archived corpus keeps its
+weight: naming a corpus is a scope choice, not a claim that its facts are
+current (M6b-3). An unknown id is a usage error listing the ids, the two
+keywords and, when there are archived corpora, what the keywords do.
+
+**Cases.**
+
+| Case | Evidence |
+|---|---|
+| 2.1 default is the primary, with one note | `case_2_1_a_default_query_reads_the_primary_and_names_what_it_excluded` |
+| 2.2 `all` returns both, weighted and named | `case_2_2_all_returns_both_and_each_archived_row_carries_the_weight` |
+| 2.3 a named archived corpus keeps its weight | `case_2_3_a_named_archived_corpus_is_read_alone_and_keeps_its_weight` |
+| 2.4 the merge is exact against the full union | `case_2_4_the_merge_is_exact_against_the_full_union` (property, 256 cases), `case_2_4_a_per_corpus_fetch_below_the_limit_loses_a_document`, `case_2_4_an_equal_value_keeps_corpus_order_then_the_corpus_s_own_order` |
+| 2.5 an unknown corpus is a usage error listing the ids | `case_2_5_an_unknown_corpus_exits_two_and_lists_the_ids` (CLI, exit 2) and `case_2_5_an_unknown_corpus_is_a_usage_error_that_lists_the_ids` |
+| 2.6 the limit is a total, not a limit per corpus | `case_2_6_the_limit_is_a_total_across_corpora_not_a_limit_per_corpus` |
+| 2.7 `facts` keeps authority and reports the weight | `case_2_7_facts_keeps_the_authority_order_and_reports_the_weight`, plus `case_2_7_the_fact_list_keeps_authority_when_a_corpus_falls_back` |
+
+**The weight, stated as arithmetic.** `final = relevance · authority · decay ·
+corpus`, evaluated in that order. The `search` case reads every factor from the
+row it checks, so the assertion is exact; the unit test states the literals
+(relevance 0.6, authority 1.5, decay 0.8 → `final` 0.72, and 0.576 at weight
+0.8) and asserts that a neutral factor is absent from the JSON.
+
+**Why the formula is not checked against a second run.** Two runs of the same
+query can differ in the last bit: the query that builds an index reads the
+lexical values it just computed, and the next one reads the published rows. The
+difference is one unit in the last place and it predates this phase, so the
+cases compare one report against itself instead of two reports against each
+other.
+
+**The committed fixture.** `tests/fixtures/workspace/` now keeps one archived
+note that is still true beside the superseded decision, so a default
+`--corpus all` query returns a row from each corpus with the archived weight
+beside its score. The retired decision stays superseded, which proves that the
+status gate still applies: the role says when a corpus is read, and the status
+says whether a document is true now (case 2.2).
+
+**Single-corpus evidence.** With no workspace, `search` and `facts` take the
+same path they took before this phase: no `corpora` head field, no `corpus` on a
+row, no factor in the breakdown, no prefix in the table. `no_workspace_keeps_the_single_corpus_report_shape`
+pins the shape, and no golden moved.
+
+**Resolution for a query.** `--workspace`, then `JANUS_WORKSPACE`, then the
+platform file — except that a corpus root named by `--vault` or `JANUS_VAULT`
+wins over the platform file, and naming a root and a workspace together is a
+usage error (M6b-14). Without that rule, a machine with a platform workspace
+would federate every query inside every vault, including the golden fixtures.
+
+**Gates.** fmt, clippy with `-D warnings`, test (923 passed, 2 ignored), doc
+(zero warnings), the Windows cross-check. Size: logic 936, tests 818.
+
+**Size against the plan, and the split seam.** The phase budget was 600 logic,
+the estimate 500, and the delivered phase is 936 by the script. The script
+counts every inserted and deleted line of a budgeted file, comments included:
+the non-test Rust is 580 lines, its comments 252, and the diff deletes 106 lines
+while rewriting the `search` and `facts` command arms. So the code a reviewer
+must hold is at the ceiling while the mechanical number is 1.6× it.
+
+The split seam was measured, not skipped. Part 1 was defined as the selection,
+the note and a primary-only execution: it needs the same workspace resolution,
+the same two rewritten command arms, the same report fields and the same engine
+parameter, which is 400 to 450 lines on its own. Part 2 would then rewrite those
+command arms to add `all`, the weight and the merge. The seam therefore moves
+plumbing into a first review and rewrites it in a second, and the merge — the
+milestone's core contract — arrives in a diff that also changes the code its
+reviewer just read. The phase ships as one change with the overrun stated here
+and in the pull request, and the next phase reads 600 as a floor: the estimate
+was 500 and the delivery is 1.6× it, which is the same error the previous phase
+made.
+
+**Not included.** A workspace-aware engine, so a `corpus` parameter that needs
+one is refused rather than answered from the primary (M6b-12, M6b-3);
+`read_document` and `janus_status` in a workspace (M6b-3); the remaining SPEC
+corrections of §10 (the §9.4 `corpus` wording landed with this phase); `promote`,
+cross-corpus link resolution and every write (M7); `[scope_groups]`.

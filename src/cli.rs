@@ -266,6 +266,15 @@ pub enum Command {
         #[arg(long, value_name = "DATE")]
         as_of: Option<String>,
 
+        /// Corpora to read: primary (default), all, or a workspace id (§6.11)
+        #[arg(long, value_name = "WHICH")]
+        corpus: Option<String>,
+
+        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
+        /// config directory
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+
         /// Refuse instead of building or rebuilding; a read stays a read
         #[arg(long)]
         no_rebuild: bool,
@@ -308,6 +317,15 @@ pub enum Command {
         /// Maximum facts returned
         #[arg(long, value_name = "N", default_value_t = crate::search::DEFAULT_LIMIT)]
         limit: usize,
+
+        /// Corpora to read: primary (default), all, or a workspace id (§6.11)
+        #[arg(long, value_name = "WHICH")]
+        corpus: Option<String>,
+
+        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
+        /// config directory
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
 
         /// Refuse instead of building or rebuilding; a read stays a read
         #[arg(long)]
