@@ -32,26 +32,87 @@ If more than half the documents are undated, or nobody is typed, fix the corpus
 before you touch a weight. A weight you tune against a wrong denominator is a
 tuned mistake.
 
-## 1. Exclude synthetic and retired trees
+## 1. Exclude synthetic trees; retire a real tree into an archived corpus
 
-Synthetic fixtures and retired archives are documents with strong metadata and
-no claim on the present. They win queries about the real corpus.
+Two kinds of document carry strong metadata and no claim on the present, and they
+need two different instruments. A **synthetic** fixture is not part of the corpus,
+so exclude it. A **retired** tree is part of the corpus's history, so declare it as
+an archived corpus: a default query still cannot answer from it, and a query that
+names it can.
 
 **The finding it prevents.** In this repository a fixture `decision` at authority
 1.50 and a 2020 date outranked every real design document: **9 of the 10 graded
-questions were answered wrong**. One exclude line fixed it. A retired `6.archive/`
-tree behaved the same way in the larger corpus: 226 documents of type `spec`,
-timeless by default, served as current doctrine and appearing in the top three
-for 3 questions.
+questions were answered wrong**. One exclude line fixed it, and it stays fixed
+that way, because a fixture is not history. A retired `6.archive/` tree behaved
+the same way in the larger corpus: **226 documents** of type `spec`, timeless by
+default, served as current doctrine and appeared in the top three for **3**
+questions.
+
+A fixture is excluded, and that line stays in the corpus config:
+
+```toml
+[index]
+exclude = ["tests/fixtures/**"]   # synthetic, so not part of the corpus
+```
+
+A retired tree is declared in a workspace file instead, with the role `archived`:
+
+```toml
+# workspace.toml, beside the two corpora
+[[corpora]]
+id = "main"
+root = "vault"
+role = "primary"
+
+[[corpora]]
+id = "context"
+root = "6.archive"
+role = "archived"
+
+[search]
+archived_weight = 0.8
+```
+
+A relative `root` resolves against the workspace file's own directory, so a
+workspace can sit beside its corpora and needs no machine path. A workspace in the
+platform config directory (`~/.config/janus/workspace.toml`) needs absolute roots.
+An archived corpus is read-only unless its entry sets `read_only = false`.
+
+An archived corpus is **hard-excluded** from a default query, not down-weighted:
+the weight applies only when a query names the corpus. Three commands show the
+difference:
+
+```bash
+janus --workspace workspace.toml corpora                  # both corpora, roles, freshness
+janus --workspace workspace.toml search "cache"           # the primary only, with one note
+janus --workspace workspace.toml search "cache" --corpus context --intent history
+```
+
+A default query prints one note naming the archived corpora it excluded. The
+third command is the reason to keep the tree: it answers "what did I used to
+believe" over the archive, weighted at `archived_weight` so an old fact cannot
+outrank a current one. Naming the corpus does not promote it; the weight still
+applies, because a name says where to look and not that the facts are current.
+
+`--workspace` is a global flag, so you write it before or after the subcommand.
+Only the commands that read a workspace take it: `search`, `facts`, `read`,
+`status`, `corpora`, `rpc` and `mcp`. Every other command works on one corpus and
+refuses it with a usage error — `init`, `scan`, `chunks`, `index`, `doctor`,
+`ids`, `moves`, `lineage` and `suggest-links` — because a command that ignored
+the flag would report success for a corpus you did not name.
+
+**If the retired tree sits inside the primary's root,** the primary still walks
+it. Keep one exclude line for it in the primary's `janus.toml`, so the tree is
+indexed once, by its own corpus:
 
 ```toml
 [index]
 exclude = ["tests/fixtures/**", "6.archive/**"]
 ```
 
-Excluding is a corpus decision, so record it where the next reader finds it.
-A tree that is genuinely historical should be excluded here until a corpus role
-exists for it; excluding it is reversible, and serving it as current is not.
+That line no longer decides what a query may answer from — the role does. Two
+indexes over one tree is the cost of leaving the archive in place; moving it out
+of the primary's root removes the line.
 
 ## 2. Type frontmatter-less documents by path
 
@@ -165,13 +226,17 @@ timeless_types = ["decision", "spec"]
 "journals/" = "journal"
 
 [index]
-exclude = ["tests/fixtures/**", "6.archive/**"]
+exclude = ["tests/fixtures/**"]
 ```
 
 Run `janus scan` again after editing. The `metadata:` line should move: `typed`
 rises when the `[paths]` hints cover the frontmatter-less tree, and `undated`
 falls only when the documents themselves gain dates. `janus scan` never writes
 to the vault and never repairs a document.
+
+A retired tree does not belong in this file. It is one entry in a
+`workspace.toml`, as rule 1 states, and `janus corpora` reports it beside the
+corpus this file configures.
 
 ## What this document does not decide
 

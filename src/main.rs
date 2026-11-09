@@ -5,7 +5,7 @@
 //! decisions (§9.5).
 
 use std::io::{IsTerminal as _, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -130,6 +130,11 @@ fn init_tracing() {
 }
 
 fn run(cli: Cli) -> Result<ExitCode, JanusError> {
+    // One flag for every command, so a command that reads one corpus must refuse
+    // it here, before any work, rather than parse it and ignore it.
+    let workspace = cli.workspace;
+    refuse_workspace(&cli.command, workspace.as_deref())?;
+
     let result: Result<(), JanusError> = match cli.command {
         // `init` creates a corpus, so it must *not* search for an existing one:
         // running it in a subdirectory of a vault should not silently adopt the
@@ -251,13 +256,8 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
 
         // A read answers through the fleet, so the CLI tests the function the
         // rpc loop and the MCP server call (§3.3).
-        Command::Read {
-            path,
-            corpus,
-            workspace: explicit,
-            json,
-        } => {
-            let fleet = resolve_fleet(explicit, cli.vault, false)?;
+        Command::Read { path, corpus, json } => {
+            let fleet = resolve_fleet(workspace, cli.vault, false)?;
             let mut params = serde_json::json!({ "path": path.to_string_lossy() });
             if let Some(corpus) = corpus {
                 params["corpus"] = serde_json::Value::String(corpus);
@@ -268,11 +268,8 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // A status call answers from the manifest and one walk. It builds
         // nothing and takes no lock, so it works while a writer holds the index.
         // In a workspace it also lists every corpus the workspace names.
-        Command::Status {
-            workspace: explicit,
-            json,
-        } => {
-            let fleet = resolve_fleet(explicit, cli.vault, false)?;
+        Command::Status { json } => {
+            let fleet = resolve_fleet(workspace, cli.vault, false)?;
             call_tool(
                 &fleet,
                 Tool::Status,
@@ -284,12 +281,9 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
 
         // The first command that reads a workspace. Resolution happens here,
         // at the edge, and arrives below as a value (§5.1 of SPEC, §6.11).
-        Command::Corpora {
-            workspace: explicit,
-            json,
-        } => {
+        Command::Corpora { json } => {
             let path = workspace::resolve(
-                explicit,
+                workspace,
                 std::env::var_os("JANUS_WORKSPACE").map(PathBuf::from),
                 &workspace_config_dir(),
             )?;
@@ -302,11 +296,8 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // The rpc loop answers tool calls over stdin and stdout (§3.5). A
         // startup failure exits before the loop starts; every failure after
         // that is a response line, so a caller never loses its session.
-        Command::Rpc {
-            allow_write,
-            workspace: explicit,
-        } => {
-            let fleet = resolve_fleet(explicit, cli.vault, false)?;
+        Command::Rpc { allow_write } => {
+            let fleet = resolve_fleet(workspace, cli.vault, false)?;
             rpc::run(
                 &fleet,
                 allow_write,
@@ -319,11 +310,8 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // The MCP server is the same corpora behind a second protocol. A startup
         // failure exits before the loop starts; every failure after that is an
         // answer, so a client never loses its session (§3.6).
-        Command::Mcp {
-            allow_write,
-            workspace: explicit,
-        } => {
-            let fleet = resolve_fleet(explicit, cli.vault, false)?;
+        Command::Mcp { allow_write } => {
+            let fleet = resolve_fleet(workspace, cli.vault, false)?;
             // This release serves no write, so the flag cannot grant one. It is
             // accepted anyway, so a client config does not change at M7, and it
             // says once on stderr what it did (§3.8 case 8.3). Stdout stays
@@ -423,7 +411,6 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             include_superseded,
             as_of,
             corpus,
-            workspace: explicit,
             no_rebuild,
             no_embeddings,
             progress,
@@ -451,7 +438,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                 json,
             };
             let choice = federate::Choice::parse(corpus.as_deref());
-            match query_workspace(explicit, cli.vault.is_some())? {
+            match query_workspace(workspace, cli.vault.is_some())? {
                 Some(found) => {
                     let fleet = workspace_fleet(&found, no_embeddings)?;
                     let (targets, notes) = fleet.scope(&choice)?;
@@ -487,7 +474,6 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             scope_only,
             limit,
             corpus,
-            workspace: explicit,
             no_rebuild,
             no_embeddings,
             progress,
@@ -508,7 +494,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                 json,
             };
             let choice = federate::Choice::parse(corpus.as_deref());
-            match query_workspace(explicit, cli.vault.is_some())? {
+            match query_workspace(workspace, cli.vault.is_some())? {
                 Some(found) => {
                     let fleet = workspace_fleet(&found, no_embeddings)?;
                     let (targets, notes) = fleet.scope(&choice)?;
@@ -630,6 +616,64 @@ fn query_workspace(
         // A query that names no workspace reads one corpus, as it always has.
         Err(JanusError::Usage { .. }) => Ok(None),
         Err(error) => Err(error),
+    }
+}
+
+/// Refuses `--workspace` on a command that works on one corpus (§6.11).
+///
+/// The flag is global, so the parser accepts it everywhere. A command that
+/// parsed it and ignored it would answer about one corpus while looking like it
+/// read the workspace, and `janus index --workspace w.toml` would publish one
+/// corpus and report success. The refusal is a `usage` failure, so the exit code
+/// is the one a caller already knows (M6b-24).
+fn refuse_workspace(command: &Command, named: Option<&Path>) -> Result<(), JanusError> {
+    let Some(path) = named.filter(|_| !federates(command)) else {
+        return Ok(());
+    };
+    Err(JanusError::Usage {
+        message: format!(
+            "`janus {}` works on one corpus and cannot federate, so `--workspace` does not \
+             apply to it; drop the flag (given {})",
+            command_name(command),
+            path.display()
+        ),
+    })
+}
+
+/// The commands that read a workspace (§6.11).
+///
+/// The list names the commands that do, not the ones that do not: a command
+/// added later refuses the flag until someone writes it to read a workspace, so
+/// the default is the safe one.
+fn federates(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Search { .. }
+            | Command::Facts { .. }
+            | Command::Read { .. }
+            | Command::Status { .. }
+            | Command::Corpora { .. }
+            | Command::Rpc { .. }
+            | Command::Mcp { .. }
+    )
+}
+
+/// The word a user types to name a command that works on one corpus.
+///
+/// A federating command never reaches a message, so it shares the fallback name
+/// rather than repeating the list above.
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Init => "init",
+        Command::Scan { .. } => "scan",
+        Command::Doctor { .. } => "doctor",
+        Command::Ids { .. } => "ids",
+        Command::Moves { .. } => "moves",
+        Command::SuggestLinks { .. } => "suggest-links",
+        Command::Lineage { .. } => "lineage",
+        Command::Chunks { .. } => "chunks",
+        Command::Index { .. } => "index",
+        _ => "command",
     }
 }
 

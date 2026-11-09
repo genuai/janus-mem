@@ -547,12 +547,14 @@ id = "context"
 root = "/opt/context"
 role = "archived"
 read_only = true
-index_dir = "~/.cache/janus/context"   # optional; default <root>/.janus
+index_dir = "/home/me/.cache/janus/context"   # optional; default <root>/.janus
 
 [search]
 allow_cross_corpus_links = false
 archived_weight = 0.8
 ```
+
+A `~` in `index_dir` is not expanded; a relative value resolves against the corpus root.
 
 Corpus-local `janus.toml` stays what §16.1 shows: parsing and scoring rules only. **It never contains `[[corpora]]`, a role, or federation policy**, because the same directory could be primary in one workspace and archived in another.
 
@@ -575,9 +577,11 @@ Rules:
 - `corpus_id` is **declared and stable**, never derived from a path. Default `main`.
 - `built_root` is the canonical path the index was built from, stored in the manifest as a **diagnostic only**. Moving a repository changes `built_root` and must never change a `DocId`.
 - **Archived corpora are hard-excluded by default**, not down-weighted. A multiplier still lets an old fact into a top-3 answer, which is exactly the failure being prevented.
+- **Exactly one corpus is primary in v1.** Two `role = "primary"` entries are a config error, not a warning: "primary" is what an unqualified query means, and two would make the default ambiguous.
 - Query selects corpora: `--corpus primary` (default) | `all` | `<id>`. Every result carries `corpus`.
-- When archived corpora are explicitly included, `search.archived_weight` applies (default 0.8; primary 1.0) and appears in the score breakdown.
-- **Cross-corpus links are opt-in and qualified.** `supersedes: "context:/decisions/old.md"`. Unqualified paths resolve only within the document's own corpus. Qualified links take effect only when `allow_cross_corpus_links = true` (default false); otherwise `doctor` reports `cross_corpus_link_ignored`.
+- **Naming an archived corpus does not promote it.** `--corpus context` reads that corpus and still applies `archived_weight`: a name is a scope choice, not a claim that the corpus is current. A corpus becomes primary only by editing its `role` in the workspace file.
+- When archived corpora are explicitly included, `search.archived_weight` applies (default 0.8; primary 1.0) and appears in the score breakdown. A factor of `1.0` is absent from the JSON, so a single-corpus report is byte-identical to the one before federation existed.
+- **Cross-corpus links are opt-in and qualified.** `supersedes: "context:/decisions/old.md"`. Unqualified paths resolve only within the document's own corpus. Qualified links take effect only when `allow_cross_corpus_links = true` (default false); otherwise `doctor` reports `cross_corpus_link_ignored`. **A qualified link stays inert in this release:** `allow_cross_corpus_links` is read and reserved, and the write that makes such an edge effective arrives with `promote` in M7.
 - **Promotion is an explicit write, never a background consequence:**
   - `janus promote context:/path --link-from decisions/new.md` — patches the primary document's `supersedes` to include the qualified source (etagged, dry-run by default).
   - `janus promote context:/path --adopt` — creates a new primary document citing the source. The archived document is untouched.
@@ -1080,30 +1084,37 @@ janus scan [--json] [--verbose]              # corpus inventory: metadata, ident
 janus chunks [PATH...] [--json] [--text] [--limit N]   # chunk report; no index, no writes
 janus index [PATHS...] [--rebuild] [--no-embeddings] [--dry-run] [--json]
 janus search <QUERY> [--intent current|history|evolution|exhaustive]
-                     [--as-of DATE] [--corpus primary|all|<id>]
+                     [--as-of DATE] [--corpus primary|all|<id>] [--workspace PATH]
                      [--scope <SCOPE>]... [--scope-only]
                      [--limit N] [--types T,..] [--tags T,..]
                      [--decay-half-life DAYS] [--include-superseded]
                      [--no-rebuild] [--no-embeddings] [--json] [--no-color]
 janus lineage <PATH|--topic QUERY> [--json]
-janus facts [--types T,..] [--tags T,..] [--query Q] [--scope S]... [--no-rebuild] [--no-embeddings] [--json]   # authoritative_facts
-janus read <PATH> [--json]
-janus status [--json]
+janus facts [--types T,..] [--tags T,..] [--query Q] [--scope S]... [--corpus primary|all|<id>] [--workspace PATH] [--no-rebuild] [--no-embeddings] [--json]   # authoritative_facts
+janus read <PATH> [--corpus primary|<id>] [--workspace PATH] [--json]
+janus status [--workspace PATH] [--json]
 janus set <PATH> --expect-hash H --key status=superseded [--key k=v ...] [--dry-run]
 janus write <PATH> --frontmatter f.yaml (--body -|f.md)
             [--create | --overwrite --expect-hash H] [--dry-run]
 janus supersede <OLD> <NEW> [--append-only] [--dry-run]
 janus promote <corpus>:<path> (--link-from <path> | --adopt) [--dry-run]
 janus workspace init|add <id> <root> [--role archived] [--read-only]
-janus corpora [--json]                       # configured corpora, roles, index freshness
+janus corpora [--workspace PATH] [--json]    # configured corpora, roles, index freshness
 janus doctor [--json]                        # index health, broken links, duplicates
 janus ids [PATH...] [--json]                 # resolved DocId, tier, and key for inspection
 janus suggest-links [--threshold 0.85]       # candidates only; never applies
 janus moves [--since <date>] [--json]        # continuation hints + confirmed moves; reports only
-janus mcp [--allow-write] [--vault PATH]
-janus rpc [--allow-write] [--vault PATH]     # line-delimited JSON on stdin/stdout; language-agnostic
+janus mcp [--allow-write] [--workspace PATH]
+janus rpc [--allow-write] [--workspace PATH]  # line-delimited JSON on stdin/stdout; language-agnostic
 janus completions <shell>
 ```
+
+`--vault PATH` and `--workspace PATH` are global flags: a user writes either one before
+or after the subcommand, and both mean the same thing in both positions. Seven commands
+read a workspace: `search`, `facts`, `read`, `status`, `corpora`, `rpc` and `mcp`. Every
+other command works on one corpus and **refuses** `--workspace` with a `usage` failure that
+names the command and says it cannot federate. The refusal is the point: a command that
+parsed the flag and ignored it would publish one corpus and look like it read the workspace.
 
 Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash, `4` refused (unsafe or unsupported operation). Human output is a compact table; `--json` is stable and versioned.
 
@@ -1287,10 +1298,11 @@ and there is no second name for it.
 
 **Corpus.** Every result row carries `corpus` when a workspace is in play, and
 the report lists the corpora it read in `corpora`. `scores.corpus` is the factor
-the row's corpus applied to `final`: `1.0` for a primary corpus, and the
-workspace's `archived_weight` for an archived one the query included. A factor
-of `1.0` is not printed, so a single-corpus report is byte-identical to the one
-before federation existed.
+the row's corpus applied to `final`, and its default is `1.0`: the value a
+primary corpus applies. An archived corpus a query included reports the
+workspace's `archived_weight` instead. A factor of `1.0` is omitted from the
+JSON, and the human table prints the column only when a row carries a weight, so
+a single-corpus report is byte-identical to the one before federation existed.
 
 ---
 
@@ -1664,13 +1676,31 @@ id = "context"
 root = "/opt/context"
 role = "archived"
 read_only = true
-index_dir = "~/.cache/janus/context"   # optional; default <root>/.janus
+index_dir = "/home/me/.cache/janus/context"   # optional; default <root>/.janus
 
 [search]
 allow_cross_corpus_links = false
-allow_disjoint_supersession = false
 archived_weight = 0.8
 ```
+
+The keys this release reads:
+
+| Key | Required | Meaning |
+|---|---|---|
+| `corpora[].id` | yes | Unique in the file; what `--corpus` matches. Pattern `[a-z0-9][a-z0-9._-]*` |
+| `corpora[].root` | yes | The corpus directory. A relative value resolves against the workspace file's own directory |
+| `corpora[].role` | yes | `primary` (exactly one) or `archived` |
+| `corpora[].read_only` | no | Defaults to `true` for `archived`, `false` for `primary` |
+| `corpora[].index_dir` | no | Defaults to `<root>/.janus`. A relative value resolves against `root`; a `~` is not expanded |
+| `search.archived_weight` | no | Multiplies `final` for an archived row a query included. Default `0.8`; must be a number from 0 to 1 |
+| `search.allow_cross_corpus_links` | no | Read and reserved. Default `false`, and no link resolves across corpora in this release |
+
+An unknown key is a warning, not an error, because a newer janus may write it. A missing
+`root`, a duplicate `id` and a second primary are errors that name the file and the entry.
+
+`janus promote` and `janus workspace init|add` of §9.1 are not available in this release.
+The workspace file is read, and nothing writes one: promotion is a write, and it arrives
+with the write path in M7.
 
 ### 16.3 Example MCP configuration
 

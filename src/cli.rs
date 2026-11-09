@@ -14,6 +14,9 @@ use clap::{Parser, Subcommand};
 /// Every subcommand accepts `--vault` because a corpus root is ambient
 /// configuration, not an argument: requiring it on each invocation would make
 /// the tool useless from an agent host that spawns a fresh process per turn.
+/// `--workspace` is global for the same reason, so a user places both flags in
+/// the same position. A command that reads one corpus and cannot federate
+/// refuses it in `main`, where the command list lives (M6b-24).
 #[derive(Debug, Parser)]
 #[command(
     name = "janus",
@@ -25,6 +28,11 @@ pub struct Cli {
     /// Corpus root. Falls back to `JANUS_VAULT`, then the current directory.
     #[arg(long, global = true, env = "JANUS_VAULT", value_name = "PATH")]
     pub vault: Option<PathBuf>,
+
+    /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
+    /// config directory
+    #[arg(long, global = true, value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
 
     /// The operation to perform.
     #[command(subcommand)]
@@ -144,11 +152,6 @@ pub enum Command {
         #[arg(long, value_name = "CORPUS")]
         corpus: Option<String>,
 
-        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
-        /// config directory
-        #[arg(long, value_name = "PATH")]
-        workspace: Option<PathBuf>,
-
         /// Emit one JSON object on stdout instead of the text
         #[arg(long)]
         json: bool,
@@ -156,11 +159,6 @@ pub enum Command {
 
     /// Report index freshness, the embedder and the cache (§2.6)
     Status {
-        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
-        /// config directory
-        #[arg(long, value_name = "PATH")]
-        workspace: Option<PathBuf>,
-
         /// Emit one JSON object on stdout instead of the summary
         #[arg(long)]
         json: bool,
@@ -168,11 +166,6 @@ pub enum Command {
 
     /// List the corpora a workspace names, with each index's freshness (§6.11)
     Corpora {
-        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
-        /// config directory
-        #[arg(long, value_name = "PATH")]
-        workspace: Option<PathBuf>,
-
         /// Emit one JSON object on stdout instead of the table
         #[arg(long)]
         json: bool,
@@ -183,11 +176,6 @@ pub enum Command {
         /// Accepted now, and it changes no answer until writes exist (M6-7)
         #[arg(long)]
         allow_write: bool,
-
-        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
-        /// config directory
-        #[arg(long, value_name = "PATH")]
-        workspace: Option<PathBuf>,
     },
 
     /// Serve the read tools over MCP, JSON-RPC 2.0 on stdin and stdout (§9.2)
@@ -195,11 +183,6 @@ pub enum Command {
         /// Accepted now, and it changes no answer until writes exist (M6-7)
         #[arg(long)]
         allow_write: bool,
-
-        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
-        /// config directory
-        #[arg(long, value_name = "PATH")]
-        workspace: Option<PathBuf>,
     },
 
     /// Report the chunks the corpus produces, without building an index
@@ -294,11 +277,6 @@ pub enum Command {
         #[arg(long, value_name = "WHICH")]
         corpus: Option<String>,
 
-        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
-        /// config directory
-        #[arg(long, value_name = "PATH")]
-        workspace: Option<PathBuf>,
-
         /// Refuse instead of building or rebuilding; a read stays a read
         #[arg(long)]
         no_rebuild: bool,
@@ -345,11 +323,6 @@ pub enum Command {
         /// Corpora to read: primary (default), all, or a workspace id (§6.11)
         #[arg(long, value_name = "WHICH")]
         corpus: Option<String>,
-
-        /// Workspace file. Falls back to `JANUS_WORKSPACE`, then the platform
-        /// config directory
-        #[arg(long, value_name = "PATH")]
-        workspace: Option<PathBuf>,
 
         /// Refuse instead of building or rebuilding; a read stays a read
         #[arg(long)]

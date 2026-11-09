@@ -249,6 +249,14 @@ was lost.
 **Case 4.3.** The counts are recorded in the phase log and in the gate record; the questions
 are not committed, because they describe personal material.
 
+**Case 4.4.** `--workspace` written before the subcommand reads the workspace on every command
+that federates: `corpora`, `status`, `search`, `facts`, `read`, `rpc` and `mcp` each answer
+from the named workspace, and `search --corpus all` returns a row from the archived corpus.
+
+**Case 4.5.** Every command that works on one corpus — `init`, `scan`, `index`, `chunks`,
+`doctor`, `ids`, `moves`, `lineage`, `suggest-links` — exits `2` with a message that names the
+command and says it cannot federate. The refusal does not depend on where the flag is written.
+
 ### 3.5 What must not change
 
 - Single-corpus mode: every golden, every human table, every exit code, `format_version` 6.
@@ -283,6 +291,8 @@ are not committed, because they describe personal material.
 | M6b-21 | A read names its corpus in JSON only; the human form stays the document text | `janus read` is a text stream, and `janus read | head` is a documented use. A header line would break the one thing the command promises, so the field that names the corpus lives in the envelope. |
 | M6b-22 | A `corpus:path` qualifier and a `corpus` parameter that name different corpora is a usage error | One call cannot read two corpora. Resolving the contradiction silently would answer a question nobody asked, which is the failure M6b-14 refuses for a root and a workspace. |
 | M6b-23 | `lineage` keeps no `corpus` parameter, and a qualified path is refused | A supersession chain is one corpus's graph. A cross-corpus chain is a write-side fact, because the edge changes windows and status across corpora, so it stays in M7. |
+| M6b-24 | `--workspace` is a global flag, and a command that works on one corpus refuses it with `usage` | One flag in one position, beside `--vault`. The parser then accepts it everywhere, so the refusal is what stops a command answering about one corpus while looking like it read the workspace. The guard names the commands that read a workspace, so a command added later refuses the flag until someone writes it to read one. |
+| M6b-25 | A retired tree inside the primary's root keeps one exclude line in the primary; the role is what keeps it out of answers | The walk is not workspace-aware: the primary walks every directory under its root, so a nested archived corpus is indexed twice unless the primary excludes it. The guide states this. Deferred: a loader warning for a corpus root inside another corpus root. |
 
 ## 5. Phases
 
@@ -353,6 +363,14 @@ a retired tree.
 
 **Accept.** The archive is absent from a default query and present under `--corpus all`.
 
+**Amendment.** The phase also moves `--workspace` into the global `Cli` and adds the guard
+that refuses it, because seven command arms carried a copy of the flag and the guide could
+not state one placement while the code had two. That work touches `src/cli.rs`,
+`src/main.rs` and `tests/cli_workspace_flag.rs`, which the original file list did not name,
+and it adds cases 4.4 and 4.5. `tests/corpus_config_docs.rs` also changes: it parses the
+guide's new workspace block with the real workspace parser, so the guide cannot drift from
+the code that reads it (M6b-24, M6b-25).
+
 ## 6. Cross-cutting requirements
 
 - The gates of `AGENTS.md`, unchanged.
@@ -411,16 +429,26 @@ the split would buy a second review and a rewritten `main.rs` without meeting th
 phase ceiling. The phase ships as one change under the `large-pr` label, and §12
 states the arithmetic.
 
+**Delivered, M6b-4.** 151 logic against a ceiling of 200, and 300 tests against
+300. The estimate was 120 and 100. The test number is one new file: two cases
+over nine commands, a fixture copy, and a session helper each for rpc and MCP.
+The phase holds both ceilings, and the test ceiling is reached exactly.
+
 ## 10. SPEC corrections
 
 1. **§9.2.** Add `corpus?` to `read_document` and to `janus_status`'s response, and state
    that a workspace's `id` and a corpus's declared `corpus_id` are two names reported
    separately when they differ. (P3.) **Delivered in M6b-3.**
 2. **§9.4.** Add `corpus` to the score breakdown and state its default of `1.0`. (P2.)
+   **Delivered in M6b-2**, and restated in M6b-4 so the neutral `1.0` is named as absent from
+   the JSON and from the table.
 3. **§6.11.** State that exactly one corpus is primary in v1, that naming an archived corpus
    does not promote it, and that a cross-corpus link stays inert until M7. (P1, P2.)
+   **Delivered in M6b-4.**
 4. **§16.2.** Name the `workspace.toml` keys this milestone actually reads, and drop the
-   example's implication that `promote` is available. (P4.)
+   example's implication that `promote` is available. (P4.) **Delivered in M6b-4.**
+5. **§9.1.** Add `--workspace` to the seven commands that take it, and state that every other
+   command refuses it. (P4.) **Delivered in M6b-4.**
 
 ## 11. Handoff
 
@@ -693,3 +721,120 @@ should be planned as two from the start, not split at review time.
 a cross-corpus chain for `lineage` (M6b-23); the ranking path of `search`
 (M6b-2); the archive-as-a-role gate and the remaining SPEC corrections of §10
 (M6b-4); `[scope_groups]`.
+
+### M6b-4 — The archive becomes a role
+
+**State.** Complete. Branch `m6b-phase4-docs`, one pull request.
+
+**Files.** `src/cli.rs` (`--workspace` moved into the global `Cli`), `src/main.rs`
+(`refuse_workspace`, `federates`, `command_name`, and the seven command arms that
+now read the flag from one place), `docs/corpus-config.md` (rule 1 and the worked
+example), `SPEC.md` (§6.11, §9.1, §9.4, §16.2), `tests/cli_workspace_flag.rs`
+(new), `tests/corpus_config_docs.rs` (the guide's workspace block, read by the
+real workspace parser), `docs/m6b-breakdown.md`.
+
+**What runs.** `--workspace` is a global flag beside `--vault`, so a user writes
+it before or after the subcommand and both positions mean the same thing. Seven
+commands read a workspace: `search`, `facts`, `read`, `status`, `corpora`, `rpc`
+and `mcp`. The other nine refuse it with a `usage` failure: `init`, `scan`,
+`index`, `chunks`, `doctor`, `ids`, `moves`, `lineage` and `suggest-links`.
+
+**The guard, stated once.** `federates` lists the commands that read a workspace,
+and `refuse_workspace` runs before any work, so a refusal happens before a corpus
+is resolved or an index is opened. The list names the commands that do federate,
+not the ones that do not, so a command added later refuses the flag until someone
+writes it to read a workspace. The message names the command, the reason and the
+path: "`janus index` works on one corpus and cannot federate, so `--workspace`
+does not apply to it" (M6b-24). Without that sentence a user reads the exit code
+as a bug in the flag rather than as an answer about the command.
+
+The guard refuses the flag, not `JANUS_WORKSPACE`. A workspace in the
+environment is ambient configuration, like `JANUS_VAULT`, and a command that
+indexes one corpus takes its root from `--vault`; nobody typed the workspace as
+this command's subject, so there is no intent to contradict. The flag is
+different: it is written in the invocation, and ignoring it would answer a
+different question than the one asked.
+
+**The guide.** Rule 1 separates two instruments that the old text merged. A
+synthetic fixture is excluded, and that line stays in the corpus config. A retired
+tree is an archived corpus with its own role, shown as a `workspace.toml` and read
+by the three commands that make the difference visible: `corpora`, a default
+`search`, and `search --corpus context`. The numbers that motivated the old advice
+stay in the text: 9 of the 10 questions wrong on the fixture, and 226 archived
+documents that appeared in the top three for 3 questions.
+
+The guide also states the one case where an exclude line stays. A retired tree
+inside the primary's root is still walked by the primary, because the walk is not
+workspace-aware: a test run of this branch, on a vault holding `6.archive/` with
+its own `janus.toml` and a workspace declaring it, returned
+`6.archive/old.md` with `corpus: main` from a default query. So the tree is
+excluded in the primary and read through its own corpus, and the line no longer
+decides what a query may answer from (M6b-25). A loader warning for a corpus root
+inside another corpus root is deliberately open; it is a code change with its own
+cases, and this phase's budget is the flag and the documents.
+
+**The SPEC corrections.** §6.11 gains three statements: exactly one corpus is
+primary, naming an archived corpus does not promote it, and a qualified
+cross-corpus link stays inert until M7. §9.4 states the `1.0` default of
+`scores.corpus` and that the neutral value is absent from the JSON and from the
+table. §9.1 lists `--workspace` on the seven commands that take it and states that
+every other command refuses it. §16.2 names the seven keys the loader reads, drops
+`allow_disjoint_supersession` from the example (the workspace loader never read
+it), and states that `promote` and `janus workspace init|add` are not available in
+this release. Both examples lose `~` from `index_dir`, because a `~` is not
+expanded and would name a literal directory.
+
+**Cases.**
+
+| Case | Evidence |
+|---|---|
+| 4.1 the archive is absent from a default query | measured in the private corpus's project, and recorded in the gate record |
+| 4.2 `--corpus all` returns the archived documents | `case_2_2_the_committed_two_corpus_fixture_shows_a_row_from_each_corpus`, `case_4_4_the_flag_before_the_subcommand_reads_the_workspace` |
+| 4.3 the counts are recorded, the questions are not | the gate record, outside this repository |
+| 4.4 the flag before the subcommand works | `case_4_4_the_flag_before_the_subcommand_reads_the_workspace` (seven commands, one run each) |
+| 4.5 a single-corpus command refuses the flag | `case_4_5_a_command_that_works_on_one_corpus_refuses_the_flag` (nine commands, exit 2, the command and the path in the message) |
+| the guide's workspace block parses | `the_guide_blocks_parse_and_the_example_configures_the_four_rules` |
+
+**Single-corpus evidence.** The phase changes argument parsing and documents, so
+no output could move: the goldens, `tests/cli_status.rs` and
+`tests/cli_search.rs` run unchanged and no snapshot was rewritten. The refusal
+adds one path that prints an `error:` line on stderr and nothing on stdout, which
+is the shape §9.4 gives a receipt command.
+
+**Gates.** fmt, clippy with `-D warnings`, test (933 passed, 2 ignored), doc (zero
+warnings), the Windows cross-check. Size: logic 151, tests 300.
+
+**Size against the plan.** The budget was 200 logic and 300 tests; the estimate
+was 120 and 100. The delivery is 151 and 300, so the test ceiling is reached
+exactly and the logic ceiling holds with 49 lines to spare. The test number is
+almost all new file: two cases over nine commands, a fixture copy, and a session
+helper each for rpc and MCP. The logic number is the guard (three small
+functions) plus the flag's move, and the 35 deleted lines of the seven old flag
+fields.
+
+## 13. M6b close-out
+
+Six done-when rows from §8. Five are met in this repository. Row 1's number is
+measured in the private corpus's project, and this log does not invent it.
+
+| # | Done when | Evidence | State |
+|---|---|---|---|
+| 1 | A default query reads the primary corpus only: 0 of 10 gate answers from the archived corpus, down from 3 top-three appearances | The mechanism is `case_2_1_a_default_query_reads_the_primary_and_names_what_it_excluded`, and the guide's three commands show it on a real workspace. The count is measured in that project, counts in the gate record, and is not repeated here | Measured in that project, counts in the gate record |
+| 2 | `--corpus all` returns archived rows, each carrying `corpus` and `scores.corpus` = `archived_weight` | `case_2_2_all_returns_both_and_each_archived_row_carries_the_weight`, `case_2_2_the_committed_two_corpus_fixture_shows_a_row_from_each_corpus`, and `case_4_4_the_flag_before_the_subcommand_reads_the_workspace` for the `corpus` field over the CLI | Met |
+| 3 | The merge is order-equal to the union-by-`final` sort, proved by a property test | `src/search/federate.rs::case_2_4_the_merge_is_exact_against_the_full_union` (256 generated cases), with `case_2_4_a_per_corpus_fetch_below_the_limit_loses_a_document` and `case_2_4_an_equal_value_keeps_corpus_order_then_the_corpus_s_own_order` | Met |
+| 4 | Single-corpus mode is byte-identical: 0 goldens move | `tests/golden_search.rs`, `tests/golden_scan.rs` and `tests/golden_chunks.rs` pass with no snapshot change, and `no_workspace_keeps_the_single_corpus_report_shape` pins the absent fields | Met: 0 of 5 snapshots moved |
+| 5 | `janus corpora` reports each corpus's role and freshness without building or locking | `case_1_5_corpora_reports_freshness_without_building_or_locking`, and `case_4_4_…` reads the same report with the flag before the subcommand | Met |
+| 6 | `format_version` 6, `api` 1, no exit code moved | `src/index/mod.rs` `FORMAT_VERSION: u16 = 6` and `src/scan.rs` `API_VERSION: u32 = 1`, both untouched by this milestone. No code moved: the milestone's two new failures are `WorkspaceInvalid` and `usage`, and `exit_code` maps both to `2`, which `case_4_5_…` asserts | Met |
+
+**What is deliberately open.**
+
+- A loader warning for a corpus root inside another corpus root (M6b-25). The
+  guide states the rule; the code does not warn yet.
+- `promote`, every write, and a resolved cross-corpus link (M7). §6.11 and §16.2
+  now say so, and `allow_cross_corpus_links` is read and reserved.
+- `[scope_groups]`, HTTP transport and watch mode: unchanged from §0.2.
+
+**The milestone, in one line.** A workspace federates `search` and `facts`, an
+archived corpus is hard-excluded unless a query names it, `read` and `status`
+understand a workspace, the three surfaces agree, and the guide recommends a role
+instead of an exclude line.
