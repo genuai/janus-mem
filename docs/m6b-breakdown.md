@@ -283,6 +283,8 @@ are not committed, because they describe personal material.
 | M6b-21 | A read names its corpus in JSON only; the human form stays the document text | `janus read` is a text stream, and `janus read | head` is a documented use. A header line would break the one thing the command promises, so the field that names the corpus lives in the envelope. |
 | M6b-22 | A `corpus:path` qualifier and a `corpus` parameter that name different corpora is a usage error | One call cannot read two corpora. Resolving the contradiction silently would answer a question nobody asked, which is the failure M6b-14 refuses for a root and a workspace. |
 | M6b-23 | `lineage` keeps no `corpus` parameter, and a qualified path is refused | A supersession chain is one corpus's graph. A cross-corpus chain is a write-side fact, because the edge changes windows and status across corpora, so it stays in M7. |
+| M6b-24 | `--workspace` is a global flag, and a command that works on one corpus refuses it with `usage` | One flag in one position, beside `--vault`. The parser then accepts it everywhere, so the refusal is what stops a command answering about one corpus while looking like it read the workspace. The guard names the commands that read a workspace, so a command added later refuses the flag until someone writes it to read one. |
+| M6b-25 | A retired tree inside the primary's root keeps one exclude line in the primary; the role is what keeps it out of answers | The walk is not workspace-aware: the primary walks every directory under its root, so a nested archived corpus is indexed twice unless the primary excludes it. The guide states this. Deferred: a loader warning for a corpus root inside another corpus root. |
 
 ## 5. Phases
 
@@ -353,6 +355,14 @@ a retired tree.
 
 **Accept.** The archive is absent from a default query and present under `--corpus all`.
 
+**Amendment.** The phase also moves `--workspace` into the global `Cli` and adds the guard
+that refuses it, because seven command arms carried a copy of the flag and the guide could
+not state one placement while the code had two. That work touches `src/cli.rs`,
+`src/main.rs` and `tests/cli_workspace_flag.rs`, which the original file list did not name,
+and it adds cases 4.4 and 4.5. `tests/corpus_config_docs.rs` also changes: it parses the
+guide's new workspace block with the real workspace parser, so the guide cannot drift from
+the code that reads it (M6b-24, M6b-25).
+
 ## 6. Cross-cutting requirements
 
 - The gates of `AGENTS.md`, unchanged.
@@ -417,10 +427,15 @@ states the arithmetic.
    that a workspace's `id` and a corpus's declared `corpus_id` are two names reported
    separately when they differ. (P3.) **Delivered in M6b-3.**
 2. **§9.4.** Add `corpus` to the score breakdown and state its default of `1.0`. (P2.)
+   **Delivered in M6b-2**, and restated in M6b-4 so the neutral `1.0` is named as absent from
+   the JSON and from the table.
 3. **§6.11.** State that exactly one corpus is primary in v1, that naming an archived corpus
    does not promote it, and that a cross-corpus link stays inert until M7. (P1, P2.)
+   **Delivered in M6b-4.**
 4. **§16.2.** Name the `workspace.toml` keys this milestone actually reads, and drop the
-   example's implication that `promote` is available. (P4.)
+   example's implication that `promote` is available. (P4.) **Delivered in M6b-4.**
+5. **§9.1.** Add `--workspace` to the seven commands that take it, and state that every other
+   command refuses it. (P4.) **Delivered in M6b-4.**
 
 ## 11. Handoff
 
