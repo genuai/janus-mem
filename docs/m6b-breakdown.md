@@ -371,6 +371,18 @@ phase log and the gate record.
 
 Estimates run two to three times low in this repository. Each phase names its split seam.
 
+**Delivered, M6b-2.** 936 logic against a ceiling of 600, and 818 tests against
+900. The ceiling counts every inserted and deleted line of a budgeted file,
+comments included; the phase's non-test Rust is 580 lines, its comments 252, and
+the rewritten `search` and `facts` command arms carry 106 deleted lines. The
+split seam was measured and not taken: part 1 (selection, note, primary-only
+execution) needs the same workspace resolution, the same two command arms and
+the same report fields, which is 400 to 450 lines on its own, and part 2 would
+rewrite those arms to add `all`, the weight and the merge. The split would
+therefore move plumbing into a first review and make the second review read it
+again, so the phase ships as one change under the `large-pr` label. The numbers
+and the whole argument are in §12.
+
 ## 10. SPEC corrections
 
 1. **§9.2.** Add `corpus?` to `read_document` and to `janus_status`'s response, and state
@@ -507,6 +519,13 @@ difference is one unit in the last place and it predates this phase, so the
 cases compare one report against itself instead of two reports against each
 other.
 
+**The committed fixture.** `tests/fixtures/workspace/` now keeps one archived
+note that is still true beside the superseded decision, so a default
+`--corpus all` query returns a row from each corpus with the archived weight
+beside its score. The retired decision stays superseded, which proves that the
+status gate still applies: the role says when a corpus is read, and the status
+says whether a document is true now (case 2.2).
+
 **Single-corpus evidence.** With no workspace, `search` and `facts` take the
 same path they took before this phase: no `corpora` head field, no `corpus` on a
 row, no factor in the breakdown, no prefix in the table. `no_workspace_keeps_the_single_corpus_report_shape`
@@ -518,8 +537,8 @@ wins over the platform file, and naming a root and a workspace together is a
 usage error (M6b-14). Without that rule, a machine with a platform workspace
 would federate every query inside every vault, including the golden fixtures.
 
-**Gates.** fmt, clippy with `-D warnings`, test (922 passed, 2 ignored), doc
-(zero warnings), the Windows cross-check. Size: logic 936, tests 764.
+**Gates.** fmt, clippy with `-D warnings`, test (923 passed, 2 ignored), doc
+(zero warnings), the Windows cross-check. Size: logic 936, tests 818.
 
 **Size against the plan, and the split seam.** The phase budget was 600 logic,
 the estimate 500, and the delivered phase is 936 by the script. The script
