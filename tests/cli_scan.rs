@@ -616,3 +616,80 @@ fn scan_reports_no_near_miss_when_every_name_is_iso_ordered() {
         .success()
         .stdout(predicate::str::contains("ISO order").not());
 }
+
+// ───────────────────────────── metadata quality ─────────────────────────────
+
+/// A vault with one frontmatter date, one name date, one undated document, and
+/// one declared type that is not the default.
+fn quality_vault() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    fs::write(
+        root.join("janus.toml"),
+        "index_dir = \".janus\"\ncorpus_id = \"main\"\n\n[defaults]\ntype = \"note\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("decisions")).unwrap();
+    fs::create_dir_all(root.join("notes")).unwrap();
+    fs::write(
+        root.join("decisions/adr-1.md"),
+        "---\ntype: decision\ndate: 2024-01-01\n---\n\nprose\n",
+    )
+    .unwrap();
+    fs::write(root.join("2024-02-02-post.md"), "no frontmatter\n").unwrap();
+    fs::write(
+        root.join("notes/undated.md"),
+        "---\ntitle: U\n---\n\nprose\n",
+    )
+    .unwrap();
+
+    dir
+}
+
+#[test]
+fn case_3_1_the_metadata_numbers_reconcile_on_a_small_vault() {
+    let vault = quality_vault();
+    let report = scan_json(vault.path(), &[]);
+
+    let documents = report["docs"].as_array().unwrap().len();
+    assert_eq!(documents, 3);
+    let metadata = &report["metadata"];
+    assert_eq!(metadata["typed"], 1, "one decision, two default notes");
+    assert_eq!(
+        metadata["typed_non_default"], metadata["typed"],
+        "one count under two names: {metadata}"
+    );
+    assert_eq!(metadata["dated"], 2);
+    assert_eq!(metadata["undated"], 1);
+
+    // Dated plus undated is the corpus, and every document has exactly one date
+    // source, so the map sums to the same number.
+    let corpus = u64::try_from(documents).unwrap();
+    assert_eq!(
+        metadata["dated"].as_u64().unwrap() + metadata["undated"].as_u64().unwrap(),
+        corpus
+    );
+    let by_source = metadata["by_source"].as_object().unwrap();
+    let summed: u64 = by_source
+        .values()
+        .map(|count| count.as_u64().unwrap())
+        .sum();
+    assert_eq!(summed, corpus, "{by_source:?}");
+    assert_eq!(metadata["by_source"]["frontmatter"], 1);
+    assert_eq!(metadata["by_source"]["filename"], 1);
+    assert_eq!(metadata["by_source"]["absent"], 1);
+    assert_eq!(by_source.len(), 10, "every source, at zero if unused");
+    assert_eq!(report["api"], 1, "the metadata block is additive");
+
+    // Case 3.3: one human line, from the same count. 1 of 3 undated is 33%.
+    janus()
+        .arg("--vault")
+        .arg(vault.path())
+        .arg("scan")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "metadata: 1 typed, 2 dated, 1 undated (33%)",
+        ));
+}

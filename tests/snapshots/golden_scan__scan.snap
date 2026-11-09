@@ -562,6 +562,24 @@ expression: json
   ],
   "errors": [],
   "ignored_by_git": 1,
+  "metadata": {
+    "by_source": {
+      "absent": 1,
+      "filename": 6,
+      "filename_month": 0,
+      "filename_quarter": 0,
+      "filename_year": 0,
+      "folder": 0,
+      "folder_month": 0,
+      "folder_quarter": 0,
+      "folder_year": 0,
+      "frontmatter": 12
+    },
+    "dated": 18,
+    "typed": 7,
+    "typed_non_default": 7,
+    "undated": 1
+  },
   "read_skips": [
     {
       "message": "file is not valid UTF-8; skipped",

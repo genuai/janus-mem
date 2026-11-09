@@ -1127,6 +1127,17 @@ can reconcile the report with `find` by hand. A second traversal to count the
 files inside a pruned directory is forbidden: it would visit what the rule exists
 to avoid.
 
+`janus scan` reports metadata quality under `metadata`: `typed`,
+`typed_non_default`, `dated`, `undated`, and `by_source` with one count per date
+source, each present at zero when it never fired. **Typed** means the document's
+resolved type is not the configured default type. A document that falls back to
+`[defaults] type` is not typed for this measure, although it has a type.
+`typed_non_default` is the same count under the name that states the rule. Two
+invariants hold: `dated + undated` equals the document count, and `by_source`
+sums to the same number. The human output prints one line, `metadata: 28 typed,
+39 dated, 16 undated (29%)`. `docs/corpus-config.md` states the four corpus
+decisions that raise those numbers, with the finding each one prevents.
+
 `search` and `facts` refresh the index when the corpus changed since the build (§8.3), and print exactly one `refresh:` line on stderr that says what they did. `--no-rebuild` makes both refuse to write; it reads a validated generation and says it skipped. When only a cold build can cure the manifest, both exit 1 with `index needs a full build: run janus index` and the mismatch. A missing index is built on the first read; a cold mismatch is never built.
 
 A process may cache one loaded generation, and only one: the payload of `index.bin` and `vectors.f32`, never an answer. Freshness is decided on every call. The cached load is reused only when the on-disk `manifest.json` equals the cached manifest field for field and the walk digest of this call equals its `corpus_sig`. A load that declined a refresh is never cached, so a busy writer cannot be hidden.
@@ -1161,10 +1172,19 @@ MCP reads inherit the index refresh and the refusal. They expose no `--no-rebuil
   "index": { "present": true, "stale": false, "docs": 24, "chunks": 210,
              "built_at": "2026-01-01T00:00:00Z", "format_version": 6,
              "index_sha": "…" },
+  "metadata": { "dated": 0, "undated": 24, "share_undated": 1.0 },
   "cache": { "hits": 2, "misses": 1 } }
 ```
 
 Before the first build, `index.present` is `false` and every other `index` field is `null`. `embeddings.available` answers "can this process embed a query now", so it comes from the resolved embedder. `embeddings.model` answers "what produced the stored vectors", so it comes from the manifest. The two may disagree: a binary with embeddings compiled out can read stored vectors and cannot embed a query. `writes_enabled` is `false` until M7 adds a writer. A status call never builds and never takes the writer lock, so an agent can ask "is this fresh?" while another process holds the index.
+
+`metadata` answers the date half of "can this corpus support authority and
+decay": how many documents have a date, how many do not, and the undated share.
+The share is the printed percentage over one hundred, so `share_undated` and the
+`scan` line agree. Its denominator is the documents the call resolved, not
+`index.docs`: the manifest is null before the first build, and a stale manifest
+describes an older corpus. The counts therefore survive an absent or stale index.
+The type counts stay in `scan --json`, which reports both halves of the question.
 
 ### 9.3 MCP write tools (only with `--allow-write`)
 
