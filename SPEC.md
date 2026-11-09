@@ -1080,9 +1080,9 @@ What we deliberately do **not** do now: no empty graph tables, no entity enum, n
 
 ```
 janus init [--vault PATH]                    # create janus.toml + .janus/, add to .gitignore
-janus scan [--json] [--verbose]              # corpus inventory: metadata, identity, skips
+janus scan [--json] [--verbose] [--workspace PATH]   # corpus inventory: metadata, identity, skips
 janus chunks [PATH...] [--json] [--text] [--limit N]   # chunk report; no index, no writes
-janus index [PATHS...] [--rebuild] [--no-embeddings] [--dry-run] [--json]
+janus index [PATHS...] [--rebuild] [--no-embeddings] [--dry-run] [--json] [--workspace PATH]
 janus search <QUERY> [--intent current|history|evolution|exhaustive]
                      [--as-of DATE] [--corpus primary|all|<id>] [--workspace PATH]
                      [--scope <SCOPE>]... [--scope-only]
@@ -1110,11 +1110,13 @@ janus completions <shell>
 ```
 
 `--vault PATH` and `--workspace PATH` are global flags: a user writes either one before
-or after the subcommand, and both mean the same thing in both positions. Seven commands
-read a workspace: `search`, `facts`, `read`, `status`, `corpora`, `rpc` and `mcp`. Every
-other command works on one corpus and **refuses** `--workspace` with a `usage` failure that
-names the command and says it cannot federate. The refusal is the point: a command that
-parsed the flag and ignored it would publish one corpus and look like it read the workspace.
+or after the subcommand, and both mean the same thing in both positions. Ten commands
+read a workspace: `search`, `facts`, `read`, `status`, `corpora`, `rpc` and `mcp` read
+its corpora, and `scan`, `index` and `status` read its prune for the one corpus they
+name. Every other command works on one corpus and **refuses** `--workspace` with a
+`usage` failure that names the command and says it cannot federate. The refusal is the
+point: a command that parsed the flag and ignored it would publish one corpus and look
+like it read the workspace.
 
 Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash, `4` refused (unsafe or unsupported operation). Human output is a compact table; `--json` is stable and versioned.
 

@@ -197,11 +197,10 @@ fn case_4_4_the_flag_before_the_subcommand_reads_the_workspace() {
 fn case_4_5_a_command_that_works_on_one_corpus_refuses_the_flag() {
     let dir = copied();
 
-    // Every command that reads or writes one corpus, and nothing else.
+    // Every command that reads one corpus and applies no prune. `scan`, `index`
+    // and `status` are absent because they read the workspace's prune (M6b-30).
     for command in [
         "init",
-        "scan",
-        "index",
         "chunks",
         "doctor",
         "ids",
@@ -234,10 +233,10 @@ fn case_4_5_a_command_that_works_on_one_corpus_refuses_the_flag() {
     // A global flag's position cannot change the answer, so this refusal holds
     // after the subcommand too.
     let output = janus_in(dir.path())
-        .args(["index", "--workspace"])
+        .args(["chunks", "--workspace"])
         .arg(workspace_file(dir.path()))
         .output()
-        .expect("run janus index");
+        .expect("run janus chunks");
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot federate"));
 }
