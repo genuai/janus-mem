@@ -171,9 +171,21 @@ index is present, and whether it is stale. It builds nothing and takes no lock.
 
 ### 3.2 The federated query (P2)
 
-**Statement.** A query reads a set of corpora, ranks each, and merges the ranked lists by
-`final`. The merge is exact: it cannot reorder two documents that one corpus would have
-ordered.
+**Statement.** A query reads a set of corpora, ranks each, and merges the ranked lists by the
+query's own order key. The merge is exact: it cannot reorder two documents that one corpus
+would have ordered, and it cannot drop a document that belongs in the global answer.
+
+**How many rows each corpus returns.** Every corpus answers with its own top-`N`, where `N` is
+the query limit. Merging those lists and cutting to `N` is then exact: a document in the global
+top-`N` is necessarily inside its own corpus's top-`N`, so asking a corpus for fewer rows would
+be the only way to lose one. `limit N` still returns at most `N` rows in total (case 2.6).
+
+**The order key is the tool's, not one key for all tools.** `search` merges by `final`.
+`facts` has two orders of its own: the fact list is ordered by authority, and the fallback list
+by `final` plus its own `(date, path)` tie-break. The merge follows the list's order, because
+§7.1's authority order is the reason `facts` exists; merging a fact list by `final` would
+reorder it and break that promise. `archived_weight` therefore multiplies `final` for every
+archived row, appears in the breakdown, and leaves an authority-ordered list in place.
 
 **Case 2.1.** With a primary and an archived corpus, a default query returns rows from the
 primary only, and prints one note naming how many archived corpora were excluded.
@@ -185,16 +197,22 @@ score times that weight, within the file's float tolerance.
 **Case 2.3.** `--corpus context` (an archived id) returns that corpus's rows, weighted
 `archived_weight` — an explicit name does not promote a corpus to primary.
 
-**Case 2.4.** The merge is order-equal to sorting the union of the two per-corpus lists by
-`final`, ties broken by the corpus order then `path`. A property test over generated scores
-asserts it.
+**Case 2.4.** The merge is exact in both directions. A property test over generated scores
+asserts two things: (a) the merged order equals sorting the **full** union of both corpora's
+documents by the query's key, ties broken by corpus order then `path`; and (b) no document is
+missing, which is the part a comparison of two already-truncated lists cannot see. The test
+generates scores where the global top-`N` is spread across both corpora, so a per-corpus
+truncation below `N` fails it.
 
 **Case 2.5.** `--corpus nope` exits `2`, and the message lists the ids.
 
 **Case 2.6.** `limit N` returns at most N rows across all corpora, not N per corpus.
 
-**Case 2.7.** `facts` applies the same selection, the same weight and the same `corpus`
-field, through one shared predicate, not a second copy.
+**Case 2.7.** `facts` applies the same selection, the same weight and the same `corpus` field,
+through one shared predicate, not a second copy. Its **order** stays authority-first: a
+two-corpus fixture whose archived row has the higher `authority` but the lower `final` keeps
+that row where authority puts it, and reports `scores.corpus` = `archived_weight` beside it.
+The fallback order (a corpus with no fact types) merges by `final` like `search`.
 
 ### 3.3 The other tools (P3)
 
@@ -239,7 +257,7 @@ are not committed, because they describe personal material.
 | ID | Decision | Why |
 |---|---|---|
 | M6b-1 | One `Engine` per corpus; the workspace is a list of them | The engine already holds a root, a config and a load cache. A second load path would be a second cache bug. |
-| M6b-2 | Merge by `final` over per-corpus top-K, with a deterministic tie-break | §6.11 says the merge is exact; a tie-break makes it reproducible. |
+| M6b-2 | Each corpus answers its own top-`N`; the merge then cuts to `N`, by the tool's own order key | A document in the global top-`N` is always inside its corpus's top-`N`, so this is exact. `facts` merges by authority because that order is its reason to exist; a weight that reordered it would break §7.1. |
 | M6b-3 | `--corpus <id>` on an archived corpus still applies `archived_weight` | Naming a corpus is a scope choice, not a claim that its facts are current. |
 | M6b-4 | Exactly one primary; two is an error | "Primary" is what an unqualified query means. Two would make the default ambiguous. |
 | M6b-5 | Cross-corpus links and `promote` stay in M7 | A cross-corpus edge changes windows and status across corpora. It is a write-side fact. |
