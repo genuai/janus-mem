@@ -85,7 +85,8 @@ The `scan --json` report gains fields (additive, `api` stays 1):
 
 Today `skipped` is a map of reason to a number with no unit. The new shape states the
 unit and adds the pruned count, because a skip count without a unit is what made the
-gate report irreconcilable.
+gate report irreconcilable. All seven rules are always present, in
+`SkipReason::ORDER`, whatever their count.
 
 ## 3. Contracts
 
@@ -98,8 +99,14 @@ reason. Nothing is counted twice, and nothing disappears.
 `walk.files` equal to the admitted count, `directories_pruned` 1, and a `hidden` entry
 count of 1. The three files inside are not counted as entries.
 
-**Case 1.2.** The invariant holds on the main fixture:
-`walk.files == docs.len() + sum(entries for reasons that are files)`.
+**Case 1.2.** The invariant holds on the main fixture: `walk.files + sum(entries)`
+equals the number of paths the walk yielded, and `walk.files == docs.len() +
+read_skips.len()`. Measured: 20 + 7 = 27, with 1 pruned directory.
+
+**Limit, stated not fixed.** A path hidden by `.gitignore` is never yielded by the
+walk, so it is outside the invariant. `ignored_by_git` counts the markdown files the
+ignore rules removed; a gitignored directory is not enumerated, so its documents are
+not in that count either (R1-8).
 
 **Case 1.3.** The human table prints the invariant in two lines: what was read, and
 what was pruned with the reason. A user can reconcile it with `find` by hand once the
@@ -172,6 +179,9 @@ a test parses the guide's example block as a config.
 | R1-3 | Metadata quality is reported, not repaired | The tool never writes to a vault outside an explicit write command (§9.3). A report is the most it may do before M7. |
 | R1-4 | No mtime date source | SPEC §6.3 rejects inventing a date. A copied file is not a new decision. |
 | R1-5 | Retrieval accuracy is the milestone's acceptance number, not a test count | The gate exists because green tests and bad answers are the failure mode this milestone answers. |
+| R1-6 | The invariant is `walk.files + sum(entries) = paths the walk yielded`, and `walk.files = docs + read skips` | The formula in §3.1 before this phase added file skips to the admitted set and forgot the read skips, so it could never hold. |
+| R1-7 | The pruned-directory count is derived from the per-entry skip list, not stored beside it | Two copies of one number drift apart; one source makes a total and its rows agree by construction. |
+| R1-8 | A `.gitignore`d tree stays outside the accounting; only its markdown files are counted | The walk never yields those paths, and R1-1 changes no walk rule. Named, so the next gate does not read the gap as a counting bug. |
 
 ## 5. Phases
 
@@ -275,4 +285,40 @@ seam; split before the ceiling.
 
 ## 11. Implementation logs
 
-_(empty)_
+### Phase 1 — Skip accounting
+
+**Built.** `WalkResult::pruned(reason)` and `pruned_total()` count the refused
+directories, derived from the per-entry skip list (R1-7). `scan --json` reports
+`walk: {files, directories_pruned}` and `skipped` as a list of
+`{reason, entries, pruned_directories}`, always seven rows in `SkipReason::ORDER`.
+One helper, `walk_totals`, feeds both outputs. The human output replaces the old
+`skipped:` line with two:
+
+```
+read:    20 file(s) admitted, 7 path(s) skipped: 1 always_excluded, 3 hidden, 2 config_exclude, 1 not_markdown
+pruned:  1 directory (1 always_excluded); one entry each, contents never visited and not counted
+```
+
+**Invariant, measured on the committed fixture.** 20 admitted + 7 skipped = 27
+paths the walk yielded; 20 = 19 documents + 1 read skip; 1 pruned directory. The
+case 1.1 fixture measures 1 admitted, 1 pruned hidden directory, 1 `.txt`, and
+`find . -name '*.md'` counts the 4 documents, 3 of which the walk never visited.
+
+**Golden diff, reviewed field by field.** `skipped` moves from a map of seven
+counts to a list of seven rows, and `walk` is added. The values are unchanged:
+`always_excluded` 1, `hidden` 3, `config_exclude` 2, `not_markdown` 1, and
+`symlinked_directory`, `symlink_escape`, `non_utf8_path` at 0. The new totals are
+`walk.files` 20 and `walk.directories_pruned` 1. No document row, no `read_skips`
+row, and no other field moved.
+
+**Decisions.** R1-6 (the true invariant), R1-7 (derived counts), R1-8 (a
+`.gitignore`d tree stays outside the accounting). SPEC §9.1 now states the unit,
+the two rules and the prune rule.
+
+**Size.** logic 199 / 300, tests 322 / 450.
+
+**Not done here.** `api` stays 1, as §3.5 requires, although `skipped` changed
+type. Every consumer in this tree is updated in the same commit. A gitignored
+directory still produces no skip entry; R1-8 names the limit rather than changing
+a walk rule. The dogfood re-run follows the merge (§6), after the local binary is
+rebuilt from the merged commit.

@@ -81,7 +81,8 @@ pub enum SkipReason {
     Hidden,
     /// Matched an `[index] exclude` glob.
     ConfigExclude,
-    /// Not `.md` / `.markdown`.
+    /// Not `.md` / `.markdown`. Counts files, not extensions: three `.txt`
+    /// files are three entries.
     NotMarkdown,
     /// A directory symlink. Never followed: it can cycle, and it would index the
     /// same content under two paths.
@@ -164,6 +165,9 @@ pub struct WalkResult {
     /// Admitted files, sorted by `rel_path`.
     pub files: Vec<DiscoveredFile>,
     /// Refused entries, sorted by `rel_path`.
+    ///
+    /// The walk yields each path once, so this list plus `files` accounts for
+    /// everything it saw: no path is counted twice and none disappears.
     pub skipped: Vec<SkippedEntry>,
     /// Unreadable paths, sorted by `path`.
     pub errors: Vec<WalkError>,
@@ -179,16 +183,39 @@ pub struct WalkResult {
 }
 
 impl WalkResult {
-    /// How many entries were skipped for a given reason.
+    /// How many entries were refused for a given reason, one per path.
+    ///
+    /// A file is one entry. A pruned directory is also one entry, whatever it
+    /// holds — see [`Self::pruned`].
     #[must_use]
     pub fn count(&self, reason: SkipReason) -> usize {
         self.skipped.iter().filter(|s| s.reason == reason).count()
     }
 
-    /// Total entries skipped, for the one-line summary.
+    /// How many of those entries were directories the walk pruned.
+    ///
+    /// A pruned directory is one entry and the walk never descends into it, so
+    /// the files beneath it are neither counted nor visited (R1-1). The value is
+    /// derived from the per-entry list, so a count and its entries cannot
+    /// disagree.
+    #[must_use]
+    pub fn pruned(&self, reason: SkipReason) -> usize {
+        self.skipped
+            .iter()
+            .filter(|s| s.reason == reason && s.is_dir)
+            .count()
+    }
+
+    /// Total entries skipped, one per path.
     #[must_use]
     pub fn skipped_total(&self) -> usize {
         self.skipped.len()
+    }
+
+    /// Total directories pruned, one per refused directory.
+    #[must_use]
+    pub fn pruned_total(&self) -> usize {
+        self.skipped.iter().filter(|s| s.is_dir).count()
     }
 }
 
@@ -881,6 +908,25 @@ mod tests {
         assert_eq!(result.count(SkipReason::ConfigExclude), 1);
         assert_eq!(result.count(SkipReason::NotMarkdown), 1);
         assert_eq!(result.skipped_total(), 5);
+    }
+
+    #[test]
+    fn not_markdown_counts_files_not_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            fs::write(root.join("docs").join(name), "no").unwrap();
+        }
+
+        let result = walk_hermetic(root, &config_with_excludes(&[]));
+
+        assert_eq!(result.count(SkipReason::NotMarkdown), 3);
+        assert_eq!(
+            result.pruned(SkipReason::NotMarkdown),
+            0,
+            "a file is one entry, not a pruned directory"
+        );
     }
 
     #[test]

@@ -176,16 +176,96 @@ fn fixture_parses_every_ugly_case_into_the_expected_documents() {
 
     // Every skip rule is visible: target/ (always), the three dot-files
     // (hidden), the two config exclusions, and janus.toml (not markdown).
-    let skipped = report["skipped"].as_object().expect("skipped map");
-    assert_eq!(skipped["always_excluded"], 1, "{report}");
-    assert_eq!(skipped["hidden"], 3, "{report}");
-    assert_eq!(skipped["config_exclude"], 2, "{report}");
-    assert_eq!(skipped["not_markdown"], 1, "{report}");
+    assert_eq!(
+        skip_row(&report, "always_excluded")["entries"],
+        1,
+        "{report}"
+    );
+    assert_eq!(skip_row(&report, "hidden")["entries"], 3, "{report}");
+    assert_eq!(
+        skip_row(&report, "config_exclude")["entries"],
+        2,
+        "{report}"
+    );
+    assert_eq!(skip_row(&report, "not_markdown")["entries"], 1, "{report}");
     assert_eq!(
         report["ignored_by_git"], 1,
         "scratch/ignored.md is gitignored:\n{report}"
     );
     assert_eq!(report["errors"], json!([]), "{report}");
+}
+
+#[test]
+fn every_skip_rule_is_reported_in_a_fixed_order() {
+    let vault = fixture_vault();
+    let report = scan_json(vault.path(), &[]);
+
+    let reasons: Vec<&str> = report["skipped"]
+        .as_array()
+        .expect("skipped list")
+        .iter()
+        .map(|row| row["reason"].as_str().expect("reason"))
+        .collect();
+
+    assert_eq!(
+        reasons,
+        [
+            "always_excluded",
+            "hidden",
+            "config_exclude",
+            "not_markdown",
+            "symlinked_directory",
+            "symlink_escape",
+            "non_utf8_path",
+        ],
+        "all seven reasons, always, in report order:\n{report}"
+    );
+}
+
+#[test]
+fn the_skip_report_reconciles_with_the_files_on_disk() {
+    let vault = fixture_vault();
+    let report = scan_json(vault.path(), &[]);
+
+    let files = report["walk"]["files"].as_u64().expect("walk.files");
+    let rows = report["skipped"].as_array().expect("skipped list");
+    let sum = |field: &str| -> u64 {
+        rows.iter()
+            .map(|row| row[field].as_u64().expect("a count"))
+            .sum()
+    };
+
+    // Hand-derived: 20 markdown files are read (19 documents plus the one
+    // non-UTF-8 file) and 7 paths are refused: `node_modules/` as one pruned
+    // directory, 3 dot-entries (two of them not markdown), 2 config exclusions,
+    // and `janus.toml`.
+    assert_eq!(files, 20, "{report}");
+    assert_eq!(sum("entries"), 7, "{report}");
+    assert_eq!(sum("pruned_directories"), 1, "{report}");
+    assert_eq!(report["walk"]["directories_pruned"], 1, "{report}");
+    // Every path the walk yielded is admitted once or skipped once.
+    assert_eq!(files + sum("entries"), 27, "{report}");
+
+    // The admitted files become documents or read skips; nothing else.
+    let documents = report["docs"].as_array().expect("docs array").len() as u64;
+    let read_skips = report["read_skips"].as_array().expect("read_skips").len() as u64;
+    assert_eq!(documents, common::FIXTURE_DOCUMENTS as u64, "{report}");
+    assert_eq!(files, documents + read_skips, "{report}");
+
+    // Outside the invariant, by rule: `node_modules/generated.md` sits under a
+    // pruned directory and `scratch/ignored.md` is hidden by `.gitignore`.
+    // Neither is visited, and neither is counted as a walk entry.
+    assert_eq!(report["ignored_by_git"], 1, "{report}");
+}
+
+/// One rule's row in the `skipped` list.
+fn skip_row<'a>(report: &'a Value, reason: &str) -> &'a Value {
+    report["skipped"]
+        .as_array()
+        .expect("skipped list")
+        .iter()
+        .find(|row| row["reason"] == reason)
+        .unwrap_or_else(|| panic!("no {reason} row:\n{report}"))
 }
 
 #[test]
@@ -272,7 +352,12 @@ fn init_then_scan_works_in_a_fresh_directory() {
     assert_eq!(report["api"], 1, "{report}");
     assert_eq!(report["docs"], json!([]), "{report}");
     assert_eq!(
-        report["skipped"]["always_excluded"], 1,
+        skip_row(&report, "always_excluded")["entries"],
+        1,
         "the .janus/ sidecar is never vault content (§8.6):\n{report}"
+    );
+    assert_eq!(
+        report["walk"]["directories_pruned"], 1,
+        "the sidecar is pruned, not enumerated:\n{report}"
     );
 }

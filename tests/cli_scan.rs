@@ -279,13 +279,33 @@ fn scan_json_is_a_versioned_report_with_one_entry_per_document() {
         assert!(doc["content_hash"].as_str().unwrap().len() == 64, "{doc}");
     }
 
-    // Every skip rule is present even at zero, so consumers never have to guess.
-    let skipped = report["skipped"].as_object().unwrap();
+    // Every skip rule is present even at zero, in a fixed order, so consumers
+    // never have to guess.
+    let skipped = report["skipped"].as_array().expect("skipped list");
     assert_eq!(skipped.len(), 7);
-    assert_eq!(skipped["config_exclude"], 1, "archive/private/secret.md");
-    assert_eq!(skipped["hidden"], 1, ".hidden.md");
+    assert_eq!(skip_row(&report, "config_exclude")["entries"], 1);
+    assert_eq!(skip_row(&report, "hidden")["entries"], 1);
     // janus.toml and decisions/draft.txt are the two non-Markdown files.
-    assert_eq!(skipped["not_markdown"], 2);
+    assert_eq!(skip_row(&report, "not_markdown")["entries"], 2);
+
+    // `.janus/` and `target/` are pruned, not enumerated: one entry each, no
+    // files. A pruned directory is one entry however much it holds.
+    let excluded = skip_row(&report, "always_excluded");
+    assert_eq!(excluded["entries"], 2, "{excluded}");
+    assert_eq!(excluded["pruned_directories"], 2, "{excluded}");
+    assert_eq!(report["walk"]["directories_pruned"], 2, "{report}");
+    // Two documents were read; `decisions/draft.txt` was refused as a file.
+    assert_eq!(report["walk"]["files"], 2, "{report}");
+}
+
+/// One rule's row in the `skipped` list.
+fn skip_row<'a>(report: &'a Value, reason: &str) -> &'a Value {
+    report["skipped"]
+        .as_array()
+        .expect("skipped list")
+        .iter()
+        .find(|row| row["reason"] == reason)
+        .unwrap_or_else(|| panic!("no {reason} row:\n{report}"))
 }
 
 #[test]
