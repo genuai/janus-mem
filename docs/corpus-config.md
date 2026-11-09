@@ -94,6 +94,13 @@ believe" over the archive, weighted at `archived_weight` so an old fact cannot
 outrank a current one. Naming the corpus does not promote it; the weight still
 applies, because a name says where to look and not that the facts are current.
 
+`--workspace` is a global flag, so you write it before or after the subcommand.
+Only the commands that read a workspace take it: `search`, `facts`, `read`,
+`status`, `corpora`, `rpc` and `mcp`. Every other command works on one corpus and
+refuses it with a usage error — `init`, `scan`, `chunks`, `index`, `doctor`,
+`ids`, `moves`, `lineage` and `suggest-links` — because a command that ignored
+the flag would report success for a corpus you did not name.
+
 **If the retired tree sits inside the primary's root,** the primary still walks
 it. Keep one exclude line for it in the primary's `janus.toml`, so the tree is
 indexed once, by its own corpus:
