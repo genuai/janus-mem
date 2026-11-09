@@ -259,17 +259,22 @@ fn case_5_4_a_stale_index_is_pruned_by_the_rebuild_and_by_janus_index() {
     let archived = search(dir.path(), ARCHIVED_ONLY, Some("context"));
     assert_eq!(rows(&archived), [("context".to_owned(), SHARED.to_owned())]);
 
-    // `janus index` works on one corpus and refuses `--workspace` (M6b-24), so
-    // the workspace arrives in the environment. It must prune to the same count.
+    // `janus index --workspace` applies the same prune a read does (M6b-30), so
+    // the workspace arrives as a flag and the receipt names the pruned count.
     fs::remove_dir_all(dir.path().join(PRIMARY).join(".janus")).expect("drop the index");
-    let output = janus_in(dir.path())
-        .env("JANUS_WORKSPACE", workspace(dir.path()))
-        .args(["--vault", PRIMARY, "index", "--no-embeddings"])
-        .output()
-        .expect("run janus index");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "janus index failed: {stderr}");
+    let (stdout, stderr) = run_ok(
+        dir.path(),
+        &[
+            "--vault",
+            PRIMARY,
+            "index",
+            "--no-embeddings",
+            "--workspace",
+            &workspace(dir.path()),
+        ],
+    );
     assert!(stderr.contains("is inside corpus"), "{stderr}");
+    assert!(stdout.contains("1 document(s)"), "{stdout}");
     assert_eq!(docs(&manifest), json!(1));
 }
 

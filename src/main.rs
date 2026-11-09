@@ -153,10 +153,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // Read commands discover the corpus upwards, so `janus scan` works from
         // anywhere inside a vault (§6.1).
         Command::Scan { json, verbose } => {
-            let root = vault::resolve_corpus(cli.vault)?;
-            tracing::info!(vault = %root.display(), "corpus resolved");
-
-            let config = Config::load(&root)?;
+            let (root, config) = corpus_config(workspace, cli.vault)?;
             scan::run(
                 &root,
                 &config,
@@ -269,7 +266,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // nothing and takes no lock, so it works while a writer holds the index.
         // In a workspace it also lists every corpus the workspace names.
         Command::Status { json } => {
-            let fleet = resolve_fleet(workspace, cli.vault, false)?;
+            let fleet = status_fleet(workspace, cli.vault)?;
             call_tool(
                 &fleet,
                 Tool::Status,
@@ -363,21 +360,10 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             progress,
             paths,
         } => {
-            let root = vault::resolve_corpus(cli.vault)?;
-            tracing::info!(vault = %root.display(), "corpus resolved");
-
-            let mut config = Config::load(&root)?;
-            // A corpus that is a parent in the ambient workspace must not
-            // publish the nested corpus's documents again: the rebuild reads the
-            // same prune a query reads (case 5.4, M6b-26).
-            if let Some(found) = ambient_workspace()? {
-                for warning in &found.warnings {
-                    eprintln!("warning: {warning}");
-                }
-                if let Some(corpus) = found.corpora.iter().find(|corpus| corpus.root == root) {
-                    found.apply_prunes(&corpus.id, &mut config);
-                }
-            }
+            // The config carries the workspace's prune, so the walk that counts
+            // is the walk that publishes: one config, one file list, one number
+            // (M6b-26, M6b-30).
+            let (root, config) = corpus_config(workspace, cli.vault)?;
             let progress = progress_enabled(progress);
             // `--no-embeddings` is a statement about the generation, so it skips
             // resolution entirely: no model is loaded for a lexical build, and
@@ -566,7 +552,13 @@ fn resolve_fleet(
 ) -> Result<Fleet, JanusError> {
     match query_workspace(explicit, root.is_some())? {
         Some(found) => workspace_fleet(&found, no_embeddings),
-        None => single_fleet(root, no_embeddings),
+        None => {
+            let root = vault::resolve_corpus(root)?;
+            tracing::info!(vault = %root.display(), "corpus resolved");
+
+            let config = Config::load(&root)?;
+            Ok(single_fleet(root, config, no_embeddings))
+        }
     }
 }
 
@@ -586,19 +578,74 @@ fn workspace_fleet(found: &workspace::Workspace, no_embeddings: bool) -> Result<
 }
 
 /// One corpus, as every command read it before M6b.
-fn single_fleet(root: Option<PathBuf>, no_embeddings: bool) -> Result<Fleet, JanusError> {
-    let root = vault::resolve_corpus(root)?;
-    tracing::info!(vault = %root.display(), "corpus resolved");
-
-    let config = Config::load(&root)?;
+fn single_fleet(root: PathBuf, config: Config, no_embeddings: bool) -> Fleet {
     let (embedder, degraded) = read_embedder(&config, no_embeddings);
-    Ok(Fleet::single(Engine::new(
+    Fleet::single(Engine::new(
         root,
         config,
         Box::new(SystemClock),
         embedder,
         degraded,
-    )))
+    ))
+}
+
+/// The fleet a status call answers from (§6.11, M6b-20, M6b-30).
+///
+/// A named root is one corpus, and its config carries the workspace's prune of
+/// it, so the digest status compares is the digest the build wrote. Without a
+/// root the workspace names the corpora, as every other read reads it.
+fn status_fleet(workspace: Option<PathBuf>, root: Option<PathBuf>) -> Result<Fleet, JanusError> {
+    match root {
+        Some(root) => {
+            let (root, config) = corpus_config(workspace, Some(root))?;
+            Ok(single_fleet(root, config, false))
+        }
+        None => resolve_fleet(workspace, None, false),
+    }
+}
+
+/// The one corpus a command reads, and the config it reads it under (§6.11).
+///
+/// The config is the corpus's own file plus the prune the workspace derives for
+/// it (M6b-26). One config produces one walk, so the count a receipt prints and
+/// the digest a status compares come from the files the index publishes
+/// (M6b-30).
+///
+/// `workspace` is `--workspace`. Without it, the variable and the platform file
+/// still name a workspace, because the prune they derive decides what the walk
+/// finds. A workspace named on the command line must name this corpus: a prune
+/// the user asked for cannot be a silent no-op.
+fn corpus_config(
+    workspace: Option<PathBuf>,
+    root: Option<PathBuf>,
+) -> Result<(PathBuf, Config), JanusError> {
+    let root = vault::resolve_corpus(root)?;
+    tracing::info!(vault = %root.display(), "corpus resolved");
+
+    let mut config = Config::load(&root)?;
+    let named = workspace.is_some();
+    let Some(found) = workspace_for_prune(workspace)? else {
+        return Ok((root, config));
+    };
+    for warning in &found.warnings {
+        eprintln!("warning: {warning}");
+    }
+    match found.corpora.iter().find(|corpus| corpus.root == root) {
+        Some(corpus) => found.apply_prunes(&corpus.id, &mut config),
+        None if named => {
+            return Err(JanusError::Usage {
+                message: format!(
+                    "{}: no corpus has root {}; name a corpus the workspace lists, or drop \
+                     --workspace",
+                    found.path.display(),
+                    root.display()
+                ),
+            });
+        }
+        // An ambient workspace that names no corpus here has nothing to prune.
+        None => {}
+    }
+    Ok((root, config))
 }
 
 /// The workspace a query reads, when one names it (§6.11).
@@ -630,15 +677,16 @@ fn query_workspace(
     }
 }
 
-/// The workspace the environment names, when one does (§6.11).
+/// The workspace whose prune a one-corpus command reads (§6.11).
 ///
-/// A command that works on one corpus refuses `--workspace` (M6b-24), so only the
-/// variable and the platform file can name a workspace here. The prune such a
-/// workspace derives still applies: a rebuild it triggers must not publish a
-/// nested corpus's documents a second time (M6b-26).
-fn ambient_workspace() -> Result<Option<workspace::Workspace>, JanusError> {
+/// `--workspace`, then `JANUS_WORKSPACE`, then the platform file. A command that
+/// reads one corpus still reads this workspace, because the prune decides what
+/// its walk finds and therefore what its index holds (M6b-26, M6b-30).
+fn workspace_for_prune(
+    explicit: Option<PathBuf>,
+) -> Result<Option<workspace::Workspace>, JanusError> {
     let env = std::env::var_os("JANUS_WORKSPACE").map(PathBuf::from);
-    match workspace::resolve(None, env, &workspace_config_dir()) {
+    match workspace::resolve(explicit, env, &workspace_config_dir()) {
         Ok(path) => Ok(Some(workspace::Workspace::load(&path)?)),
         // No workspace anywhere is the documented single-corpus mode.
         Err(JanusError::Usage { .. }) => Ok(None),
@@ -650,11 +698,14 @@ fn ambient_workspace() -> Result<Option<workspace::Workspace>, JanusError> {
 ///
 /// The flag is global, so the parser accepts it everywhere. A command that
 /// parsed it and ignored it would answer about one corpus while looking like it
-/// read the workspace, and `janus index --workspace w.toml` would publish one
-/// corpus and report success. The refusal is a `usage` failure, so the exit code
-/// is the one a caller already knows (M6b-24).
+/// read the workspace. The refusal is a `usage` failure, so the exit code is the
+/// one a caller already knows (M6b-24).
+///
+/// The message says the command works on one corpus, and that is now true of
+/// every command that reaches it: the three commands that read a workspace for
+/// its prune — `index`, `scan` and `status` — accept the flag (M6b-30).
 fn refuse_workspace(command: &Command, named: Option<&Path>) -> Result<(), JanusError> {
-    let Some(path) = named.filter(|_| !federates(command)) else {
+    let Some(path) = named.filter(|_| !reads_workspace(command)) else {
         return Ok(());
     };
     Err(JanusError::Usage {
@@ -669,16 +720,24 @@ fn refuse_workspace(command: &Command, named: Option<&Path>) -> Result<(), Janus
 
 /// The commands that read a workspace (§6.11).
 ///
-/// The list names the commands that do, not the ones that do not: a command
-/// added later refuses the flag until someone writes it to read a workspace, so
-/// the default is the safe one.
-fn federates(command: &Command) -> bool {
+/// `search`, `facts`, `read`, `corpora`, `rpc` and `mcp` read its corpora.
+/// `index`, `scan` and `status` read its prune for the one corpus they name
+/// (M6b-30). The list names the commands that do read a workspace, not the ones
+/// that do not: a command added later refuses the flag until someone writes it
+/// to read one, so the default is the safe one.
+///
+/// Deliberately absent: `init`, `chunks`, `doctor`, `ids`, `moves`, `lineage`
+/// and `suggest-links` work on one corpus and apply no prune, so the flag must
+/// stay a refusal for them.
+fn reads_workspace(command: &Command) -> bool {
     matches!(
         command,
         Command::Search { .. }
             | Command::Facts { .. }
             | Command::Read { .. }
             | Command::Status { .. }
+            | Command::Scan { .. }
+            | Command::Index { .. }
             | Command::Corpora { .. }
             | Command::Rpc { .. }
             | Command::Mcp { .. }
@@ -687,19 +746,16 @@ fn federates(command: &Command) -> bool {
 
 /// The word a user types to name a command that works on one corpus.
 ///
-/// A federating command never reaches a message, so it shares the fallback name
-/// rather than repeating the list above.
+/// Only a refused command reaches a message, so this lists the refused ones.
 fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Init => "init",
-        Command::Scan { .. } => "scan",
         Command::Doctor { .. } => "doctor",
         Command::Ids { .. } => "ids",
         Command::Moves { .. } => "moves",
         Command::SuggestLinks { .. } => "suggest-links",
         Command::Lineage { .. } => "lineage",
         Command::Chunks { .. } => "chunks",
-        Command::Index { .. } => "index",
         _ => "command",
     }
 }

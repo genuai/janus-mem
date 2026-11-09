@@ -95,11 +95,18 @@ outrank a current one. Naming the corpus does not promote it; the weight still
 applies, because a name says where to look and not that the facts are current.
 
 `--workspace` is a global flag, so you write it before or after the subcommand.
-Only the commands that read a workspace take it: `search`, `facts`, `read`,
-`status`, `corpora`, `rpc` and `mcp`. Every other command works on one corpus and
-refuses it with a usage error — `init`, `scan`, `chunks`, `index`, `doctor`,
-`ids`, `moves`, `lineage` and `suggest-links` — because a command that ignored
-the flag would report success for a corpus you did not name.
+Ten commands read a workspace. Seven read its corpora: `search`, `facts`, `read`,
+`status`, `corpora`, `rpc` and `mcp`. Three read its prune for the one corpus
+they name: `scan`, `index` and `status`. The other commands work on one corpus and
+refuse the flag with a usage error — `init`, `chunks`, `doctor`, `ids`, `moves`,
+`lineage` and `suggest-links` — because a command that ignored the flag would
+report success for a corpus you did not name.
+
+Name the workspace on `scan`, `index` and `status` too, so their counts match
+what a query reads. `janus index --workspace workspace.toml` publishes the
+pruned corpus, and `janus scan --workspace workspace.toml` then reports the same
+number of documents. Without the flag, those three commands read the variable and
+the platform file, and with none of the three they walk the whole tree.
 
 **A retired tree inside the primary's root needs no exclude line.** The workspace
 prunes every corpus root that lies inside another corpus root from that parent's

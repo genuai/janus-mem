@@ -298,6 +298,34 @@ into a corpus's `janus.toml`.
 **Case 5.6.** A workspace whose corpora sit side by side prunes nothing and warns
 about nothing, so no existing workspace changes shape.
 
+### 3.7 The counts one corpus reports (P6)
+
+**Statement.** `index`, `scan` and `status` read the same workspace a query
+reads, and every number they print describes the documents the prune leaves.
+
+**Case 6.1.** `janus index --workspace W --vault R` publishes the pruned corpus,
+and its human receipt, its `--json` receipt and the manifest state one count.
+The same command with `--dry-run` plans that count and writes nothing.
+
+**Case 6.2.** On that index, `janus status --workspace W --vault R` reports
+`stale: false`, and `janus scan --workspace W --vault R` reports the published
+number of documents, not the walk's.
+
+**Case 6.3.** The variable and the platform file name the same workspace as the
+flag, so all three commands answer the same numbers without it.
+
+**Case 6.4.** A workspace with two nested roots prunes both, and the count is the
+set the prune leaves — not the walk's count minus one child.
+
+**Case 6.5.** An explicit workspace that names no corpus at the resolved root is
+a `usage` error naming the file and the root. An ambient one that names no corpus
+there prunes nothing, because a platform default must not fail a corpus it does
+not describe.
+
+**Case 6.6.** `chunks`, `doctor`, `ids`, `moves`, `lineage`, `suggest-links` and
+`init` keep refusing the flag, and the list of refusals is a deliberate choice in
+the code.
+
 ## 4. Decisions
 
 | ID | Decision | Why |
@@ -330,6 +358,9 @@ about nothing, so no existing workspace changes shape.
 | M6b-26 | A corpus root inside another corpus root is pruned from the parent's effective excludes; the workspace derives it at load and keeps it in memory | The walk is not workspace-aware, so the parent indexed a retired tree twice and won: the copy at full weight outranked its owner at `archived_weight`. The fact belongs to the workspace, not to the corpus, because one corpus can be primary in one workspace and archived in another. Writing it into a corpus file would also be a write to the user's vault, which this release does not have. |
 | M6b-27 | The pruned count is the nested corpus's own admitted documents, measured once per workspace load | The parent's `[index] exclude` patterns are relative to the parent's root and cannot be evaluated from the child's, so the honest number is the child's walk. The count is what makes the prune visible instead of silent. |
 | M6b-28 | A read of a pruned path, asked of the parent, is a `usage` failure that names the owning corpus | `not_found` would send the caller hunting for a typo in a file they can see on disk. The path is known, the owner is known, and answering with the parent's copy is the defect this phase removes. |
+| M6b-29 | `index`, `scan` and `status` take `--workspace`, and a corpus root named with `--vault` together with a workspace is not a contradiction for them | The workspace is not their answer; it is the exclude list their walk reads. A root plus a workspace names one corpus and the prunes of it, while a root plus a corpora list is two subjects — which is still what M6b-14 refuses on the query path. |
+| M6b-30 | One config per command: `corpus_config` returns the root and the config with the workspace's prunes applied, and the walk, the plan, the publish and the digest all read that one value | Two walks that disagree leave `status` comparing a pair that never existed, and patching a printed number hides it. The walk that counts must be the walk that publishes. |
+| M6b-31 | An explicit workspace that names no corpus at the resolved root is a `usage` error; an ambient one prunes nothing there | A flag the user typed cannot be a silent no-op, and a platform default must not fail a corpus it does not describe. |
 
 ## 5. Phases
 
@@ -431,6 +462,27 @@ hold.
 **Split seam.** Part 1 is the prune and its tests; part 2 is the reporting and the
 guide. Measured and not taken: see §12.
 
+### Phase 6 — The counts one corpus reports (defect fix)
+
+**Files.** `src/main.rs` (`corpus_config`, `workspace_for_prune`, `status_fleet`,
+the three command arms, and the refusal list), `tests/workspace_counts.rs` (new),
+`tests/cli_workspace_flag.rs`, `tests/workspace_nested.rs`, `docs/corpus-config.md`,
+`SPEC.md` §9.1, this file.
+
+**Build.** Resolve one corpus and its config with the workspace's prunes applied,
+and read the walk, the plan, the publish and the digest from that one value.
+Accept `--workspace` on `index`, `scan` and `status`; keep refusing it where no
+prune applies.
+
+**Tests.** Cases 6.1–6.6.
+
+**Accept.** The three commands print the count they publish on a corpus with a
+pruned nested root; `status` calls that index fresh; a corpus with no workspace is
+byte-identical.
+
+**Split seam.** Part 1 is `index` and `scan`; part 2 is `status` and the refusal
+list. Measured and not taken: see §12.
+
 ## 6. Cross-cutting requirements
 
 - The gates of `AGENTS.md`, unchanged.
@@ -501,6 +553,12 @@ whose estimate held. The test number fell twice during the phase: the first draf
 of `tests/workspace_nested.rs` was 475 lines, and two of its cases were merged
 because they shared one setup. §12 states what was cut.
 
+**Delivered, M6b-6.** 150 logic against a ceiling of 250, and 366 tests against
+400. The estimate was 180 and 200. The logic is one helper, one prune source and
+three command arms; the test lines are a new file and two adjusted cases. The
+split seam was measured and not taken: part 2 is about 25 lines of `main.rs`, so
+a first review would read the same one-config rule twice. §12 states the reasoning.
+
 ## 10. SPEC corrections
 
 1. **§9.2.** Add `corpus?` to `read_document` and to `janus_status`'s response, and state
@@ -514,8 +572,10 @@ because they shared one setup. §12 states what was cut.
    **Delivered in M6b-4.**
 4. **§16.2.** Name the `workspace.toml` keys this milestone actually reads, and drop the
    example's implication that `promote` is available. (P4.) **Delivered in M6b-4.**
-5. **§9.1.** Add `--workspace` to the seven commands that take it, and state that every other
-   command refuses it. (P4.) **Delivered in M6b-4.**
+5. **§9.1.** Add `--workspace` to the commands that take it, and state that every other
+   command refuses it. (P4.) **Delivered in M6b-4**, and extended in M6b-6: `scan`,
+   `index` and `status` read the workspace's prune, so ten commands take the flag and
+   seven refuse it.
 
 ## 11. Handoff
 
@@ -989,6 +1049,120 @@ the next phase that needs it.
 workspace already knows; a prune derived for `scan`, `doctor`, `chunks`, `ids`,
 `moves`, `lineage` and `suggest-links`, which read one corpus and no workspace.
 
+### M6b-6 — The counts one corpus reports
+
+**State.** Complete. One pull request. It fixes the (c) item of case 5.4: the
+prune reached the build a read triggers, but not the counts `index`, `scan` and
+`status` printed.
+
+**The defect, measured.** A corpus whose workspace prunes a nested archive of
+226 documents walks 2,336 documents and publishes 2,110. The three commands could
+not be told which workspace to read: they refused an explicit `--workspace`, and
+they read the ambient one, so the same corpus was described two ways and the
+answer depended on how the user named the workspace.
+
+| Command | Before | After |
+|---|---|---|
+| `index --workspace W` | `usage` failure: the flag did not apply | publishes 2,110 and prints 2,110 |
+| `index` with W in the environment | publishes 2,110 | publishes 2,110 |
+| `scan` with W in the environment | prints 2,336, the walk's count | prints 2,110 |
+| plain `status`, W not visible to it | `stale`, 2,336 against 2,110 | reads W, `fresh`, 2,110 |
+| `status --workspace W` on a 2,336 index | `stale` | `fresh` after that index |
+
+**The fixture states the same shape at 2 and 1.** The committed nested fixture
+has one document in the primary and one in its archive, so the walk admits two
+and the prune leaves one. On a copy of it, before the change: `index
+--workspace` exited 2; `scan` with the workspace in the environment reported
+`walk.files` 2; `status --workspace` reported the primary `stale` against a
+manifest that held 2. After: `index --workspace` printed `1 document(s)` and the
+manifest held 1; `scan` reported 1; `status` reported `fresh: 1 documents`.
+
+**It was not a printing bug.** `index` prints the count of the snapshot it
+publishes, and the manifest states the same field, so no arithmetic in the
+receipt was wrong. The walk was. A command that applied the prune built and
+printed 2,110, and a command that did not built and printed 2,336 — both
+honestly. Patching the printed number would have left `status` comparing a walk
+of 2,336 with a manifest of 2,110 for as long as the corpus held a nested root.
+
+**Files.** `src/main.rs` (`corpus_config`, `workspace_for_prune`, `status_fleet`,
+the `scan` and `index` arms, the `status` arm, `reads_workspace`, `command_name`),
+`tests/workspace_counts.rs` (new), `tests/cli_workspace_flag.rs` (case 4.5 loses
+`scan` and `index`), `tests/workspace_nested.rs` (case 5.4 names the flag),
+`docs/corpus-config.md` (the list of commands that take the flag), `SPEC.md`
+§9.1 (the same list), this file.
+
+**What runs.** `corpus_config` resolves the corpus root once, loads its config,
+and applies the prunes the workspace derives for that corpus. One config produces
+one walk: the plan, the chunks, the manifest, the receipt and the digest all read
+that walk, so the count `index` prints is the count it publishes, and the digest
+`status` compares is the digest the build wrote (M6b-30). The workspace is read
+from `--workspace`, then the variable, then the platform file (M6b-29).
+
+`status` keeps its two answers. With no `--vault`, a workspace still lists every
+corpus it names, as M6b-20 asks. With `--vault`, that one corpus is read under
+the workspace's prune of it, so its digest can match its manifest; the workspace
+and `corpora` fields are absent, because the answer is one corpus. Naming both
+flags is now allowed, and a workspace that names no corpus at that root is a
+`usage` error naming the file and the root (M6b-31).
+
+**The refusal list is deliberate.** `reads_workspace` names the nine commands
+that read a workspace: the six that read its corpora, and the three that read its
+prune. `init`, `chunks`, `doctor`, `ids`, `moves`, `lineage` and `suggest-links`
+apply no prune and keep refusing the flag, which the comment above the function
+states. The refusal message is now true of every command that reaches it: no
+refused command reads a workspace in the environment.
+
+**Cases.**
+
+| Case | Evidence |
+|---|---|
+| 6.1 one count from the receipt and the manifest | `case_6_1_index_scan_and_status_count_what_the_prune_leaves` |
+| 6.2 `status` calls that index fresh, and `scan` prints it | the same case |
+| 6.3 the variable counts the same as the flag | `case_6_2_the_ambient_workspace_counts_the_same_as_the_flag` |
+| 6.4 two nested roots are counted, not subtracted | `case_6_3_two_nested_corpora_are_counted_not_subtracted` |
+| 6.5 a workspace that names no corpus there is `usage` | `case_6_4_a_workspace_that_names_no_corpus_at_the_root_is_a_usage_error` |
+| 6.6 the seven other commands still refuse | `case_6_5_a_command_that_reads_no_workspace_still_refuses_the_flag` |
+
+**Single-corpus evidence.** With no workspace anywhere, `corpus_config` applies
+no prune, so every walk, digest and golden is unchanged: `tests/golden_scan.rs`,
+`tests/golden_search.rs`, `tests/golden_chunks.rs`, `tests/cli_status.rs` and
+`tests/cli_workspace_flag.rs` pass without a snapshot change. `scan --json` keeps
+its shape: a pruned directory is one `config_exclude` entry, which is the same
+row an `exclude` line produces, and no field moves.
+
+**Gates.** fmt, clippy with `-D warnings`, test (947 passed, 2 ignored), doc
+(zero warnings), the Windows cross-check. Size: logic 150, tests 366.
+
+**Size against the plan, and the split seam.** The budget was 250 logic and 400
+tests; the estimate was 180 and 200. The delivery is 150 and 366, so both
+ceilings hold. The logic is one helper, one prune source and three command arms.
+The test number is a new file plus two adjusted cases, and its fixture data is
+written at runtime instead of committed, so a second nested root costs no fixture
+file.
+
+The split seam — part 1 `index` and `scan`, part 2 `status` and the refusal list —
+was measured and not taken. Part 2 is about 25 lines of `src/main.rs`, and the
+helper it needs is the one part 1 introduces, so a first review would read the
+same rule twice to save 25 lines of the second diff.
+
+**What the plan got wrong.** The plan said `index --rebuild` prints the walk
+count while it publishes 2,110. It prints what it publishes. The two numbers came
+from two runs that saw different workspaces: the run that published 2,110 saw the
+workspace, and the report that named 2,336 saw none. The real defect was a walk
+that depended on how the workspace was named, which is why the fix is one config
+rather than one subtraction. The plan's §11 warning was right about this, and
+this log records the measurement that shows why.
+
+The plan also said `docs/corpus-config.md` tells a reader to run `janus index`
+before a workspace read. The guide tells them to run `janus scan` and
+`janus status`, and its list of commands that take `--workspace` named neither.
+The guide now shows all three.
+
+**Not included.** The prune itself, the merge, the weight, `read` and the query
+path (merged); `promote`, cross-corpus links and every write (M7); `chunks`,
+`doctor`, `ids`, `moves`, `suggest-links` and `lineage`, which stay single-corpus
+and keep refusing the flag; a prune-derived count in those six reports.
+
 ## 13. M6b close-out
 
 Six done-when rows from §8. Five are met in this repository. Row 1's number is
@@ -1016,4 +1190,6 @@ measured in the private corpus's project, and this log does not invent it.
 archived corpus is hard-excluded unless a query names it, `read` and `status`
 understand a workspace, the three surfaces agree, the guide recommends a role
 instead of an exclude line, and a corpus root nested inside another is pruned from
-the parent so one tree is indexed once.
+the parent so one tree is indexed once. M6b-6 then made the prune reach the three
+reports that describe a corpus: `index`, `scan` and `status` print the documents
+the prune leaves, and `status` calls that index fresh.
