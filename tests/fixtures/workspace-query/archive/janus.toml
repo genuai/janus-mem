@@ -1,0 +1,18 @@
+# Fixture corpus: the archived half of the federated-query fixture.
+#
+# The principle carries the higher authority of the two fact rows (1.50 against
+# the primary's 1.20) and a weaker lexical match, so the facts case can prove that
+# authority orders the list and the weight only scales `final`.
+#
+# `principle` is timeless by default, so decay is 1.0 and the arithmetic of the
+# case stays exact.
+
+index_dir = ".janus"
+corpus_id = "context"
+
+[authority]
+principle = 1.50
+note = 0.90
+
+[scoring]
+title_boost = 0.0

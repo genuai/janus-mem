@@ -10,8 +10,13 @@
 //! relevance = (alpha * semantic + (1 - alpha) * lexical) * title_boost
 //! authority = type_authority * status_factor            §6.6, §7.2
 //! decay     = exp(-ln2 * age_days / half_life_days)     or 1.0
-//! final     = relevance * authority * decay
+//! final     = relevance * authority * decay * corpus
 //! ```
+//!
+//! `corpus` is `1.0` outside a workspace, and the workspace's `archived_weight`
+//! for a row from an archived corpus (M6b §2.4). It is one factor of `final`,
+//! applied by [`Breakdown::with_corpus`] after scoring, so a single corpus
+//! cannot change another's factors (§6.11).
 //!
 //! **Status is an inclusion rule, not a weight** (§3.2): [`rank_documents`]
 //! drops a document the intent excludes rather than scoring it zero.
@@ -245,9 +250,33 @@ pub struct Breakdown {
     pub authority: f64,
     /// Time decay, `1.0` when it does not apply.
     pub decay: f64,
-    /// `relevance * authority * decay`.
+    /// The workspace's weight for this row's corpus: `1.0` for a primary corpus
+    /// and outside a workspace, `archived_weight` for an archived one (§2.4 of
+    /// the M6b plan). Omitted from JSON when it is `1.0`, so a single-corpus
+    /// report is byte-identical to the one before federation existed.
+    #[serde(rename = "corpus", skip_serializing_if = "is_neutral")]
+    pub corpus: f64,
+    /// `relevance * authority * decay * corpus`.
     #[serde(rename = "final")]
     pub final_score: f64,
+}
+
+impl Breakdown {
+    /// Multiplies `final` by one corpus's weight and reports it (§2.4, M6b-2).
+    ///
+    /// The only place a corpus changes a score. Every other factor keeps the
+    /// value its own corpus gave it, so no corpus can influence another's row.
+    #[must_use]
+    pub fn with_corpus(mut self, factor: f64) -> Self {
+        self.corpus = factor;
+        self.final_score *= factor;
+        self
+    }
+}
+
+/// Whether a corpus factor is the neutral `1.0` that no report needs to print.
+fn is_neutral(factor: &f64) -> bool {
+    *factor == 1.0
 }
 
 /// The corpus-relative facts an undated document's decay needs (§3.13, M5-17).
@@ -372,6 +401,7 @@ pub fn score(input: &ScoreInput<'_>) -> Breakdown {
         status_factor,
         authority,
         decay,
+        corpus: 1.0,
         final_score: relevance * authority * decay,
     }
 }
@@ -882,6 +912,7 @@ mod tests {
             status_factor: 1.0,
             authority: 1.5,
             decay: 1.0,
+            corpus: 1.0,
             final_score: 0.75,
         };
         assert_eq!(scored, expected);
@@ -1386,6 +1417,7 @@ mod tests {
                 status_factor: 1.0,
                 authority: 1.0,
                 decay: 1.0,
+                corpus: 1.0,
                 final_score,
             },
             chunk_id: chunk_id(chunk),

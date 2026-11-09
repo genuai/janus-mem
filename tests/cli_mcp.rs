@@ -278,6 +278,7 @@ fn every_tool_schema_matches_its_parameter_struct() {
         tags: None,
         include_superseded: None,
         decay_half_life_days: None,
+        corpus: None,
     };
     let facts = FactsParams {
         query: None,
@@ -285,6 +286,7 @@ fn every_tool_schema_matches_its_parameter_struct() {
         types: None,
         scope: None,
         limit: None,
+        corpus: None,
     };
     let lineage = LineageParams {
         path: None,

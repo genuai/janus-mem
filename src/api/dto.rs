@@ -106,6 +106,8 @@ pub struct SearchParams {
     pub include_superseded: Option<bool>,
     /// Override the per-type decay half-life, in days.
     pub decay_half_life_days: Option<f64>,
+    /// The corpora to read: `primary` (default), `all`, or a workspace id.
+    pub corpus: Option<String>,
 }
 
 /// The parameters of one `get_authoritative_facts` call (M6 §2.5).
@@ -122,6 +124,8 @@ pub struct FactsParams {
     pub scope: Option<Vec<String>>,
     /// Maximum facts returned.
     pub limit: Option<usize>,
+    /// The corpora to read: `primary` (default), `all`, or a workspace id.
+    pub corpus: Option<String>,
 }
 
 /// The parameters of one `get_lineage` call (M6 §2.5): exactly one is required.

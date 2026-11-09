@@ -171,9 +171,9 @@ impl Engine {
                 encode(&report)
             }
             Tool::AuthoritativeFacts => {
-                let options = facts_options(&params(call)?);
+                let options = facts_options(&params(call)?)?;
                 let loaded = self.load()?;
-                let report = search::facts::compute(
+                let listing = search::facts::compute(
                     &self.root,
                     &self.config,
                     self.clock.as_ref(),
@@ -182,7 +182,7 @@ impl Engine {
                     &options,
                     started,
                 )?;
-                encode(&report)
+                encode(&listing.report)
             }
             Tool::Lineage => {
                 let options = lineage_options(&params(call)?);
@@ -324,6 +324,10 @@ fn params<T: DeserializeOwned>(call: &Call) -> Result<T, JanusError> {
 
 /// One `search` call as the query engine's options.
 fn search_options(params: &SearchParams) -> Result<search::Options, JanusError> {
+    // One engine serves one corpus and holds one load cache, so a selection
+    // that needs a workspace is refused here rather than answered from the
+    // wrong corpus (M6b §2.3, M6b-12).
+    search::federate::Choice::parse(params.corpus.as_deref()).require_single()?;
     Ok(search::Options {
         query: params.query.clone(),
         intent: params.intent.clone(),
@@ -349,8 +353,9 @@ fn search_options(params: &SearchParams) -> Result<search::Options, JanusError> 
 }
 
 /// One `get_authoritative_facts` call as the command's options.
-fn facts_options(params: &FactsParams) -> search::facts::Options {
-    search::facts::Options {
+fn facts_options(params: &FactsParams) -> Result<search::facts::Options, JanusError> {
+    search::federate::Choice::parse(params.corpus.as_deref()).require_single()?;
+    Ok(search::facts::Options {
         query: params.query.clone(),
         tags: params.tags.clone().unwrap_or_default(),
         types: params.types.clone().unwrap_or_default(),
@@ -362,7 +367,7 @@ fn facts_options(params: &FactsParams) -> search::facts::Options {
         embedding_reason: None,
         progress: false,
         json: false,
-    }
+    })
 }
 
 /// One `read_document` call as the read path's options.
@@ -443,6 +448,47 @@ mod tests {
             ("chunker", |m| m.chunker.max_chars = 1),
             ("embedder", |m| m.embedder = None),
         ]
+    }
+
+    #[test]
+    fn a_corpus_selection_this_surface_cannot_serve_is_a_usage_failure() {
+        // One engine holds one corpus and one cache, so `all` and a named id are
+        // refused instead of answered from the wrong corpus (M6b §2.3). The
+        // default and `primary` are the same selection this surface serves.
+        let mut params = SearchParams {
+            query: "cache".to_owned(),
+            limit: None,
+            intent: None,
+            as_of: None,
+            scope: None,
+            scope_only: None,
+            types: None,
+            tags: None,
+            include_superseded: None,
+            decay_half_life_days: None,
+            corpus: None,
+        };
+        assert!(search_options(&params).is_ok());
+        params.corpus = Some("primary".to_owned());
+        assert!(search_options(&params).is_ok());
+        for refused in ["all", "context"] {
+            params.corpus = Some(refused.to_owned());
+            let error = search_options(&params).expect_err("needs a workspace");
+            assert!(error.to_string().contains(refused), "{refused}: {error}");
+            assert!(matches!(error, JanusError::Usage { .. }), "{refused}");
+        }
+        let facts = FactsParams {
+            query: None,
+            tags: None,
+            types: None,
+            scope: None,
+            limit: None,
+            corpus: Some("all".to_owned()),
+        };
+        assert!(matches!(
+            facts_options(&facts),
+            Err(JanusError::Usage { .. })
+        ));
     }
 
     #[test]
