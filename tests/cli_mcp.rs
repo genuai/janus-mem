@@ -20,7 +20,7 @@ use common::{
 use janus_mem::api::dto::{FactsParams, LineageParams, ReadParams, SearchParams, StatusParams};
 use janus_mem::api::write_refusal;
 use janus_mem::index::store::Lock;
-use janus_mem::mcp::protocol::SUPPORTED_VERSIONS;
+use janus_mem::mcp::protocol::{INSTRUCTIONS, SUPPORTED_VERSIONS};
 use serde_json::{Value, json};
 
 /// The fixture document every path-shaped call names.
@@ -121,6 +121,53 @@ fn case_6_1_initialize_answers_the_current_version() {
         json!({ "name": "janus-mem", "version": env!("CARGO_PKG_VERSION") }),
         "{result}"
     );
+}
+
+#[test]
+fn case_9_2_initialize_ships_the_instructions_verbatim() {
+    // Product copy, written out by hand: a reworded sentence is a product
+    // change, so it must fail here rather than slip into the handshake.
+    const EXPECTED: &str = concat!(
+        "You are reading a janus-mem corpus: Markdown files, each with a type and a date.\n\n",
+        "The type sets how much a file counts in a search, from idea at the bottom to decision at the top. The date sets how fast it fades. Principles, specs and decisions never fade.\n\n",
+        "The ladder is idea, note, journal, finding, principle, spec, decision.\n\n",
+        "When a note turns out to matter, it is time to promote it. Ask the user to restate it as a principle, a spec or a decision, with its own date. A promoted note keeps answering questions after the note itself would have faded.\n\n",
+        "Tags say what a file is about. The type says how much it counts.\n\n",
+        "search gives you spans and scores. read_document gives you the words.\n\n",
+        "This release reads. It does not write."
+    );
+    assert_eq!(INSTRUCTIONS, EXPECTED);
+    let dir = fixture_vault();
+    let answers = session(dir.path(), "");
+    assert_eq!(answers[0]["result"]["instructions"], json!(EXPECTED));
+}
+
+#[test]
+fn case_9_2_no_other_answer_carries_the_instructions() {
+    let dir = fixture_vault();
+    let script = format!(
+        "{}{}\n{}\n{}\n",
+        mcp_opening(),
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }),
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/list" }),
+        json!({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": { "name": "search", "arguments": { "query": "cache" } },
+        })
+    );
+    let answers = mcp(dir.path(), false, &script).answers;
+    // One handshake and three answers, so every later line was read.
+    assert_eq!(answers.len(), 4, "{answers:?}");
+    assert!(
+        answers[0]["result"]["instructions"].is_string(),
+        "{answers:?}"
+    );
+    for answer in &answers[1..] {
+        assert!(
+            answer["result"].get("instructions").is_none(),
+            "only the handshake carries instructions: {answer}"
+        );
+    }
 }
 
 #[test]

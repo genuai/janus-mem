@@ -128,7 +128,8 @@ impl Session<'_> {
 ///
 /// A requested revision this server accepts is echoed. Any other revision is
 /// answered with the newest one this server speaks, and the client decides
-/// whether to continue.
+/// whether to continue. `instructions` is the one place the model learns how a
+/// corpus is organised, so it travels with the handshake (§9.2).
 fn handshake(params: &Value) -> Result<Value, Error> {
     let requested = params
         .get("protocolVersion")
@@ -148,6 +149,7 @@ fn handshake(params: &Value) -> Result<Value, Error> {
         "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "janus-mem", "version": env!("CARGO_PKG_VERSION") },
+        "instructions": protocol::INSTRUCTIONS,
     }))
 }
 
