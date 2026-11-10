@@ -208,5 +208,8 @@ retired; nobody read them. Long-lived, project-level decisions belong in
 - Never shell out to git, and never run git commands on the user's behalf.
 - Never write to the vault outside an explicit write command (§9.3).
 - Never log document content above `debug`, and never at `info` (§8.5).
+- Never copy content from a private or proprietary corpus into this repository: not into a
+  commit, a pull request, an issue, a test fixture, a doc, a code comment, or an agent's
+  reply. Cite a path and a count instead. A leak survives the commit that removes it.
 - Never add a dependency without a one-line justification comment in `Cargo.toml`
   (§8.2).
