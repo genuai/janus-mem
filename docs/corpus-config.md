@@ -176,6 +176,12 @@ win". Then check the two or three questions where that claim is not obviously
 true. Do not move a weight to fix one answer; move it when the order is wrong
 for the whole corpus.
 
+The authority order is also a ladder. A low rung counts little and fades, so a
+note that turns out to matter is worth restating as a principle, a spec or a
+decision, with its own date. Those three rungs never fade. An agent reads the
+same rule in the MCP `instructions` string, which the server sends when a client
+connects.
+
 ## 4. Decide the undated rule, and know which one you shipped
 
 A document with no date must still be scored. `[decay] undated` takes two values:

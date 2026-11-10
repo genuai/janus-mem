@@ -1159,6 +1159,8 @@ A process may cache one loaded generation, and only one: the payload of `index.b
 
 ### 9.2 MCP read tools
 
+The `initialize` result carries an `instructions` string that describes the type ladder and the rule for promoting a note.
+
 | Tool | Params | Returns |
 |---|---|---|
 | `search` | `query`, `limit?`, `intent?`, `as_of?`, `corpus?`, `scope?`, `scope_only?`, `types?`, `tags?`, `include_superseded?`, `decay_half_life_days?` | Ranked results with score breakdown, age, declared + effective status, validity window, corpus, path |

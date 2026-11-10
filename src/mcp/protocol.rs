@@ -22,6 +22,13 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 /// one is honest, and an older host must still connect (§3.6 case 6.2).
 pub const SUPPORTED_VERSIONS: [&str; 2] = [PROTOCOL_VERSION, "2025-03-26"];
 
+/// What the client shows the model before the first tool call (§9.2).
+///
+/// This is the one place an agent learns how the corpus is organised and what
+/// to do when a note turns out to matter. It is product copy, not an
+/// implementation detail: a rewritten sentence fails a test.
+pub const INSTRUCTIONS: &str = "You are reading a janus-mem corpus: Markdown files, each with a type and a date.\n\nThe type sets how much a file counts in a search, from idea at the bottom to decision at the top. The date sets how fast it fades. Principles, specs and decisions never fade.\n\nThe ladder is idea, note, journal, finding, principle, spec, decision.\n\nWhen a note turns out to matter, it is time to promote it. Ask the user to restate it as a principle, a spec or a decision, with its own date. A promoted note keeps answering questions after the note itself would have faded.\n\nTags say what a file is about. The type says how much it counts.\n\nsearch gives you spans and scores. read_document gives you the words.\n\nThis release reads. It does not write.";
+
 /// The line was not JSON.
 pub const PARSE_ERROR: i64 = -32700;
 /// The JSON was not a valid request object.

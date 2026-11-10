@@ -167,6 +167,23 @@ decisions:
 - **Test-first for anything with a rule** (scoring, frontmatter patching,
   chunking). A bug fix lands with a failing test first.
 
+## Writing for readers
+
+Documentation that a person or an agent reads to *use* the tool follows the
+copywriting rules, not the terse plan voice: README, `docs/*.md` guides, MCP
+`instructions`, tool descriptions, error hints.
+
+- Lead with what the reader can do, then the detail.
+- Use the reader's words. "Fades" beats "temporal decay" when both are true.
+- One idea per sentence. Short sentences, active voice, no filler.
+- No AI tells: no contrast reveals ("not X, but Y"), no negation lists, no
+  colon reveals, no em dashes in short copy, no "seamless" or "unlock".
+- Read it aloud.
+- A claim you cannot support does not go in. Name what is missing instead.
+
+Plans, phase logs, decisions and commit message bodies stay terse and
+structured: they are engineering records, and a reader scans them.
+
 ## Where decisions go
 
 Settled decisions go in the phase log of the relevant `docs/<milestone>-breakdown.md`
