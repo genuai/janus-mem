@@ -531,6 +531,8 @@ exit 3 is used for the first time.
 | M7-39 | M7-1 ships as two PRs of one phase, 1a (the hash and the manifest field) and 1b (the comparison, `status` and the `index` report) | The phase measured 253 logic and 426 test lines as one PR, against the 250/350 ceiling. After the review rounds 1a measures 124/181 and 1b 233/437. The review added five cases — the both-causes line, the pinned-config adopt, the pinned-config decline, a trailing-slash hash case, and a `[defaults] status` case — two of them the P1 decline, so 1b is 87 over the phase's 350 test ceiling. The repository's own ceiling still holds: the phase is 597 test lines cumulative against `main`, inside 900. No comment was shaved and no case dropped to fit; the phase ceiling gates an initial submission, and a reviewed round reports it. Wrong if a part is over its ceiling after review closes. |
 | M7-40 | `status` and the read reports count the config in freshness; `doctor` and `corpora` count the corpus only | One word, two questions. `status` answers "may I trust the stored metadata", so a config edit makes it stale and it names the reason. `search`, `facts`, `read` and `lineage` report `index.stale` only when a read declined to refresh, so the field keeps its meaning and gains the config as a second cause. `doctor` reports graph and link facts read from the generation, and a config edit is not one of them; `corpora` reports one row per corpus from its manifest and one digest. A phase that wants the config in either one adds it there and amends this row. |
 | M7-41 | A long-lived process keeps the config it started with, and never publishes a manifest under a config the file on disk disagrees with | `Engine.config` is loaded once. Two processes pinned to different configs would otherwise alternate a refresh and a publish on every read, and the type that answers would depend on who wrote last. So on a config mismatch a read re-reads the file: if the manifest already names the file's config it adopts it and publishes nothing, if the file names this process's config it publishes, and otherwise it publishes nothing and says `refresh: skipped, config changed elsewhere`. Reloading the config in `Engine` is a design change with its own risks and is not in this phase. Reopen it when a user reports that a server needed a restart to see a config edit. When the manifest already names the file's config, a pinned process adopts it: it answers with the new cached metadata while its per-call values — authority, decay, scoring — stay the ones it started with, and `status` keeps reporting stale for that process. That is the one case where a read is silent and the index is current, and the two answers differ on purpose. |
+| M7-42 | A null value's span is empty and sits directly after the key's colon; the rendered value carries its own separator space | §2.1 says the span starts at the value's first byte, and a null has no byte. The point after the colon keeps the spacing before a trailing comment where the file put it, so `status:  # none` becomes `status: superseded  # none` and not `status: superseded# none`. Wrong if a later phase needs to put a value anywhere but directly after the colon. |
+| M7-43 | A refusal costs one key, except a line at column 0 that is not a key | A quoted key, or a name with a space, is a real key that no patch can name: it is reported `Unsupported(Nested)` and left alone, and the other keys still splice. A column-0 line with no key at all means the block is not a mapping, so no key in it can be spliced safely and the whole block is refused. Wrong if a vault reports "cannot patch this file" for a file whose only oddity is one unreachable key. |
 
 ## 5. Phases
 
@@ -595,6 +597,24 @@ and report. Do not add a YAML crate and do not narrow the escape set to fit.
 
 **Split seam.** The scanner first (`scan.rs` and its cases), then the splice and the value
 writer. Each half is reviewable alone and neither needs the other's tests.
+
+**Amendment.** The seam is taken, because the phase measures 929 logic lines as one change
+against a ceiling of 600. Part 1 is branch `m7-2-scan` and holds `src/write/scan.rs`, the
+public surface it needs, and the shape half of the cases. Part 2 is branch `m7-2-patcher`,
+opened from part 1, and holds `patch.rs`, `value.rs` and every case that asserts a splice or a
+refusal.
+
+Three things in the plan move with the split, and none of them silently:
+
+1. `tests/goldens/frontmatter/` is not created. A golden is a literal in
+   `tests/write_patch.rs`, so one changed byte shows as a changed line of a test instead of in
+   a file the reviewer has to diff.
+2. The refusal half of cases 1.5, 1.6, 1.8 and 1.12c arrives in part 2. A refusal is `plan`'s
+   answer, and `plan` is part 2. Part 1 asserts the shape each case is about — the closed
+   `ValueShape` list and the key pattern — and part 2 asserts that `plan` refuses.
+3. The scanner returns one value, `write::Scan`: the fence span, the YAML extent, the newline
+   and one `KeySpan` per key. §2.1 lists the key span only. Appending a key before the closing
+   fence needs the block's own extent, so the type is additive and changes nothing in §2.1.
 
 ### M7-3 — The atomic replace and the lock
 
