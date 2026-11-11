@@ -923,6 +923,22 @@ mod tests {
     }
 
     #[test]
+    fn final_is_the_documented_product_in_the_documented_order() {
+        // Relevance 0.61, authority 1.5 and a one-day decay. The left-to-right
+        // product differs from `relevance * (authority * decay)` in the last
+        // bit, so this pins the documented grouping (§3.2).
+        let dated = with_date(doc(1, Status::Active), Some(days_ago(1)));
+        let mut input = input(&dated, Intent::Current, false);
+        input.lexical = 0.61;
+        let scored = score(&input);
+        assert_eq!(
+            scored.final_score,
+            scored.relevance * scored.authority * scored.decay,
+            "final must be relevance * authority * decay, evaluated in that order"
+        );
+    }
+
+    #[test]
     fn draft_is_a_fraction_of_active_and_unknown_is_neutral() {
         let active = score_doc(&doc(1, Status::Active));
         let draft = score_doc(&doc(1, Status::Draft));
