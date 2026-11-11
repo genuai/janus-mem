@@ -47,7 +47,7 @@ before the first line of write code.
 4. Optimistic concurrency on `expected_hash`, on every surface.
 5. `update_frontmatter`, `write_document`, `supersede_document`, `promote_document` over
    MCP and `janus rpc`, and `janus set`, `janus write`, `janus supersede`, `janus promote`.
-6. Receipts, and seven new public error codes.
+6. Receipts, and eight new public error codes.
 7. `--allow-write` as a real gate, and `writes_enabled` as a real capability flag.
 8. The config hash in the manifest, because the writer resolves type from config and the
    index caches it (gate defect, 2026-11-10).
@@ -172,6 +172,7 @@ order they were written.
 | `ReadOnlyCorpus { corpus }` | `read_only_corpus` | 4 | the corpus is archived or `read_only` |
 | `WriteDisabled { surface }` | `write_disabled` | 4 | the surface was started without `--allow-write` |
 | `PathExists { path }` | `path_exists` | 4 | `create` named a file that exists |
+| `KeyShape { path, key }` | `key_shape` | 4 | a patch key is outside the key pattern |
 
 Exit 3 is used for the first time. Both new exit-3 codes mean one thing: re-read, then retry.
 A write that fails a shape check is a refusal (exit 4), because a retry without a change of
@@ -256,11 +257,13 @@ before any other case in M7-2. If `oneyaml` cannot read it, M7-2 stops and repor
 add a crate to work around it.
 
 **Case 1.12b (the escape set).** A double-quoted value escapes exactly `\\`, `\"`, `\n`, `\r`,
-`\t`, and every other byte below `0x20` or equal to `0x7f` as `\uXXXX`. A bare value is allowed
-only when every byte is in `[A-Za-z0-9 ._/:@+-]`, the first and last byte are not a space, and
-the string is not a YAML reserved word (`true`, `false`, `null`, `yes`, `no`, `on`, `off`, `~`)
-and not numeric-looking. A test asserts the set, and a second test asserts that each refused
-bare form is accepted when quoted.
+`\t`, and every other byte below `0x20` or equal to `0x7f` as `\uXXXX`. Whether a value may be
+written bare is decided by the **parse-back**, not by a character class: write it bare, parse it
+back, and quote it when the result is not the same string. A class alone is not enough — `a: b`
+and `- x` both pass a permissive class and both change meaning bare (case 1.12's generator
+holds them for exactly this reason). The class `[A-Za-z0-9 ._/:@+-]` is only a fast path, and it
+excludes `: `, a trailing `:`, a leading `-`, `?` or `:`, a lone `-`, and `#`. A test asserts
+the set, and a second test asserts that each refused bare form is accepted when quoted.
 
 **Case 1.12c (the key).** A patch key outside `[A-Za-z0-9][A-Za-z0-9._-]*` is refused with
 `KeyShape`. `a\nsuperseded_by: x`, `a: b`, `a#b` and `"a"` are each refused, and the file is
@@ -411,8 +414,9 @@ has one `expected_hash`, so a second file cannot be guarded; the call creates it
 instead of patching one (M7-35).
 
 **Case 6.8 (rollback).** The second rename fails, through the seam of M7-33. Both files are
-byte-identical to their state before the call, and the error names the file that failed and
-the file that was restored (M7-31).
+byte-identical to their state before the call, **and file 1 keeps its original mode**, because
+a rename of a staged copy would otherwise leave the user's file at the temp file's mode. The
+error names the file that failed and the file that was restored (M7-31).
 
 ### 3.7 `promote_document` (P7)
 
@@ -452,8 +456,9 @@ next read refreshes, and `status` reports the reason until one does (M7-32). It 
 rebuild, so no command exits 1 over a config edit.
 
 **Case 8.1.** After a `[paths]` edit and before any read, `janus status --json` reports
-`stale: true` with `stale_reason: "config"`. Today it reports `stale: false` (measured
-2026-11-10).
+`stale: true` with `stale_reason: "config"`. The field is **absent** when the index is fresh, so
+a fresh report keeps its shape and no read golden moves. Today `status` reports `stale: false`
+(measured 2026-11-10).
 
 **Case 8.2.** After that edit, a `search` answers the new type and prints one `refresh:` line
 naming the config. `status` then reports fresh. The field `config_changed: true` appears on the
@@ -474,7 +479,8 @@ working.
 ### 3.9 What must not change
 
 1. Every read golden stays byte-identical, except the MCP `instructions` golden (case 4.4).
-2. `format_version` stays 6. `api` stays 1. No exit code moves; two are added to the table.
+2. `format_version` stays 6. `api` stays 1. No exit code moves; eight codes are added, and
+exit 3 is used for the first time.
 3. No new dependency.
 4. A read never takes the writer lock.
 5. A write never refreshes the index.
@@ -508,13 +514,13 @@ working.
 | M7-22 | `deprecated` keeps its declared field; no tombstone derivation | Open question 21 changes the status ladder, which a writer must not decide. It stays open. |
 | M7-23 | `promote --link` patches the primary document only; `--adopt` creates a copy | §9.3 and D42: the archive is never moved or rewritten. Case 7.3 asserts the bytes. |
 | M7-24 | The manifest gains `config_hash` over `[frontmatter]`, `[defaults]`, `[types]`, `[paths]` | Enumerate the inputs, then hash them. These four feed the cached type name (`src/index/build.rs:469`). Everything else is read per call, or already fingerprinted, or covered by `corpus_sig` (§2.5). |
-| M7-25 | A manifest without `config_hash` is stale exactly once | An index built before the field existed cannot prove it matches. One rebuild, then fresh. |
+| M7-25 | A manifest without `config_hash` is stale exactly once: one refresh, then fresh | An index built before the field existed cannot prove it matches. The cure is the ordinary metadata refresh, never a cold rebuild (M7-32). |
 | M7-26 | `format_version` stays 6; the field is additive with a defined absence | It follows `corpus_sig` (`src/index/store.rs:107`): no `deny_unknown_fields`, so an older binary ignores it. |
 | M7-27 | `create` refuses an existing path; `overwrite` requires `expected_hash` | Creating over a file is a lost update with no conflict to report. |
 | M7-28 | A write to an archived or `read_only` corpus is refused | M6b-4's field exists; a writer that ignored it would make it a decoration. |
 | M7-29 | The MCP `instructions` string names the write tools and the etag rule | An agent that reads a false capability line will not call the tool that exists. |
 | M7-30 | If M7-7 exceeds its ceiling, `promote` becomes M7b | Cross-corpus promotion is the least-used write and the easiest to defer. The budget protects the review of the writer. |
-| M7-31 | `Plan` keeps the original bytes, and the two-file transaction stages them as its rollback copy | After a rename the old bytes exist nowhere else. A rollback that cannot restore byte for byte is not a rollback. Case 6.8 proves it with an injected failure. |
+| M7-31 | `Plan` keeps the original bytes, and the two-file transaction stages them as its rollback copy, with the original mode | After a rename the old bytes exist nowhere else. A rollback that cannot restore byte for byte and mode for mode is not a rollback. Case 6.8 proves both with an injected failure. |
 | M7-32 | A `config_hash` mismatch is a **refresh** trigger, the same class as a changed file, never a cold rebuild | The cure already exists: a build re-resolves metadata and reuses tokens (`src/index/build.rs:5`). A cold rebuild would make a config edit exit 1 on `search`, which is hostile for a change that needs no re-chunk. |
 | M7-33 | `commit` takes a test-only `Hooks` value with two seams: after the pre-lock check, and before the second rename | The two checks the writer exists for — the under-lock re-read and the rollback — are unreachable in a test without a seam. A no-op production impl keeps the dependency explicit, like `Clock` and `Embedder`. |
 | M7-34 | The cycle check reads the chain from frontmatter on disk, bounded to 64 nodes, not from the index | A write never refreshes the index (M7-17), so an index-based check reads a snapshot the writer just invalidated, and cannot run on a corpus that was never built. Paths are the only link form a write can follow without a snapshot. |
@@ -608,7 +614,18 @@ config key.
 **Accept.** All three surfaces answer one contract; `writes_enabled` tells the truth; a write
 without the flag is impossible; a config key cannot enable it.
 
-**Split seam.** The engine, MCP and rpc first; the CLI command and its human table second.
+**Split seam.** **Taken, not optional.** This phase ships as two pull requests, because it is
+the only phase whose work cannot fit one review at `AGENTS.md`'s ceiling.
+
+- **4a — the engine, MCP and rpc.** `src/engine.rs`, `src/api/*`, `src/error.rs`,
+  `src/mcp/*`, `src/rpc.rs`, `src/status.rs`, `src/config.rs`, `tests/mcp_write.rs`,
+  `tests/cli_rpc.rs`, `tests/cli_mcp.rs`, `tests/cli_status.rs`, `tests/api_envelope.rs`.
+  Cases 2.1–2.3, 2.7a, 2.7b, 2.8, 4.1–4.6.
+- **4b — `janus set`.** `src/cli.rs`, `src/main.rs`, `tests/cli_set.rs`. The human table, the
+  refusal list, and the workspace resolution of a write path (M7-38).
+
+4a carries the codes, the gate and the receipt. 4b adds one command arm over the contract 4a
+proved, so its review reads the surface, not the writer.
 
 ### M7-5 — `write_document` and `janus write`
 
@@ -720,7 +737,8 @@ The one measured product claim M7 makes is W4: **0 of 1** paths today, **1 of 1*
    **1 of 1** case; after one read, the new type answers and `status` is fresh, in **1 of 1**.
 7. Cross-corpus resolution: a promoted link is readable through `get_lineage` in **1 of 1**
    case, and `doctor` reports **0** `other_corpus` rows for it.
-8. `format_version` **6**, `api` **1**, **0** exit codes moved, **2** added and documented.
+8. `format_version` **6**, `api` **1**, **0** exit codes moved, **8** codes added and documented,
+   of which **2** carry the newly used exit 3.
 9. `cargo doc --no-deps`: **0** warnings.
 10. Retrieval: **0** claims. A writer cannot move a ranking number, so no row of this plan asks
     it to.
@@ -733,15 +751,16 @@ The one measured product claim M7 makes is W4: **0 of 1** paths today, **1 of 1*
 | M7-1 config freshness | 250 | ~150 | 350 | ~200 |
 | M7-2 patcher | 600 | ~450 | 900 | ~600 |
 | M7-3 atomic replace + lock | 300 | ~200 | 450 | ~250 |
-| M7-4 `update_frontmatter` + `set` | 700 | ~600 | 900 | ~700 |
+| M7-4 `update_frontmatter` + `set`, two PRs (4a engine/MCP/rpc ~380, 4b CLI ~220) | 600 | ~600 | 900 | ~700 |
 | M7-5 `write_document` | 250 | ~180 | 400 | ~250 |
 | M7-6 `supersede` | 400 | ~300 | 600 | ~400 |
 | M7-7 `promote` + resolution | 550 | ~450 | 750 | ~500 |
 | M7-8 rehearsal | 200 | ~150 | 250 | ~150 |
 
-M7-4 was 500 until the review showed that three surfaces, seven codes with doc comments and
-five test files cannot fit it; the previous milestone delivered 839 against a 400 ceiling on
-comparable work. M7-7 grew by the resolver (M7-37) and by its cases 7.6–7.8.
+M7-4 was 500 until the review showed that three surfaces, eight codes with doc comments and
+five test files cannot fit it. It is now **two PRs of one phase**, 4a and 4b, so the phase
+stays inside `AGENTS.md`'s 600 logic ceiling instead of claiming an exception. M7-7 grew by the
+resolver (M7-37) and by its cases 7.6–7.8.
 
 Estimates run two to three times low in this repository. Each phase names its split seam, and
 the agent splits before the ceiling rather than shaving a comment or dropping a test.
@@ -763,7 +782,9 @@ the agent splits before the ceiling rather than shaving a comment or dropping a 
 6. **§7.4.** State that in-place writes `status` and `superseded_by` on the old document and
    `supersedes` on the new one; that `--append-only` creates the new document and leaves the
    old one untouched; and that no `effective_to` and no `doc_version` is written (M7-20, M7-21,
-   M7-35). This closes open questions 4 and 23 for this milestone.
+   M7-35). **Step 1 of §7.4 also changes**: the new document must not exist, and an existing
+   one is `path_exists` — step 1's "validate both docs exist" is true of the old document
+   only. This closes open questions 4 and 23 for this milestone.
 7. **§8.3.** Add `config_hash`, the four sections it covers, the reason for each section that
    is outside it, and the refresh-trigger rule for a manifest without it (M7-24, M7-25, M7-32).
 8. **§6.11.** State that a qualified cross-corpus link resolves when
