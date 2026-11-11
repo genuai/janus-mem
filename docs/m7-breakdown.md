@@ -533,6 +533,7 @@ exit 3 is used for the first time.
 | M7-41 | A long-lived process keeps the config it started with, and never publishes a manifest under a config the file on disk disagrees with | `Engine.config` is loaded once. Two processes pinned to different configs would otherwise alternate a refresh and a publish on every read, and the type that answers would depend on who wrote last. So on a config mismatch a read re-reads the file: if the manifest already names the file's config it adopts it and publishes nothing, if the file names this process's config it publishes, and otherwise it publishes nothing and says `refresh: skipped, config changed elsewhere`. Reloading the config in `Engine` is a design change with its own risks and is not in this phase. Reopen it when a user reports that a server needed a restart to see a config edit. When the manifest already names the file's config, a pinned process adopts it: it answers with the new cached metadata while its per-call values — authority, decay, scoring — stay the ones it started with, and `status` keeps reporting stale for that process. That is the one case where a read is silent and the index is current, and the two answers differ on purpose. |
 | M7-42 | A null value's span is empty and sits directly after the key's colon; the rendered value carries its own separator space | §2.1 says the span starts at the value's first byte, and a null has no byte. The point after the colon keeps the spacing before a trailing comment where the file put it, so `status:  # none` becomes `status: superseded  # none` and not `status: superseded# none`. Wrong if a later phase needs to put a value anywhere but directly after the colon. |
 | M7-43 | A refusal costs one key, except a line at column 0 that is not a key | A quoted key, or a name with a space, is a real key that no patch can name: it is reported `Unsupported(Nested)` and left alone, and the other keys still splice. A column-0 line with no key at all means the block is not a mapping, so no key in it can be spliced safely and the whole block is refused. Wrong if a vault reports "cannot patch this file" for a file whose only oddity is one unreachable key. |
+| M7-44 | `changed_keys` names a key only when its bytes differ after the patch; an absent key always differs | A receipt describes bytes (M7-14), so a patch that writes the value the file already had reports no change and the same `old_hash` and `new_hash`. A caller can then tell "nothing to do" from "wrote something". Wrong if a caller needs a receipt to list a key it wrote with an unchanged value. |
 
 ## 5. Phases
 
@@ -603,6 +604,11 @@ against a ceiling of 600. Part 1 is branch `m7-2-scan` and holds `src/write/scan
 public surface it needs, and the shape half of the cases. Part 2 is branch `m7-2-patcher`,
 opened from part 1, and holds `patch.rs`, `value.rs` and every case that asserts a splice or a
 refusal.
+
+Part 1 measures 595 logic and 516 test lines against `main`; part 2 measures 360 logic and
+826 test lines against part 1. The two parts sum to 955 logic and 1342 test lines, and the
+phase as one change measures 929 and 1320, because part 2 rewrites part of part 1's
+`src/write/mod.rs`.
 
 Three things in the plan move with the split, and none of them silently:
 
