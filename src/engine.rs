@@ -766,6 +766,7 @@ mod tests {
             vectors_sha: Some("bb".to_owned()),
             vectors_len: Some(256),
             corpus_sig: Some("cc".to_owned()),
+            config_hash: Some("dd".to_owned()),
         }
     }
 
@@ -838,7 +839,7 @@ mod tests {
     fn case_4_6_every_manifest_field_is_compared_or_excused() {
         // A field this test does not name is a field the cache key cannot see,
         // so a new `Manifest` field must be added here or the test fails.
-        const IGNORED: [&str; 9] = [
+        const IGNORED: [&str; 10] = [
             "built_at",
             "built_root",
             "docs",
@@ -848,6 +849,9 @@ mod tests {
             "avgdl",
             "index_len",
             "vectors_len",
+            // Nothing compares the config hash yet: the freshness comparison
+            // arrives in the next part of this phase (M7-39).
+            "config_hash",
         ];
         let value = serde_json::to_value(manifest()).expect("a manifest is JSON");
         let keys: std::collections::BTreeSet<&str> = value

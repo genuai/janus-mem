@@ -127,8 +127,9 @@ impl BuildPlan {
     ///
     /// `corpus_sig` must be the digest of the walk that produced this plan when
     /// the manifest is published: the field describes the files the plan was
-    /// built from, not the end of the build (M4D §3.2). `None` is for a caller
-    /// that only inspects the manifest.
+    /// built from, not the end of the build (M4D §3.2). `config_hash` must be
+    /// the hash of the config the plan was resolved under (M7-1). `None` is for
+    /// a caller that only inspects the manifest.
     ///
     /// # Errors
     ///
@@ -138,6 +139,7 @@ impl BuildPlan {
         root: &Path,
         built_at: &str,
         corpus_sig: Option<&str>,
+        config_hash: Option<&str>,
     ) -> Result<Manifest, Corrupt> {
         let bytes = self.snapshot.to_bytes()?;
         let vectors = self.vectors.as_ref().map(|set| set.artifact().1);
@@ -152,6 +154,7 @@ impl BuildPlan {
             },
             built_at,
             corpus_sig,
+            config_hash,
         ))
     }
 }
@@ -1744,10 +1747,10 @@ mod tests {
         let docs = [document("a.md", "Alpha", "alpha cache")];
         let computed = built(&docs, None);
         let first_manifest = computed
-            .manifest(first.path(), "2025-04-01T00:00:00Z", None)
+            .manifest(first.path(), "2025-04-01T00:00:00Z", None, None)
             .expect("first manifest");
         let second_manifest = computed
-            .manifest(second.path(), "2025-04-01T00:00:00Z", None)
+            .manifest(second.path(), "2025-04-01T00:00:00Z", None, None)
             .expect("second manifest");
 
         assert_ne!(first_manifest.built_root, second_manifest.built_root);

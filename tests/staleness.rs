@@ -103,6 +103,7 @@ fn index(root: &Path) -> store::Manifest {
         vectors_dropped: plan.vectors_dropped,
         built_at: BUILT_AT,
         corpus_sig: Some(&digest),
+        config_hash: None,
     })
     .expect("publish")
 }

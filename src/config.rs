@@ -125,6 +125,13 @@ const DEFAULT_ALPHA: f64 = 0.5;
 /// carries every rare query term. `0.0` reproduces the pre-boost ranking.
 const DEFAULT_TITLE_BOOST: f64 = 1.0;
 
+/// Tag that opens the bytes [`Config::config_hash`] hashes.
+///
+/// A new tag means a new encoding, so every index built under the old one is
+/// stale once. That is the wanted outcome: the same config must never hash two
+/// ways across binaries.
+const CONFIG_HASH_TAG: &str = "janus-mem config hash v1";
+
 /// Upper bound on alias-chain length. A vault with a 16-deep alias chain is not
 /// expressing vocabulary, it is expressing a bug; the cap turns a potential
 /// infinite loop into a deterministic fallback.
@@ -346,6 +353,53 @@ impl Config {
             .iter()
             .find(|hint| hint.matches(rel_path))
             .map(|hint| hint.type_name.as_str())
+    }
+
+    /// blake3 of the config sections whose values the index caches (M7-1).
+    ///
+    /// The four sections are `[frontmatter]`, `[defaults]`, `[types]` and
+    /// `[paths]`. They decide the type, the status and the dates a build stores
+    /// per document, so a change here makes the index stale.
+    ///
+    /// Every other section is outside the hash on purpose: `[authority]`,
+    /// `[decay]`, `[scoring]` and `[links]` are read per call, `[chunking]` has
+    /// its own fingerprint in the manifest, and `[index] exclude` changes the
+    /// admitted set, which the corpus signature already covers.
+    ///
+    /// The bytes are built in a fixed order, so two runs over the same config
+    /// agree. A comment, a blank line or a reordered key changes nothing,
+    /// because this hashes the resolved values and not the file.
+    #[must_use]
+    pub fn config_hash(&self) -> String {
+        let mut bytes = Vec::new();
+        push_str(&mut bytes, CONFIG_HASH_TAG);
+        // `[frontmatter]`: one list per field, in `Field::ALL` order. The count
+        // comes first, so two lists cannot encode as one.
+        for field in Field::ALL {
+            push_str(&mut bytes, field.as_str());
+            let aliases = self.aliases.get(field);
+            push_count(&mut bytes, aliases.len());
+            for alias in aliases {
+                push_str(&mut bytes, alias);
+            }
+        }
+        // `[defaults]`.
+        push_str(&mut bytes, &self.defaults.type_name);
+        push_str(&mut bytes, self.defaults.status.as_str());
+        // `[types]`: alias → canonical. A `BTreeMap`, so the order is the key
+        // order and never the insertion order.
+        push_count(&mut bytes, self.types.len());
+        for (alias, name) in &self.types {
+            push_str(&mut bytes, alias);
+            push_str(&mut bytes, name);
+        }
+        // `[paths]`, most specific first: the order decides which hint wins.
+        push_count(&mut bytes, self.path_hints.len());
+        for hint in &self.path_hints {
+            push_str(&mut bytes, &hint.pattern);
+            push_str(&mut bytes, &hint.type_name);
+        }
+        blake3::hash(&bytes).to_hex().to_string()
     }
 
     /// Whether `[index] exclude` or the workspace's prune hides this
@@ -804,6 +858,19 @@ impl Field {
             Self::SharedWith => "shared_with",
         }
     }
+}
+
+/// Appends a little-endian `u64` length and then the bytes, so two values can
+/// never encode as one.
+fn push_str(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+/// Appends a little-endian `u64` count, so a list of two cannot encode as two
+/// lists of one.
+fn push_count(bytes: &mut Vec<u8>, count: usize) {
+    bytes.extend_from_slice(&(count as u64).to_le_bytes());
 }
 
 /// Frontmatter aliases, one list per [`Field`].
@@ -1288,9 +1355,9 @@ fn build_path_hints(
 
     for (pattern, type_name) in raw {
         let is_glob = pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
-        let matcher = if is_glob {
+        let (pattern, matcher) = if is_glob {
             match Glob::new(&pattern) {
-                Ok(glob) => HintMatcher::Glob(glob.compile_matcher()),
+                Ok(glob) => (pattern, HintMatcher::Glob(glob.compile_matcher())),
                 Err(error) => {
                     warnings.push(ConfigWarning::InvalidGlob {
                         pattern: pattern.clone(),
@@ -1308,7 +1375,13 @@ fn build_path_hints(
                 });
                 continue;
             }
-            HintMatcher::Directory(trimmed.to_owned())
+            // The matcher reads the trimmed form, so the hint records it too:
+            // `docs/` and `docs` are one hint, and the config hash must not
+            // tell them apart (M7-1).
+            (
+                trimmed.to_owned(),
+                HintMatcher::Directory(trimmed.to_owned()),
+            )
         };
 
         hints.push(PathHint {
@@ -1318,9 +1391,9 @@ fn build_path_hints(
         });
     }
 
-    // Longest pattern first, so `decisions/drafts/` beats `decisions/`;
+    // Longest pattern first, so `decisions/drafts` beats `decisions`;
     // lexicographic as a tiebreak keeps the order deterministic for equal
-    // lengths (`BTreeMap` alone would put `decisions/` first and shadow the
+    // lengths (`BTreeMap` alone would put `decisions` first and shadow the
     // nested hint).
     hints.sort_by(|a, b| {
         b.pattern
@@ -1577,6 +1650,113 @@ mod tests {
         assert_eq!(config.aliases(Field::Id).len(), 5);
         assert_eq!(config.decay.half_life_for("finding"), 365.0);
         assert_eq!(config.decay.half_life_for("note"), 180.0);
+    }
+
+    // ─────────────────────── the config hash (M7-1) ───────────────────────
+
+    /// A config that spells out the four sections the index caches.
+    fn cached_sections() -> &'static str {
+        r#"
+        index_dir = ".janus"
+        corpus_id = "main"
+
+        [frontmatter]
+        type = ["type", "kind"]
+
+        [defaults]
+        type = "note"
+        status = "active"
+
+        [types]
+        adr = "decision"
+
+        [paths]
+        "docs/" = "spec"
+        "SPEC.md" = "spec"
+        "#
+    }
+
+    #[test]
+    fn the_config_hash_is_the_same_for_two_parses_of_the_same_text() {
+        let one = parse(cached_sections());
+        let two = parse(cached_sections());
+
+        assert_eq!(one.config_hash(), two.config_hash());
+        assert_eq!(one.config_hash().len(), 64, "blake3 hex is 64 characters");
+    }
+
+    #[test]
+    fn the_config_hash_ignores_comments_blank_lines_and_key_order() {
+        // The same resolved values, spelled differently: the hash reads the
+        // values and never the file's bytes.
+        let plain = parse(cached_sections());
+        let noisy = parse(
+            r#"
+            # a comment that carries nothing
+            corpus_id = "main"
+            index_dir = ".janus"
+
+            [paths]
+            "SPEC.md" = "spec"
+
+            "docs/" = "spec"
+
+            [types]
+            adr = "decision"
+
+            [defaults]
+            status = "active"
+            type = "note"
+
+            [frontmatter]
+            type = ["type", "kind"]
+            "#,
+        );
+
+        assert_eq!(plain.config_hash(), noisy.config_hash());
+    }
+
+    #[test]
+    fn an_edit_to_a_cached_section_changes_the_config_hash() {
+        let base = parse(cached_sections()).config_hash();
+        for edit in [
+            cached_sections().replace(r#""docs/" = "spec""#, r#""docs/" = "principle""#),
+            cached_sections().replace("type = \"note\"", "type = \"idea\""),
+            cached_sections().replace("adr = \"decision\"", "adr = \"finding\""),
+            cached_sections().replace("status = \"active\"", "status = \"draft\""),
+            cached_sections().replace(r#"type = ["type", "kind"]"#, r#"type = ["kind"]"#),
+        ] {
+            assert_ne!(base, parse(&edit).config_hash(), "{edit}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_change_the_config_hash() {
+        // The matcher trims `docs/` to `docs`, so the two match the same files.
+        // Hashing the raw text would make the index stale for nothing.
+        let slashed = parse("index_dir = \".janus\"\n\n[paths]\n\"docs/\" = \"spec\"\n");
+        let bare = parse("index_dir = \".janus\"\n\n[paths]\n\"docs\" = \"spec\"\n");
+
+        assert_eq!(slashed.config_hash(), bare.config_hash());
+        assert_eq!(slashed.path_type_hint("docs/a.md"), Some("spec"));
+        assert_eq!(bare.path_type_hint("docs/a.md"), Some("spec"));
+    }
+
+    #[test]
+    fn an_edit_to_a_query_time_section_leaves_the_config_hash_alone() {
+        let base = parse(cached_sections()).config_hash();
+        for extra in [
+            "[authority]\nspec = 1.9\n",
+            "[decay]\nhalf_life_days = 30\n",
+            "[scoring]\ntitle_boost = 0.0\n",
+            "[links]\nallow_disjoint_supersession = true\n",
+            "[chunking]\nmax_chars = 900\n",
+            "[index]\nexclude = [\"drafts/**\"]\n",
+            "[mcp]\nmax_chars = 100\n",
+        ] {
+            let edited = parse(&format!("{}{extra}", cached_sections())).config_hash();
+            assert_eq!(base, edited, "{extra}");
+        }
     }
 
     // ─────────────────────────── refresh policy ──────────────────────────

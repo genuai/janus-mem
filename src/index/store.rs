@@ -112,6 +112,21 @@ pub struct Manifest {
     /// `format_version` does not move (§8.3).
     #[serde(default)]
     pub corpus_sig: Option<String>,
+    /// blake3 of the config sections whose values the index caches (M7-1).
+    ///
+    /// The four sections are `[frontmatter]`, `[defaults]`, `[types]` and
+    /// `[paths]` ([`Config::config_hash`]). A mismatch makes the index stale and
+    /// the next read refreshes it: a refresh re-resolves metadata and reuses
+    /// tokens, so a config edit never costs a re-chunk.
+    ///
+    /// `None` on a manifest written before M7-1. Such an index cannot prove it
+    /// matches, so it is stale exactly once. The field follows `corpus_sig`: no
+    /// `deny_unknown_fields`, so an older binary ignores it, and
+    /// `format_version` does not move (§8.3).
+    ///
+    /// [`Config::config_hash`]: crate::config::Config::config_hash
+    #[serde(default)]
+    pub config_hash: Option<String>,
 }
 
 /// The hashes and lengths of the payload files one publication wrote (§3.1).
@@ -205,9 +220,10 @@ impl Manifest {
     /// Assembles the manifest for an already-encoded snapshot (I-3).
     ///
     /// `corpus_sig` is the digest of the walk that produced the snapshot
-    /// (M4D §3.1). A writer always has one, so the field is a parameter rather
-    /// than a value patched in afterwards: there is no moment when a manifest
-    /// exists without it.
+    /// (M4D §3.1). `config_hash` is the hash of the config it was built under
+    /// (M7-1). A writer always has both, so they are parameters rather than
+    /// values patched in afterwards: there is no moment when a manifest exists
+    /// without them.
     #[must_use]
     pub fn new(
         root: &Path,
@@ -216,6 +232,7 @@ impl Manifest {
         payloads: Payloads,
         built_at: &str,
         corpus_sig: Option<&str>,
+        config_hash: Option<&str>,
     ) -> Self {
         let (embedder, vectors_sha, vectors_len) = match payloads.vectors {
             Some(artifact) => (Some(artifact.id), Some(artifact.sha), Some(artifact.len)),
@@ -240,6 +257,7 @@ impl Manifest {
             vectors_sha,
             vectors_len,
             corpus_sig: corpus_sig.map(str::to_owned),
+            config_hash: config_hash.map(str::to_owned),
         }
     }
 }
@@ -573,6 +591,9 @@ pub struct Publication<'a> {
     /// manifest without one, which makes the next read fall back to the mtime
     /// rule.
     pub corpus_sig: Option<&'a str>,
+    /// The config hash this plan was built under (M7-1). `None` leaves the
+    /// manifest without one, which makes the next read treat it as stale.
+    pub config_hash: Option<&'a str>,
 }
 
 /// Publishes one generation under the writer lock, manifest last (S-7, S-17).
@@ -658,6 +679,7 @@ fn publish_locked(
         },
         publication.built_at,
         publication.corpus_sig,
+        publication.config_hash,
     );
     let manifest_path = dir.join(MANIFEST_FILE);
     let json = serde_json::to_vec_pretty(&manifest).map_err(|error| {
@@ -1435,6 +1457,8 @@ pub fn build_until_stable(
     // The manifest stores a timestamp, so the one injected date is rendered
     // here, once, instead of arriving twice and drifting (§7.2).
     let built_at = format!("{today}T00:00:00Z");
+    // One hash for the whole build: every pass resolves against this config.
+    let config_hash = config.config_hash();
     let mut walk = first_walk;
     let mut passes = 0;
     // A caller with no printer reports nothing, in one place.
@@ -1455,6 +1479,7 @@ pub fn build_until_stable(
             vectors_dropped: plan.vectors_dropped,
             built_at: &built_at,
             corpus_sig: Some(&digest),
+            config_hash: Some(&config_hash),
         };
         let manifest = publish_locked(&publication, &mut |_| {}, lock)?;
 
@@ -1710,6 +1735,7 @@ mod tests {
             vectors_dropped: None,
             built_at: "2025-04-01T00:00:00Z",
             corpus_sig: None,
+            config_hash: None,
         };
         let manifest = publish(&publication).expect("publish");
 
@@ -1753,6 +1779,7 @@ mod tests {
             vectors_dropped: None,
             built_at: "2025-04-01T00:00:00Z",
             corpus_sig: None,
+            config_hash: None,
         };
         publish(&publication).expect("publish")
     }
