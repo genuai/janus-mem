@@ -76,6 +76,14 @@ struct Embeddings {
 struct Index {
     present: bool,
     stale: Option<bool>,
+    /// Why the index is stale, when the config is one of the reasons (M7-1).
+    ///
+    /// `"config"` when the config is the only cause, `"corpus,config"` when
+    /// both moved. Absent when the index is fresh, so that report keeps the
+    /// shape it had before M7-1. Absent too when only the corpus changed: that
+    /// answer keeps its shape as well.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stale_reason: Option<&'static str>,
     docs: Option<usize>,
     chunks: Option<usize>,
     built_at: Option<String>,
@@ -89,6 +97,7 @@ impl Index {
         Self {
             present: false,
             stale: None,
+            stale_reason: None,
             docs: None,
             chunks: None,
             built_at: None,
@@ -97,11 +106,24 @@ impl Index {
         }
     }
 
-    /// The facts one manifest states, and whether this walk still matches it.
-    fn of(manifest: &Manifest, digest: &str) -> Self {
+    /// The facts one manifest states, and whether this walk and this config
+    /// still match it.
+    fn of(manifest: &Manifest, digest: &str, config_hash: &str) -> Self {
+        // A manifest without a config hash predates M7-1, so it cannot prove it
+        // matches. The next read refreshes it and records one (M7-25).
+        let corpus = manifest.corpus_sig.as_deref() != Some(digest);
+        let config = manifest.config_hash.as_deref() != Some(config_hash);
+        // Name every cause that is true: a caller that also edited a document
+        // must not read "config" and conclude nothing else moved.
+        let reason = match (corpus, config) {
+            (_, false) => None,
+            (true, true) => Some("corpus,config"),
+            (false, true) => Some("config"),
+        };
         Self {
             present: true,
-            stale: Some(manifest.corpus_sig.as_deref() != Some(digest)),
+            stale: Some(corpus || config),
+            stale_reason: reason,
             docs: Some(manifest.docs),
             chunks: Some(manifest.chunks),
             built_at: Some(manifest.built_at.clone()),
@@ -179,7 +201,7 @@ pub fn compute(
             degraded,
         },
         index: match &manifest {
-            Some(manifest) => Index::of(manifest, &digest),
+            Some(manifest) => Index::of(manifest, &digest, &config.config_hash()),
             None => Index::absent(),
         },
         metadata: MetadataBlock {

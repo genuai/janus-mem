@@ -372,7 +372,9 @@ fn generation(
     let index_mtime = fs::metadata(dir.join(store::INDEX_FILE))
         .and_then(|metadata| metadata.modified())
         .ok();
-    let stale = Witness::of(files, &load.manifest, index_mtime).stale;
+    // `None`: this report judges the corpus. A config edit is not a graph fact,
+    // so `doctor` keeps the freshness fields it had before M7-1.
+    let stale = Witness::of(files, &load.manifest, index_mtime, None).stale;
     Some(Generation {
         snapshot: load.snapshot,
         stale,

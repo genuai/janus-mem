@@ -615,6 +615,7 @@ fn reusable(cached: &Manifest, disk: &Manifest, digest: &str) -> bool {
         && cached.chunker == disk.chunker
         && cached.embedder == disk.embedder
         && cached.corpus_sig == disk.corpus_sig
+        && cached.config_hash == disk.config_hash
         && disk.corpus_sig.as_deref() == Some(digest)
 }
 
@@ -773,12 +774,13 @@ mod tests {
     /// One changed manifest field: its name, and a change that names one fact.
     type Row = (&'static str, fn(&mut Manifest));
 
-    /// The nine fields the key compares.
-    fn compared() -> [Row; 9] {
+    /// The ten fields the key compares.
+    fn compared() -> [Row; 10] {
         [
             ("index_sha", |m| m.index_sha = "00".to_owned()),
             ("vectors_sha", |m| m.vectors_sha = Some("00".to_owned())),
             ("corpus_sig", |m| m.corpus_sig = Some("00".to_owned())),
+            ("config_hash", |m| m.config_hash = Some("00".to_owned())),
             ("format_version", |m| m.format_version = 99),
             ("schema_version", |m| m.schema_version = 99),
             ("corpus_id", |m| m.corpus_id = "other".to_owned()),
@@ -839,7 +841,7 @@ mod tests {
     fn case_4_6_every_manifest_field_is_compared_or_excused() {
         // A field this test does not name is a field the cache key cannot see,
         // so a new `Manifest` field must be added here or the test fails.
-        const IGNORED: [&str; 10] = [
+        const IGNORED: [&str; 9] = [
             "built_at",
             "built_root",
             "docs",
@@ -849,9 +851,6 @@ mod tests {
             "avgdl",
             "index_len",
             "vectors_len",
-            // Nothing compares the config hash yet: the freshness comparison
-            // arrives in the next part of this phase (M7-39).
-            "config_hash",
         ];
         let value = serde_json::to_value(manifest()).expect("a manifest is JSON");
         let keys: std::collections::BTreeSet<&str> = value

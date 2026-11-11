@@ -140,6 +140,11 @@ fn push_field(bytes: &mut Vec<u8>, field: &[u8]) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Witness {
     /// True when the corpus changed after the index was built.
+    pub corpus: bool,
+    /// True when the manifest was built under another config (M7-1).
+    pub config: bool,
+    /// True when either changed, so the generation no longer describes this
+    /// read.
     pub stale: bool,
 }
 
@@ -150,18 +155,29 @@ impl Witness {
     /// one predates M4D, so the mtime rule decides. `index_mtime` is
     /// `mtime(index.bin)`; `None` means it could not be read, and a read that
     /// cannot prove a change reports a fresh corpus.
+    ///
+    /// `config_hash` is this process's [`Config::config_hash`], or `None` for a
+    /// report that judges the corpus only. A mismatch is a refresh trigger, the
+    /// same class as a changed file, never a cold rebuild (M7-32). A manifest
+    /// without a hash predates M7-1, so it cannot prove it matches and is stale
+    /// exactly once.
     #[must_use]
     pub fn of(
         files: &[DiscoveredFile],
         manifest: &store::Manifest,
         index_mtime: Option<SystemTime>,
+        config_hash: Option<&str>,
     ) -> Self {
         let signature = Signature::of(files);
-        match manifest.corpus_sig.as_deref() {
-            Some(stored) => Self {
-                stale: signature.digest() != stored,
-            },
-            None => Self::from_signature(&signature, manifest.docs, index_mtime),
+        let corpus = match manifest.corpus_sig.as_deref() {
+            Some(stored) => signature.digest() != stored,
+            None => Self::from_signature(&signature, manifest.docs, index_mtime).stale,
+        };
+        let config = config_hash.is_some_and(|hash| manifest.config_hash.as_deref() != Some(hash));
+        Self {
+            corpus,
+            config,
+            stale: corpus || config,
         }
     }
 
@@ -184,16 +200,18 @@ impl Witness {
         indexed_docs: usize,
         index_mtime: Option<SystemTime>,
     ) -> Self {
-        if signature.is_empty() {
-            return Self {
-                stale: indexed_docs > 0,
-            };
-        }
-        let (Some(index_mtime), Some(newest)) = (index_mtime, signature.max_mtime()) else {
-            return Self { stale: false };
+        let corpus = if signature.is_empty() {
+            indexed_docs > 0
+        } else {
+            match (index_mtime, signature.max_mtime()) {
+                (Some(index_mtime), Some(newest)) => newest > index_mtime,
+                _ => false,
+            }
         };
         Self {
-            stale: newest > index_mtime,
+            corpus,
+            config: false,
+            stale: corpus,
         }
     }
 }
@@ -251,6 +269,11 @@ pub enum Decision {
     Fresh,
     /// A corpus refresh published a generation.
     CorpusChanged,
+    /// The corpus and the config both changed, so one refresh republished the
+    /// generation (M7-1).
+    CorpusAndConfigChanged,
+    /// The config changed, so a refresh republished the generation (M7-1).
+    ConfigChanged,
     /// The root moved, so the manifest was rewritten and the generation read.
     ManifestRepaired,
     /// The index was absent, so a read built it.
@@ -263,6 +286,10 @@ pub enum Decision {
     SkippedManual,
     /// The caller passed `--no-rebuild`.
     SkippedNoRebuild,
+    /// The config file on disk disagrees with this process and with the
+    /// manifest, so this process is the stale one and must not publish
+    /// (M7-41).
+    SkippedConfigElsewhere,
 }
 
 impl Decision {
@@ -272,12 +299,15 @@ impl Decision {
         match self {
             Self::Fresh => None,
             Self::CorpusChanged => Some("refresh: corpus changed"),
+            Self::CorpusAndConfigChanged => Some("refresh: corpus and config changed"),
+            Self::ConfigChanged => Some("refresh: config changed"),
             Self::ManifestRepaired => Some("refresh: manifest repaired"),
             Self::NoIndexYet => Some("refresh: no index yet"),
             Self::IndexRepaired => Some("refresh: index repaired"),
             Self::SkippedBusy => Some("refresh: skipped, index busy"),
             Self::SkippedManual => Some("refresh: skipped, refresh = manual"),
             Self::SkippedNoRebuild => Some("refresh: skipped, --no-rebuild"),
+            Self::SkippedConfigElsewhere => Some("refresh: skipped, config changed elsewhere"),
         }
     }
 }
@@ -361,15 +391,61 @@ pub fn on_read(
         });
     }
 
-    // Step 2: the witness. One walk, one digest, one boolean.
-    let stale = Witness::of(&walk.files, &load.manifest, index_mtime(dir)).stale;
-    if !stale {
+    // Step 2: the witness. One walk, one digest, one config hash, one answer.
+    let config_hash = options.config.config_hash();
+    let witness = Witness::of(
+        &walk.files,
+        &load.manifest,
+        index_mtime(dir),
+        Some(&config_hash),
+    );
+    if !witness.stale {
         return Ok(ReadOutcome {
             load,
             decision: Decision::Fresh,
             stale: false,
         });
     }
+
+    // M7-41: a process keeps the config it started with, so a mismatch can be
+    // the file's fault or this process's. Publishing under a config that
+    // disagrees with the file makes two processes overwrite each other forever,
+    // so the file decides. Nothing here runs on a fresh read: one config parse
+    // per mismatch, not per query.
+    if witness.config {
+        match config_hash_on_disk(options.root) {
+            // The file names the config the manifest records, so the index
+            // describes the corpus as it is now. Only a corpus change can be
+            // left, and this process cannot publish under its own config.
+            Some(on_disk) if load.manifest.config_hash.as_deref() == Some(on_disk.as_str()) => {
+                let decision = if witness.corpus {
+                    Decision::SkippedConfigElsewhere
+                } else {
+                    Decision::Fresh
+                };
+                return Ok(ReadOutcome {
+                    load,
+                    decision,
+                    stale: witness.corpus,
+                });
+            }
+            // This process's config is the file's, so a publish describes the
+            // corpus and no other process will undo it.
+            Some(on_disk) if on_disk == config_hash => {}
+            // Neither the manifest's nor this process's, or the file cannot be
+            // read: this process cannot prove its config is the corpus's, so it
+            // publishes nothing. The answer still comes from the validated
+            // generation, which may not match the file, so it is stale.
+            _ => {
+                return Ok(ReadOutcome {
+                    load,
+                    decision: Decision::SkippedConfigElsewhere,
+                    stale: true,
+                });
+            }
+        }
+    }
+
     if let Some(decision) = decline(options, refresh, true) {
         return Ok(ReadOutcome {
             load,
@@ -390,7 +466,7 @@ pub fn on_read(
     // Step 7: adopt only when the writer's manifest names the corpus this read
     // walked. A writer whose plan predates the edit also validates, and
     // adopting it would lose the edit (§3.4).
-    if let Some(fresh) = adopt_under_lock(options, &digest)? {
+    if let Some(fresh) = adopt_under_lock(options, &digest, &config_hash)? {
         return Ok(ReadOutcome {
             load: fresh,
             decision: Decision::Fresh,
@@ -398,11 +474,26 @@ pub fn on_read(
         });
     }
     let load = rebuild(dir, options, walk, &lock)?;
+    // Name both causes when both are true: a reader that edited a document and
+    // the config must not be told only one of them moved.
     Ok(ReadOutcome {
         load,
-        decision: Decision::CorpusChanged,
+        decision: match (witness.corpus, witness.config) {
+            (true, true) => Decision::CorpusAndConfigChanged,
+            (false, true) => Decision::ConfigChanged,
+            _ => Decision::CorpusChanged,
+        },
         stale: false,
     })
+}
+
+/// The config hash the corpus file states now, or `None` when it cannot be
+/// read or does not parse.
+///
+/// `None` is "cannot prove", never "unchanged": a caller that cannot read the
+/// file must not publish a manifest that claims to describe it (M7-41).
+fn config_hash_on_disk(root: &Path) -> Option<String> {
+    Config::load(root).ok().map(|config| config.config_hash())
 }
 
 /// Why this read may not write, or `None` when it may (§3.3, rows 2 and 6).
@@ -419,11 +510,15 @@ fn decline(options: &LoadOptions<'_>, refresh: Refresh, corpus_changed: bool) ->
 }
 
 /// Re-reads the manifest under the lock and adopts it only when it describes
-/// the corpus this read walked (§3.4 step 7).
+/// the corpus and the config this read walked (§3.4 step 7).
 ///
 /// A failed read here is not an error: the caller builds instead, and that build
 /// reports the real failure if the disk is broken.
-fn adopt_under_lock(options: &LoadOptions<'_>, digest: &str) -> Result<Option<Load>, JanusError> {
+fn adopt_under_lock(
+    options: &LoadOptions<'_>,
+    digest: &str,
+    config_hash: &str,
+) -> Result<Option<Load>, JanusError> {
     // `Refuse` guarantees this never tries to take the lock we already hold.
     let locked = LoadOptions {
         policy: Policy::Refuse,
@@ -435,14 +530,22 @@ fn adopt_under_lock(options: &LoadOptions<'_>, digest: &str) -> Result<Option<Lo
     if load.refresh_request.is_some() {
         return Ok(None);
     }
-    Ok(adoptable(load.manifest.corpus_sig.as_deref(), digest).then_some(load))
+    Ok(adoptable(
+        load.manifest.corpus_sig.as_deref(),
+        digest,
+        load.manifest.config_hash.as_deref(),
+        config_hash,
+    )
+    .then_some(load))
 }
 
-/// True when a writer's manifest names the corpus this read walked (§3.4 step
-/// 7). A manifest without a digest predates M4D, so the two cannot be compared
-/// and the caller builds.
-fn adoptable(stored: Option<&str>, digest: &str) -> bool {
-    stored == Some(digest)
+/// True when a writer's manifest names the corpus this read walked, and the
+/// config it resolved (§3.4 step 7).
+///
+/// A manifest without a digest predates M4D and one without a config hash
+/// predates M7-1, so neither can be compared and the caller builds.
+fn adoptable(stored: Option<&str>, digest: &str, config: Option<&str>, hash: &str) -> bool {
+    stored == Some(digest) && config == Some(hash)
 }
 
 /// Builds a generation under a lock the caller holds, as a [`Load`].
@@ -542,11 +645,18 @@ mod tests {
 
     #[test]
     fn adoption_needs_the_writers_digest_to_equal_the_one_this_read_computed() {
-        assert!(adoptable(Some("abc"), "abc"));
-        assert!(!adoptable(Some("abc"), "abcd"));
+        assert!(adoptable(Some("abc"), "abc", Some("h1"), "h1"));
+        assert!(!adoptable(Some("abc"), "abcd", Some("h1"), "h1"));
         assert!(
-            !adoptable(None, "abc"),
+            !adoptable(None, "abc", Some("h1"), "h1"),
             "a pre-M4D manifest cannot be compared"
+        );
+        // A manifest built under another config resolves other metadata, so
+        // adopting it would serve the type the edit removed (M7-1).
+        assert!(!adoptable(Some("abc"), "abc", Some("h2"), "h1"));
+        assert!(
+            !adoptable(Some("abc"), "abc", None, "h1"),
+            "a pre-M7-1 manifest cannot be compared either"
         );
     }
 

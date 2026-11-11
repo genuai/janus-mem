@@ -1499,6 +1499,18 @@ pub fn build_until_stable(
     }
 }
 
+/// The `config_hash` a published manifest records (M7-1).
+///
+/// The outer `None` means no manifest, or one that does not parse. The inner
+/// `None` means the manifest predates the field. Both make the next build the
+/// first one to record a hash, so it reports the change it applied.
+#[must_use]
+pub fn published_config_hash(dir: &Path) -> Option<Option<String>> {
+    let bytes = fs::read(dir.join(MANIFEST_FILE)).ok()?;
+    let manifest: Manifest = serde_json::from_slice(&bytes).ok()?;
+    Some(manifest.config_hash)
+}
+
 /// The previous generation as an identity basis (M5 §3.1).
 ///
 /// This reads and decodes `index.bin` and never opens `vectors.f32`: an identity

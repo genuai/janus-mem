@@ -1235,7 +1235,9 @@ fn undated_note(undated: usize, rule: UndatedDecay) -> String {
 /// The `index` block of the JSON report: what the answer came from (M4D §3.1).
 #[derive(Debug, Serialize)]
 struct IndexDto {
-    /// True when the corpus changed after the index was built.
+    /// True when the corpus or the config changed after the index was built and
+    /// this read declined to refresh, so the answer comes from an older
+    /// generation (M7-40).
     stale: bool,
 }
 

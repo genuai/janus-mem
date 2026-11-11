@@ -75,6 +75,12 @@ pub fn run(
     // `janus index PATH` forces the ids the build will publish (§3.1, R-6).
     let basis = store::previous_snapshot(&dir);
     let forced = forced_documents(root, config, &walk, basis.as_ref(), today, &options.paths)?;
+    // Read before the build: this is the manifest the build replaces. The outer
+    // `None` means no manifest at all, so nothing was applied.
+    let config_hash = config.config_hash();
+    let previous_config = store::published_config_hash(&dir);
+    let config_changed =
+        previous_config.is_some_and(|previous| previous.as_deref() != Some(config_hash.as_str()));
     let printer = Printer::new(options.progress);
     let sink = |done: u64, total: u64| printer.report(done, total);
 
@@ -152,6 +158,8 @@ pub fn run(
             inert_links: graph.inert().len(),
             passes,
             taken_ms,
+            // A dry run applies nothing, so it reports nothing.
+            config_changed: !options.dry_run && config_changed,
             index_sha: written.as_ref().map(|manifest| manifest.index_sha.clone()),
         };
         let json = serde_json::to_string_pretty(&receipt)
@@ -263,9 +271,19 @@ struct Receipt {
     /// changed while the build ran (§3.2). Zero on `--dry-run`.
     passes: u32,
     taken_ms: u64,
+    /// True when this build applied a config change the previous manifest did
+    /// not carry (M7-1). Absent otherwise, so a receipt with nothing to report
+    /// keeps the shape it had before the field existed.
+    #[serde(skip_serializing_if = "is_false")]
+    config_changed: bool,
     /// The published generation id; absent on `--dry-run`.
     #[serde(skip_serializing_if = "Option::is_none")]
     index_sha: Option<String>,
+}
+
+/// `true` for `false`: serde drops a field that carries no change.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 // ── human ───────────────────────────────────────────────────────────────────
