@@ -195,8 +195,14 @@ fn case_2_2_all_returns_both_and_each_archived_row_carries_the_weight() {
     assert!(notes(&report).is_empty(), "{}", notes(&report));
 
     // The documented formula is final = relevance * authority * decay * corpus,
-    // evaluated in that order. Every factor below is the row's own, so the
-    // arithmetic is exact and no second run has to agree with this one.
+    // evaluated in that order. The scorer groups the same way, so the two
+    // products agree in the arithmetic. Every factor below is read from the
+    // JSON text, and each `f64` travels as its shortest decimal. The default
+    // parser can return a neighbour of the value that wrote it, so one factor
+    // may move by one unit in the last place. Four factors then move the
+    // product by a few ULPs, about 1e-16 relative. A tolerance of 1e-12 is
+    // four orders above that, so a real error of one part in a billion still
+    // fails this check.
     for row in rows {
         let scores = &row["scores"];
         let relevance = scores["relevance"].as_f64().expect("a relevance");
@@ -204,10 +210,12 @@ fn case_2_2_all_returns_both_and_each_archived_row_carries_the_weight() {
         let decay = scores["decay"].as_f64().expect("a decay");
         let factor = scores["corpus"].as_f64().unwrap_or(1.0);
         let final_score = scores["final"].as_f64().expect("a final score");
-        assert_eq!(
-            final_score,
-            relevance * authority * decay * factor,
-            "final must be the product of its factors: {row}"
+        let expected = relevance * authority * decay * factor;
+        let relative = (final_score - expected).abs() / expected.abs().max(f64::MIN_POSITIVE);
+        assert!(
+            relative <= 1e-12,
+            "final must be the product of its factors: final {final_score}, \
+             product {expected}, relative {relative}: {row}"
         );
         match row["corpus"].as_str() {
             Some("context") => {

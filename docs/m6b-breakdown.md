@@ -361,6 +361,7 @@ the code.
 | M6b-29 | `index`, `scan` and `status` take `--workspace`, and a corpus root named with `--vault` together with a workspace is not a contradiction for them | The workspace is not their answer; it is the exclude list their walk reads. A root plus a workspace names one corpus and the prunes of it, while a root plus a corpora list is two subjects — which is still what M6b-14 refuses on the query path. |
 | M6b-30 | One config per command: `corpus_config` returns the root and the config with the workspace's prunes applied, and the walk, the plan, the publish and the digest all read that one value | Two walks that disagree leave `status` comparing a pair that never existed, and patching a printed number hides it. The walk that counts must be the walk that publishes. |
 | M6b-31 | An explicit workspace that names no corpus at the resolved root is a `usage` error; an ambient one prunes nothing there | A flag the user typed cannot be a silent no-op, and a platform default must not fail a corpus it does not describe. |
+| M6b-32 | `final` is the product of its factors exactly in the arithmetic; a test that reads the factors back from JSON compares the product with a relative tolerance of `1e-12` | Each factor is an `f64` written as its shortest decimal, and the parser can return a neighbour of the value that wrote it. Four factors move the product by a few ULPs, about `1e-16`, so `1e-12` leaves four orders of headroom and still catches a real error of one part in a billion. |
 
 ## 5. Phases
 
@@ -691,9 +692,11 @@ keywords and, when there are archived corpora, what the keywords do.
 
 **The weight, stated as arithmetic.** `final = relevance · authority · decay ·
 corpus`, evaluated in that order. The `search` case reads every factor from the
-row it checks, so the assertion is exact; the unit test states the literals
-(relevance 0.6, authority 1.5, decay 0.8 → `final` 0.72, and 0.576 at weight
-0.8) and asserts that a neutral factor is absent from the JSON.
+row it checks and compares the product with a relative tolerance of `1e-12`
+(M6b-32). The identity is exact in the arithmetic and approximate after
+serialization; the unit test states the literals (relevance 0.6, authority 1.5,
+decay 0.8 → `final` 0.72, and 0.576 at weight 0.8) and asserts that a neutral
+factor is absent from the JSON.
 
 **Why the formula is not checked against a second run.** Two runs of the same
 query can differ in the last bit: the query that builds an index reads the
