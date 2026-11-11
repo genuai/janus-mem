@@ -29,7 +29,7 @@ before the first line of write code.
 | a byte span per frontmatter key | absent | `grep -rn KeySpan src/` returns nothing |
 | a splice | absent | `grep -rn splice src/` returns comments only (`src/document.rs:92`) |
 | atomic replace of a document | absent | the only temp+rename is the index publish (`src/index/store.rs:723`, `:751`) |
-| an advisory corpus lock | **exists** | `Lock::acquire`, `.janus/lock`, 10 s timeout (`src/index/store.rs:452`, `:46`, `:49`) |
+| an advisory corpus lock | **exists** | `pub struct Lock` and `Lock::acquire`, `.janus/lock`, 10 s timeout (`src/index/store.rs:452`, `:462`, `:46`, `:49`) |
 | etag on every read row | **exists** | `content_hash` from the bytes read (`src/read.rs:42`, `:83`) |
 | `expected_hash` enforcement | absent | no `conflict` and no `precondition_required` code (`src/api/error.rs`); exit 3 is unreachable (`src/error.rs:230`) |
 | the four write tools | named, then refused | `WRITE_TOOLS`, `write_refusal` (`src/api/mod.rs:115`, `:131`) |
@@ -47,11 +47,14 @@ before the first line of write code.
 4. Optimistic concurrency on `expected_hash`, on every surface.
 5. `update_frontmatter`, `write_document`, `supersede_document`, `promote_document` over
    MCP and `janus rpc`, and `janus set`, `janus write`, `janus supersede`, `janus promote`.
-6. Receipts, and two new public error codes.
+6. Receipts, and seven new public error codes.
 7. `--allow-write` as a real gate, and `writes_enabled` as a real capability flag.
 8. The config hash in the manifest, because the writer resolves type from config and the
    index caches it (gate defect, 2026-11-10).
-9. The rehearsal: every write path on a copy of a real corpus, plus the 200-file dry run.
+9. Cross-corpus link resolution, because M6b handed it to M7 and a promoted link no reader
+   follows is not a feature (M7-37).
+10. The rehearsal: every write path on a generated 200-file corpus, plus one recorded run on a
+    copy of a real corpus.
 
 ### 0.2 Not in scope
 
@@ -64,6 +67,7 @@ before the first line of write code.
 | `--git-history`, `watch`, mmap | M8 | unchanged |
 | A vault-wide multi-file transaction | never in v1 | §5.1: one writer, one file, one lock |
 | Editing a `.md` file the request did not name | never | §5.1 rule 4 |
+| Cross-corpus *supersession* (an edge that changes another corpus's windows and status) | M8 | M7-37 resolves a link for reading. Making a link change another corpus's answers is a scoring and validity question, and this milestone changes no ranking. |
 
 ### 0.3 Why eight phases
 
@@ -82,7 +86,7 @@ before the first line of write code.
 ## 1. Dependencies
 
 None. The patcher uses `oneyaml`, already a dependency for frontmatter reads
-(`src/vault/frontmatter.rs:32`). No new crate is added. If a span-preserving YAML crate is
+(`src/vault/frontmatter.rs:31`). No new crate is added. If a span-preserving YAML crate is
 adopted instead, it needs a one-line justification in `Cargo.toml` (§8.2) and a decision row.
 
 ## 2. Data model
@@ -108,6 +112,11 @@ pub struct ValueSpan {
 `BlockSequence`, `BlockMapping`, `FlowMapping`, `MultilineScalar`, `Anchor`, `Alias`,
 `DuplicateKey`, `NoValue`, `Nested`.
 
+A patch **key** must match `[A-Za-z0-9][A-Za-z0-9._-]*`. That covers every key the config
+reads (`superseded_by`, `shared-with`, `doc_version`). A key outside it is refused with
+`KeyShape`, because a key is written as a line: a newline, `: `, `#` or a quote inside a key
+would add or split a key, which is an injection, not a patch.
+
 ### 2.2 The patch request and the plan
 
 ```rust
@@ -120,6 +129,7 @@ pub struct Patch {
 }
 
 pub struct Plan {
+    pub original: Vec<u8>,                // the bytes the plan was made from
     pub bytes_before: usize,
     pub bytes_after: usize,
     pub old_hash: String,
@@ -132,6 +142,9 @@ pub struct Plan {
 
 `Plan` is pure. It takes the current bytes and the patch, and returns the new bytes or a
 refusal. No IO happens after the read.
+
+`original` is what makes a rollback possible: after a rename, the old bytes exist nowhere
+else, and a two-file transaction must be able to put them back (M7-31).
 
 ### 2.3 The receipt (`src/api/dto.rs`)
 
@@ -158,9 +171,11 @@ order they were written.
 | `NoFrontmatter { path }` | `no_frontmatter` | 4 | no block, and `create_frontmatter` is false |
 | `ReadOnlyCorpus { corpus }` | `read_only_corpus` | 4 | the corpus is archived or `read_only` |
 | `WriteDisabled { surface }` | `write_disabled` | 4 | the surface was started without `--allow-write` |
+| `PathExists { path }` | `path_exists` | 4 | `create` named a file that exists |
 
 Exit 3 is used for the first time. Both new exit-3 codes mean one thing: re-read, then retry.
 A write that fails a shape check is a refusal (exit 4), because a retry without a change of
+request cannot succeed. `path_exists` is a refusal for the same reason: a retry with the same
 request cannot succeed.
 
 ### 2.5 The manifest (`src/index/store.rs`)
@@ -173,11 +188,22 @@ request cannot succeed.
 pub config_hash: Option<String>,
 ```
 
-The hash covers `[frontmatter]`, `[defaults]`, `[types]`, `[paths]` and `[links]`. Those are
-the sections whose value the index caches per document. `[authority]` and `[decay]` are read
-at query time, so a change to either needs no rebuild (measured 2026-11-10). `[chunking]`
-already has a fingerprint. `[index] exclude` changes the admitted set, which `corpus_sig`
-covers.
+The hash covers `[frontmatter]`, `[defaults]`, `[types]` and `[paths]`. Those are the sections
+whose value the index caches per document: the resolved type name is stored in the snapshot
+(`src/index/build.rs:469`), and a build re-resolves metadata from the current config while it
+reuses tokens only (`src/index/build.rs:5`).
+
+The hash covers nothing else, and the reason is checkable:
+
+| Section | Why it is outside the hash |
+|---|---|
+| `[authority]`, `[decay]`, `[scoring]` | read at query time, per call |
+| `[links] allow_disjoint_supersession` | applied per call, when the graph is built from the stored edges (`src/graph.rs:244`) |
+| `[chunking]` | already has its own fingerprint in the manifest |
+| `[index] exclude` | changes the admitted set, which `corpus_sig` already covers |
+| `[mcp]`, `[embedding]` | nothing the index caches depends on them |
+
+A hash over more than this would force a rebuild for a change that already takes effect.
 
 ## 3. Contracts
 
@@ -218,9 +244,27 @@ file's newline style. `appended_keys` names it.
 **Case 1.11.** A key whose value is empty (`status:`) is a null value and is replaceable.
 
 **Case 1.12 (round trip).** For every generated value, the written file reads back through the
-config's typed reader as the same string. Values that would change meaning bare
-(`true`, `null`, `007`, `1.0`, `a: b`, `#x`, leading or trailing space, an empty string) are
-written double-quoted with `\` and `"` escaped. This is a property test.
+config's typed reader as the same string. The generator's alphabet is: a fixed list
+(`true`, `null`, `007`, `1.0`, `a: b`, `#x`, `[x]`, `- x`, `&a`, `*a`, `'q'`, `"q"`), an empty
+string, a string with a leading or trailing space, a random printable ASCII string, a string
+with `\n`, `\r`, `\t`, `\0` and one other control byte, and a non-ASCII UTF-8 string. This is
+a property test, and it is the case that decides whether the writer can be trusted.
+
+**Case 1.12a (the parser spike, first).** A value containing a newline and a double quote is
+written double-quoted, then read back by `oneyaml` and by the config's typed reader. This runs
+before any other case in M7-2. If `oneyaml` cannot read it, M7-2 stops and reports; it does not
+add a crate to work around it.
+
+**Case 1.12b (the escape set).** A double-quoted value escapes exactly `\\`, `\"`, `\n`, `\r`,
+`\t`, and every other byte below `0x20` or equal to `0x7f` as `\uXXXX`. A bare value is allowed
+only when every byte is in `[A-Za-z0-9 ._/:@+-]`, the first and last byte are not a space, and
+the string is not a YAML reserved word (`true`, `false`, `null`, `yes`, `no`, `on`, `off`, `~`)
+and not numeric-looking. A test asserts the set, and a second test asserts that each refused
+bare form is accepted when quoted.
+
+**Case 1.12c (the key).** A patch key outside `[A-Za-z0-9][A-Za-z0-9._-]*` is refused with
+`KeyShape`. `a\nsuperseded_by: x`, `a: b`, `a#b` and `"a"` are each refused, and the file is
+byte-identical.
 
 **Case 1.13 (I4).** Every accepted patch re-reads as a valid frontmatter block plus a body.
 
@@ -250,17 +294,28 @@ is byte-identical.
 **Case 2.3.** A correct `expected_hash` answers a receipt whose `old_hash` is the presented
 hash and whose `new_hash` is the hash of the bytes written.
 
-**Case 2.4 (I6).** The plan is made, the file is changed by another writer, then the commit
-runs. The commit answers `conflict` and leaves the other writer's bytes intact. The test needs
-no thread, no sleep and no second process, because `plan` and `commit` are separate calls.
+**Case 2.4 (I6, the fast path).** The plan is made, the file is changed by another writer, then
+the commit runs. The commit answers `conflict` and leaves the other writer's bytes intact. The
+test needs no thread, no sleep and no second process, because `plan` and `commit` are separate
+calls.
+
+**Case 2.4a (I6, the authoritative check).** The file is changed after the commit's pre-lock
+check and before the lock is taken, through the test seam of M7-33. The commit answers
+`conflict` and writes nothing. Without this case, deleting the under-lock re-read leaves every
+other case green, and that re-read is the only thing the lock buys between two writers.
 
 **Case 2.5.** Two commits on the same file, in sequence, with the same etag: the first wins and
 the second answers `conflict`. Run with two lock acquisitions, so the lock is proved.
 
 **Case 2.6.** `new_hash` is the value the next read reports as `content_hash`.
 
-**Case 2.7.** A write on an archived corpus, or on a corpus with `read_only = true`, answers
-`read_only_corpus` and writes nothing.
+**Case 2.7a (workspace mode).** A write into a corpus whose role is `archived`, or whose
+`read_only` is true, answers `read_only_corpus` and writes nothing. `read_only` is a workspace
+attribute (`src/workspace.rs:52`), so this case runs with a workspace.
+
+**Case 2.7b (single-corpus mode).** There is no role and no `read_only` without a workspace, so
+every write is allowed. The test asserts that the refusal of 2.7a cannot fire without a
+workspace, so a caller is never told "read-only" by a mode that has no such field.
 
 **Case 2.8.** A write to a path outside the corpus, into `.git/`, or into `.janus/` answers
 `path_escape` and writes nothing.
@@ -304,12 +359,18 @@ and the diff is one paragraph.
 **Case 4.5.** A receipt is not an envelope: it carries `api` and `ok`, and no `results` and no
 `notes`. A test asserts the absent keys, so a later field cannot leak in.
 
+**Case 4.6.** `[mcp] allow_write = true` in a config does not enable writes, and the process
+prints one warning naming `--allow-write`. The key is parsed today and used by nothing
+(`src/config.rs:717`); one decision with two switches is one switch too many (M7-36).
+
 ### 3.5 `write_document` (P5)
 
 **Case 5.1.** `create` on an absent path writes the file and answers a receipt with
 `old_hash: null`.
 
-**Case 5.2.** `create` on an existing path answers `conflict` and writes nothing.
+**Case 5.2.** `create` on an existing path answers `path_exists`, exit 4, and writes nothing.
+It does not answer `conflict`, because there is no etag to compare: the request itself cannot
+succeed.
 
 **Case 5.3.** `overwrite` without `expected_hash` answers `precondition_required`.
 
@@ -323,26 +384,35 @@ status and date equal what the request declared.
 
 ### 3.6 `supersede_document` (P6)
 
-**Statement.** Two patches, one transaction. Either both files change or neither does.
+**Statement.** One call retires the old document and records the new one. Either both files end
+in their new state, or both keep their old bytes.
 
-**Case 6.1.** The old document gains `status: superseded` and
-`superseded_by: <new path>`; the new document gains `supersedes: <old path>`. No other key
-changes.
+**Case 6.1.** In-place mode, which is the default: the old document gains `status: superseded`
+and `superseded_by: <new path>`; the created document gains `supersedes: <old path>`. No other
+key changes on either file (SPEC §7.4).
 
 **Case 6.2.** `supersede` writes no `effective_to`, no `doc_version` and no `id` (M7-20, M7-21).
 
 **Case 6.3.** If either patch is refused, neither file is written, and the refusal names the
-key and the file.
+key and the file. Both patches are planned before either is staged.
 
 **Case 6.4.** A supersession that would close a cycle is refused before any temp file is
-staged, and the message names the cycle.
+staged, and the message names the cycle. The chain is read from the two documents' frontmatter
+on disk, not from the index, so the check runs on a corpus that was never built (M7-34).
 
-**Case 6.5.** `--append-only` creates the new file first, then patches the old. If the second
-step fails, the created file is removed and the old file is byte-identical.
+**Case 6.5.** `--append-only` creates the new document with `supersedes` and leaves the old
+one byte-identical (SPEC §7.4). Only the new document is planned, so no temp file is staged
+for the old one and a refusal costs nothing.
 
 **Case 6.6.** The receipt carries both receipts and the resolved chain, oldest first.
 
-**Case 6.7.** An existing `new_path` needs its own `expected_hash`; an absent one is created.
+**Case 6.7.** An existing `new_path` answers `path_exists` and writes nothing. The wire contract
+has one `expected_hash`, so a second file cannot be guarded; the call creates its new document
+instead of patching one (M7-35).
+
+**Case 6.8 (rollback).** The second rename fails, through the seam of M7-33. Both files are
+byte-identical to their state before the call, and the error names the file that failed and
+the file that was restored (M7-31).
 
 ### 3.7 `promote_document` (P7)
 
@@ -361,23 +431,42 @@ reports it, which is the rule M6b left in place.
 
 **Case 7.5.** A promote whose target is in an archived corpus is refused.
 
+**Case 7.6 (resolution).** After `link`, `get_lineage` on the primary document includes the
+archived source as a node, and `janus doctor` stops reporting the link as `other_corpus`. Today
+the resolver answers `DanglingReason::OtherCorpus` (`src/link.rs:135`), so the written link is
+visible to no reader.
+
+**Case 7.7.** Flipping `allow_cross_corpus_links` on and re-querying resolves the link with no
+rebuild and no re-index, because the policy is applied when the graph is built
+(`src/graph.rs:244`).
+
+**Case 7.8.** A qualified link whose corpus is not in the workspace is `not_found` and names
+the corpora the workspace holds. A qualified link whose corpus is archived and excluded by the
+query is not followed, and the chain ends there with a note.
+
 ### 3.8 The config is part of the index identity (P1)
 
 **Statement.** A change to a config section that the index caches makes the index stale, and
-`status` says so.
+`status` says so. The mismatch is a **refresh** trigger, the same class as a changed file: the
+next read refreshes, and `status` reports the reason until one does (M7-32). It is not a cold
+rebuild, so no command exits 1 over a config edit.
 
-**Case 8.1.** After a `[paths]` edit, `janus status --json` reports `stale: true` and names the
-config as the reason.
-
-**Case 8.2.** `janus index` after that edit reports `config_changed: true` and the new type
-appears in `search`. Today `status` says fresh and `search` serves the old type (measured
+**Case 8.1.** After a `[paths]` edit and before any read, `janus status --json` reports
+`stale: true` with `stale_reason: "config"`. Today it reports `stale: false` (measured
 2026-11-10).
 
-**Case 8.3.** A manifest written before this field existed is stale exactly once, then fresh.
+**Case 8.2.** After that edit, a `search` answers the new type and prints one `refresh:` line
+naming the config. `status` then reports fresh. The field `config_changed: true` appears on the
+build that applied the change, which is that refresh or a `janus index` run before it — never
+on both, because the second build has nothing to change.
 
-**Case 8.4.** An edit to `[authority]` does not make the index stale, because authority is read
-at query time. An edit to `[frontmatter]`, `[defaults]`, `[types]`, `[paths]` or `[links]`
-does.
+**Case 8.3.** A manifest written before this field existed is stale exactly once, then fresh.
+The build that cures it reuses every token, because a build re-resolves metadata and reuses
+tokens only (`src/index/build.rs:5`). No re-chunk, no `format_version` move.
+
+**Case 8.4.** An edit to `[authority]`, `[decay]`, `[scoring]` or `[links]` does not make the
+index stale, because each is read at query time. An edit to `[frontmatter]`, `[defaults]`,
+`[types]` or `[paths]` does.
 
 **Case 8.5.** `config_changed` is additive: `api` stays 1, and a consumer that ignores it keeps
 working.
@@ -413,18 +502,26 @@ working.
 | M7-16 | `writes_enabled` is true only when the surface has writes enabled and the corpus is not read-only | A capability flag that says true on a read-only corpus invites a call that must fail. |
 | M7-17 | A write never refreshes the index | The receipt describes bytes. A write that also builds is two failures in one call, and the next read already refreshes. |
 | M7-18 | The receipt's `new_hash` is the hash of the bytes written | A receipt an agent cannot present as the next `expected_hash` is useless. |
-| M7-19 | `supersede` plans both patches, stages both temp files, renames old then new, and rolls the first back if the second fails | §7.4. The rollback uses the staged copy, and the error names the inconsistent state. |
+| M7-19 | `supersede` plans both patches, stages both temp files, renames old then new, and rolls the first back from the original bytes the plan holds if the second fails | §7.4. The staged file holds the *new* bytes, so it cannot restore the old ones; `Plan.original` is what makes the rollback real (M7-31). |
 | M7-20 | `supersede` writes only `status`, `superseded_by` and `supersedes` | D25 and D38: a key the user did not ask for is not written, and the chain fills the window. Closes open question 23 for M7. |
 | M7-21 | `supersede` never bumps `doc_version`, and `--bump-version` is not in M7 | Frontmatter versions belong to the user (AGENTS.md, D26). Closes open question 4 for M7; a flag is additive later. |
 | M7-22 | `deprecated` keeps its declared field; no tombstone derivation | Open question 21 changes the status ladder, which a writer must not decide. It stays open. |
 | M7-23 | `promote --link` patches the primary document only; `--adopt` creates a copy | §9.3 and D42: the archive is never moved or rewritten. Case 7.3 asserts the bytes. |
-| M7-24 | The manifest gains `config_hash` over `[frontmatter]`, `[defaults]`, `[types]`, `[paths]`, `[links]` | Enumerate the inputs, then hash them. `[authority]` and `[decay]` are read at query time, `[chunking]` has a fingerprint, `[index] exclude` is covered by `corpus_sig`. |
+| M7-24 | The manifest gains `config_hash` over `[frontmatter]`, `[defaults]`, `[types]`, `[paths]` | Enumerate the inputs, then hash them. These four feed the cached type name (`src/index/build.rs:469`). Everything else is read per call, or already fingerprinted, or covered by `corpus_sig` (§2.5). |
 | M7-25 | A manifest without `config_hash` is stale exactly once | An index built before the field existed cannot prove it matches. One rebuild, then fresh. |
 | M7-26 | `format_version` stays 6; the field is additive with a defined absence | It follows `corpus_sig` (`src/index/store.rs:107`): no `deny_unknown_fields`, so an older binary ignores it. |
 | M7-27 | `create` refuses an existing path; `overwrite` requires `expected_hash` | Creating over a file is a lost update with no conflict to report. |
 | M7-28 | A write to an archived or `read_only` corpus is refused | M6b-4's field exists; a writer that ignored it would make it a decoration. |
 | M7-29 | The MCP `instructions` string names the write tools and the etag rule | An agent that reads a false capability line will not call the tool that exists. |
 | M7-30 | If M7-7 exceeds its ceiling, `promote` becomes M7b | Cross-corpus promotion is the least-used write and the easiest to defer. The budget protects the review of the writer. |
+| M7-31 | `Plan` keeps the original bytes, and the two-file transaction stages them as its rollback copy | After a rename the old bytes exist nowhere else. A rollback that cannot restore byte for byte is not a rollback. Case 6.8 proves it with an injected failure. |
+| M7-32 | A `config_hash` mismatch is a **refresh** trigger, the same class as a changed file, never a cold rebuild | The cure already exists: a build re-resolves metadata and reuses tokens (`src/index/build.rs:5`). A cold rebuild would make a config edit exit 1 on `search`, which is hostile for a change that needs no re-chunk. |
+| M7-33 | `commit` takes a test-only `Hooks` value with two seams: after the pre-lock check, and before the second rename | The two checks the writer exists for — the under-lock re-read and the rollback — are unreachable in a test without a seam. A no-op production impl keeps the dependency explicit, like `Clock` and `Embedder`. |
+| M7-34 | The cycle check reads the chain from frontmatter on disk, bounded to 64 nodes, not from the index | A write never refreshes the index (M7-17), so an index-based check reads a snapshot the writer just invalidated, and cannot run on a corpus that was never built. Paths are the only link form a write can follow without a snapshot. |
+| M7-35 | `supersede` creates its new document; an existing `new_path` is `path_exists` | The wire contract has one `expected_hash` (§9.3), so a second file cannot be guarded. Creating is the case the tool exists for, and it needs no second etag. |
+| M7-36 | `[mcp] allow_write` is ignored with one warning; the flag alone gates the server surfaces | One decision, one switch. A config file that silently enables writes for every agent is the failure D4 exists to prevent. |
+| M7-37 | Cross-corpus link resolution is in M7-7, not deferred | M6b handed it to M7, and without it `promote` writes a link no reader follows (`src/link.rs:135`), so the tool would ship inert. §0.1 names it as in scope; §0.2 keeps cross-corpus supersession out. |
+| M7-38 | The four write commands take `--workspace` and resolve a path against the primary unless it carries a `corpus:path` qualifier | `read_only` and a corpus role live only in a workspace (`src/workspace.rs:52`), and `promote` needs two corpora. §9.1's list of workspace-reading commands grows from ten to fourteen. |
 
 ## 5. Phases
 
@@ -444,17 +541,17 @@ backup.
 
 ### M7-1 — The config is part of the index identity
 
-**Files.** `src/config.rs` (the hash of the five sections), `src/index/store.rs` (the field and
+**Files.** `src/config.rs` (the hash of the four sections), `src/index/store.rs` (the field and
 its validation), `src/index/cmd.rs` (report `config_changed`), `src/index/refresh.rs` (the
-comparison), `src/status.rs` (the stale reason), `tests/config_freshness.rs` (new), `SPEC.md`
-§8.3, this file.
+comparison and the refresh trigger), `src/status.rs` (the stale reason), `tests/config_freshness.rs`
+(new), `SPEC.md` §8.3, this file.
 
-**Build.** Hash, store, compare, report.
+**Build.** Hash, store, compare, report, and treat a mismatch as a refresh trigger.
 
 **Tests.** Cases 8.1–8.5.
 
-**Accept.** An edit to a covered section makes the index stale and one `index` fixes it; an
-edit to `[authority]` does not.
+**Accept.** An edit to a covered section makes the index stale, one read cures it, and the new
+type answers; an edit to `[authority]` or `[links]` changes nothing about freshness.
 
 **Split seam.** The hash and the manifest field first; the report field and `status` second.
 
@@ -463,12 +560,17 @@ edit to `[authority]` does not.
 **Files.** `src/write/mod.rs`, `src/write/scan.rs`, `src/write/patch.rs`, `src/write/value.rs`
 (all new), `src/lib.rs`, `tests/write_patch.rs` (new), `tests/goldens/frontmatter/` (new).
 
-**Build.** Key spans, the splice, the value writer, the refusal list.
+**Build.** Key spans, the splice, the value writer, the refusal list, the key pattern.
 
-**Tests.** Cases 1.1–1.17, plus property tests for I1–I5 and case 1.12.
+**Tests.** Cases 1.1–1.17, including 1.12a, 1.12b and 1.12c, plus property tests for I1–I5 and
+case 1.12.
 
-**Accept.** Every accepted patch re-reads as valid frontmatter; every refused patch returns
-the input unchanged; no goldens outside the new directory move.
+**Accept.** Case 1.12a runs first and settles that `oneyaml` reads an escaped scalar. Every
+accepted patch re-reads as valid frontmatter; every refused patch returns the input unchanged;
+no goldens outside the new directory move.
+
+**If it goes wrong.** If `oneyaml` cannot read a double-quoted scalar with `\n` and `\"`, stop
+and report. Do not add a YAML crate and do not narrow the escape set to fit.
 
 **Split seam.** The scanner first (`scan.rs` and its cases), then the splice and the value
 writer. Each half is reviewable alone and neither needs the other's tests.
@@ -479,30 +581,32 @@ writer. Each half is reviewable alone and neither needs the other's tests.
 (expose the lock for the writer), `tests/write_atomic.rs` (new).
 
 **Build.** Temp file, `fsync`, `rename`, parent `fsync`, mode preserve; lock, re-read, verify,
-rollback.
+and the two `Hooks` seams (M7-33).
 
-**Tests.** Cases 2.4–2.6, 3.1–3.5.
+**Tests.** Cases 2.4, 2.4a, 2.5, 2.6, 3.1–3.5.
 
-**Accept.** A failed write leaves the file byte-identical and no temp file behind. A changed
-file between plan and commit answers `conflict`.
+**Accept.** A failed write leaves the file byte-identical and no temp file behind. A file
+changed after the pre-lock check and before the lock answers `conflict`, and the test proves
+it by removing the under-lock re-read and watching case 2.4a fail.
 
 **Split seam.** The atomic replace first, then the lock and the verification.
 
 ### M7-4 — `update_frontmatter` and `janus set`
 
 **Files.** `src/engine.rs`, `src/api/dto.rs`, `src/api/mod.rs` (the tool and the gate),
-`src/api/error.rs` (six codes), `src/error.rs` (six variants and exit 3),
+`src/api/error.rs` (the codes), `src/error.rs` (the variants and exit 3),
 `src/mcp/tools.rs`, `src/mcp/protocol.rs` (the instructions string), `src/rpc.rs`,
-`src/cli.rs`, `src/main.rs`, `src/status.rs`, `tests/cli_set.rs` (new),
-`tests/mcp_write.rs` (new), `tests/cli_rpc.rs`, `tests/cli_mcp.rs`, `tests/cli_status.rs`,
-`tests/api_envelope.rs`.
+`src/cli.rs`, `src/main.rs`, `src/status.rs`, `src/config.rs` (the ignored `[mcp]` key and its
+warning), `tests/cli_set.rs` (new), `tests/mcp_write.rs` (new), `tests/cli_rpc.rs`,
+`tests/cli_mcp.rs`, `tests/cli_status.rs`, `tests/api_envelope.rs`.
 
-**Build.** The tool, the gate, the receipt, the CLI command, `writes_enabled`.
+**Build.** The tool, the gate, the receipt, the CLI command, `writes_enabled`, the ignored
+config key.
 
-**Tests.** Cases 2.1–2.3, 2.7–2.8, 4.1–4.5.
+**Tests.** Cases 2.1–2.3, 2.7a, 2.7b, 2.8, 4.1–4.6.
 
 **Accept.** All three surfaces answer one contract; `writes_enabled` tells the truth; a write
-without the flag is impossible.
+without the flag is impossible; a config key cannot enable it.
 
 **Split seam.** The engine, MCP and rpc first; the CLI command and its human table second.
 
@@ -521,16 +625,20 @@ without the flag is impossible.
 
 ### M7-6 — `supersede_document` and `janus supersede`
 
-**Files.** `src/write/supersede.rs` (new), `src/graph.rs` (the cycle check, reused),
-`src/engine.rs`, `src/api/dto.rs`, `src/mcp/tools.rs`, `src/rpc.rs`, `src/cli.rs`,
-`src/main.rs`, `tests/cli_supersede.rs` (new).
+**Files.** `src/write/supersede.rs` (new), `src/write/chain.rs` (new: the on-disk chain read and
+the cycle check), `src/engine.rs`, `src/api/dto.rs`, `src/mcp/tools.rs`, `src/rpc.rs`,
+`src/cli.rs`, `src/main.rs`, `tests/cli_supersede.rs` (new).
 
-**Build.** Plan two, stage two, rename old then new, roll back.
+**Build.** Plan two, keep both originals, stage two, rename old then new, roll back from the
+original bytes on a failed second rename. The cycle check reads frontmatter on disk and follows
+paths, bounded to 64 nodes, so it needs no index (M7-34). `--append-only` creates the new
+document and leaves the old one untouched.
 
-**Tests.** Cases 6.1–6.7.
+**Tests.** Cases 6.1–6.8, including the injected second-rename failure through the hook of
+M7-33.
 
 **Accept.** W4 answers: one call retires the old document and records the new one, and a
-failure leaves both files as they were.
+failure leaves both files as they were, byte for byte.
 
 **Split seam.** In-place first, `--append-only` second.
 
@@ -540,27 +648,36 @@ failure leaves both files as they were.
 `src/engine.rs`, `src/api/dto.rs`, `src/mcp/tools.rs`, `src/rpc.rs`, `src/cli.rs`,
 `src/main.rs`, `tests/cli_promote.rs` (new), `tests/fixtures/workspace-promote/` (new).
 
-**Build.** Link mode and adopt mode, with the archive read-only.
+**Build.** Link mode, adopt mode, and the resolver: a qualified `corpus:path` becomes a node in
+`get_lineage`, and `doctor` stops calling it `other_corpus`.
 
-**Tests.** Cases 7.1–7.5.
+**Tests.** Cases 7.1–7.8.
 
-**Accept.** The archive's hash is unchanged; the primary document gains one key.
+**Accept.** The archive's hash is unchanged; the primary document gains one key; and the chain
+that key names is readable through `get_lineage`, which is what makes `promote` a tool rather
+than a line in a file.
 
-**Split seam.** `link` first, `adopt` second. If the phase exceeds its ceiling, `adopt` becomes
-M7b (M7-30).
+**Split seam.** Part 1 writes the link (`promote.rs`, cases 7.1–7.5). Part 2 resolves it
+(`src/link.rs`, `src/graph.rs`, `src/lineage.rs`, cases 7.6–7.8). If part 2 exceeds its ceiling,
+`promote` is not done: `adopt` becomes M7b (M7-30) and the resolution stays here, because a
+write whose result no reader follows is not a feature.
 
 ### M7-8 — The rehearsal and the 200-file dry run
 
-**Files.** `scripts/write-rehearsal.sh` (new), this file (§12), `README.md` (one section: how
-to write safely).
+**Files.** `scripts/write-rehearsal.sh` (new), `tests/fixtures/write-vault/` (new: a generated
+200-file corpus), `this file` (§12), `README.md` (one section: how to write safely).
 
-**Build.** A script that runs every write path with `--dry-run` over a copy of a real corpus,
-and diffs the result against the input.
+**Build.** A fixture generator for 200 files covering every shape the scanner knows: scalar,
+flow sequence, block sequence, flow mapping, multi-line scalar, anchor, alias, duplicate key,
+comment on the value line, CRLF, BOM, no frontmatter, empty value, and a non-ASCII value. Then
+a script that dry-runs every write path over it and diffs the result.
 
-**Tests.** Measured, not asserted in the repository: the counts go in §12.
+**Tests.** The counts are asserted in the repository: 200 files, 0 unexpected byte changes, and
+a named shape for every refusal. The same run on a copy of a real corpus is recorded in §12 as
+evidence, not as a condition.
 
-**Accept.** 200 files dry-run, 0 unexpected byte changes, and every refusal explained by a
-named shape. Then one real write on the copy, read back, and the index rebuilt.
+**Accept.** 200 files dry-run on the fixture, 0 unexpected byte changes, every refusal explained.
+Then one real write on the copy, read back, and the index rebuilt.
 
 **Split seam.** None. It is one measurement.
 
@@ -591,17 +708,22 @@ The one measured product claim M7 makes is W4: **0 of 1** paths today, **1 of 1*
 
 1. W4 has a path: **1 of 1**, proved by a fixture test and one manual run on a copy.
 2. Invariants I1–I7 each have a named test: **7 of 7**.
-3. The 200-file dry run on a copy of the large corpus: **0** unexpected byte changes. Refusals
-   are counted and each is explained by a named shape.
+3. The 200-file dry run on the generated fixture: **0** unexpected byte changes. Refusals are
+   counted and each is explained by a named shape. The same run on a copy of a real corpus is
+   recorded in §12 as evidence, not as a condition, because this repository must not describe
+   that corpus.
 4. `--allow-write` off by default: **4 of 4** write tools refused on **2 of 2** server
-   surfaces without the flag, and `writes_enabled` false in **1 of 1** status call.
+   surfaces without the flag, and `writes_enabled` false in **1 of 1** status call. A config
+   key cannot enable it: **1 of 1** case.
 5. Read goldens: **0** move, except the MCP `instructions` string (**1** intended change).
-6. Config freshness: after a `[paths]` edit, `status` reports stale in **1 of 1** case, and
-   `index` reports `config_changed: true` in **1 of 1**.
-7. `format_version` **6**, `api` **1**, **0** exit codes moved, **2** added and documented.
-8. `cargo doc --no-deps`: **0** warnings.
-9. Retrieval: **0** claims. A writer cannot move a ranking number, so no row of this plan asks
-   it to.
+6. Config freshness: after a `[paths]` edit and before any read, `status` reports stale in
+   **1 of 1** case; after one read, the new type answers and `status` is fresh, in **1 of 1**.
+7. Cross-corpus resolution: a promoted link is readable through `get_lineage` in **1 of 1**
+   case, and `doctor` reports **0** `other_corpus` rows for it.
+8. `format_version` **6**, `api` **1**, **0** exit codes moved, **2** added and documented.
+9. `cargo doc --no-deps`: **0** warnings.
+10. Retrieval: **0** claims. A writer cannot move a ranking number, so no row of this plan asks
+    it to.
 
 ## 9. PR plan and size budget
 
@@ -611,11 +733,15 @@ The one measured product claim M7 makes is W4: **0 of 1** paths today, **1 of 1*
 | M7-1 config freshness | 250 | ~150 | 350 | ~200 |
 | M7-2 patcher | 600 | ~450 | 900 | ~600 |
 | M7-3 atomic replace + lock | 300 | ~200 | 450 | ~250 |
-| M7-4 `update_frontmatter` + `set` | 500 | ~350 | 750 | ~450 |
+| M7-4 `update_frontmatter` + `set` | 700 | ~600 | 900 | ~700 |
 | M7-5 `write_document` | 250 | ~180 | 400 | ~250 |
 | M7-6 `supersede` | 400 | ~300 | 600 | ~400 |
-| M7-7 `promote` | 350 | ~250 | 500 | ~300 |
-| M7-8 rehearsal | 100 | ~60 | 150 | ~50 |
+| M7-7 `promote` + resolution | 550 | ~450 | 750 | ~500 |
+| M7-8 rehearsal | 200 | ~150 | 250 | ~150 |
+
+M7-4 was 500 until the review showed that three surfaces, seven codes with doc comments and
+five test files cannot fit it; the previous milestone delivered 839 against a 400 ceiling on
+comparable work. M7-7 grew by the resolver (M7-37) and by its cases 7.6–7.8.
 
 Estimates run two to three times low in this repository. Each phase names its split seam, and
 the agent splits before the ceiling rather than shaving a comment or dropping a test.
@@ -623,25 +749,38 @@ the agent splits before the ceiling rather than shaving a comment or dropping a 
 ## 10. SPEC corrections
 
 1. **§9.1.** Name the four CLI write commands, and state that `--allow-write` gates the server
-   surfaces only (M7-15). State that exit 3 is now used, by two codes.
+   surfaces only (M7-15). State that exit 3 is now used, by two codes. Add the four write
+   commands to the list of commands that read a workspace, which grows from ten to fourteen
+   (M7-38).
 2. **§9.3.** State that a missing `expected_hash` answers `precondition_required` with a
-   one-line preview in `hint`, and that the full preview is a `--dry-run` call (M7-13).
+   one-line preview in `hint`, and that the full preview is a `--dry-run` call (M7-13). State
+   that `new_path` must be absent, and that an existing one answers `path_exists` (M7-35).
 3. **§9.4.** Add the receipt shape and state that a receipt is not an envelope (M7-14).
-4. **§7.3.** State the closed list of replaceable shapes, the duplicate-key refusal, and the
-   append position (M7-3, M7-7, M7-8).
+4. **§7.3.** State the closed list of replaceable shapes, the duplicate-key refusal, the key
+   pattern, the escape set, and the append position (M7-3, M7-7, M7-8, M7-5).
 5. **§7.3 step 5.** State that a `null` patch writes `null` and that deletion is not in v1
    (M7-6).
-6. **§7.4.** State that `supersede` writes no `effective_to` and no `doc_version`, which closes
-   open questions 4 and 23 for this milestone (M7-20, M7-21).
-7. **§8.3.** Add `config_hash`, the five sections it covers, and the one-rebuild rule for a
-   manifest without it (M7-24, M7-25).
-8. **§11 M7.** Replace the done-when with the numbered rows of §8, including the rehearsal
-   phase and the dry-run rule.
+6. **§7.4.** State that in-place writes `status` and `superseded_by` on the old document and
+   `supersedes` on the new one; that `--append-only` creates the new document and leaves the
+   old one untouched; and that no `effective_to` and no `doc_version` is written (M7-20, M7-21,
+   M7-35). This closes open questions 4 and 23 for this milestone.
+7. **§8.3.** Add `config_hash`, the four sections it covers, the reason for each section that
+   is outside it, and the refresh-trigger rule for a manifest without it (M7-24, M7-25, M7-32).
+8. **§6.11.** State that a qualified cross-corpus link resolves when
+   `allow_cross_corpus_links` is true, and that `get_lineage` follows it (M7-37).
+9. **§16.1.** Remove `[mcp] allow_write` from the shipped config and state that it is ignored
+   with a warning (M7-36).
+10. **§11 M7.** Replace the done-when with the numbered rows of §8, including the rehearsal
+    phase and the fixture rule.
 
 ## 11. Handoff
 
 - **M8** inherits the writer: `watch` must not race it, and the mmap load path must read a
-  generation a write did not build.
+  generation a write did not build. M8 also inherits cross-corpus *supersession*, which §0.2
+  keeps out of M7 because it changes another corpus's windows and status.
+- **The shipped config changes once.** `[mcp] allow_write` leaves `janus.toml` and the config
+guide in M7-4, because the flag alone gates a server (M7-36). An existing config keeps the key
+and gets one warning, so no user is broken by the removal.
 - **R2** inherits the ordering gap the gate measured. Its trigger is unchanged: three wording
   failures in ten. The gate measured one in twenty, so R2 does not start yet. Recheck after
   M7 with the same packet.
