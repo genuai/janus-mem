@@ -191,7 +191,7 @@ pub config_hash: Option<String>,
 
 The hash covers `[frontmatter]`, `[defaults]`, `[types]` and `[paths]`. Those are the sections
 whose value the index caches per document: the resolved type name is stored in the snapshot
-(`src/index/build.rs:469`), and a build re-resolves metadata from the current config while it
+(`src/index/build.rs:472`), and a build re-resolves metadata from the current config while it
 reuses tokens only (`src/index/build.rs:5`).
 
 The hash covers nothing else, and the reason is checkable:
@@ -513,7 +513,7 @@ exit 3 is used for the first time.
 | M7-21 | `supersede` never bumps `doc_version`, and `--bump-version` is not in M7 | Frontmatter versions belong to the user (AGENTS.md, D26). Closes open question 4 for M7; a flag is additive later. |
 | M7-22 | `deprecated` keeps its declared field; no tombstone derivation | Open question 21 changes the status ladder, which a writer must not decide. It stays open. |
 | M7-23 | `promote --link` patches the primary document only; `--adopt` creates a copy | §9.3 and D42: the archive is never moved or rewritten. Case 7.3 asserts the bytes. |
-| M7-24 | The manifest gains `config_hash` over `[frontmatter]`, `[defaults]`, `[types]`, `[paths]` | Enumerate the inputs, then hash them. These four feed the cached type name (`src/index/build.rs:469`). Everything else is read per call, or already fingerprinted, or covered by `corpus_sig` (§2.5). |
+| M7-24 | The manifest gains `config_hash` over `[frontmatter]`, `[defaults]`, `[types]`, `[paths]` | Enumerate the inputs, then hash them. These four feed the cached type name (`src/index/build.rs:472`). Everything else is read per call, or already fingerprinted, or covered by `corpus_sig` (§2.5). `DocMeta::timeless` is written from `[decay] timeless_types` (`src/index/build.rs:509`) and read by nothing, so `[decay]` stays out: the hash covers the sections that feed a value a reader uses, and that field is not one — drop it in the next format bump. |
 | M7-25 | A manifest without `config_hash` is stale exactly once: one refresh, then fresh | An index built before the field existed cannot prove it matches. The cure is the ordinary metadata refresh, never a cold rebuild (M7-32). |
 | M7-26 | `format_version` stays 6; the field is additive with a defined absence | It follows `corpus_sig` (`src/index/store.rs:107`): no `deny_unknown_fields`, so an older binary ignores it. |
 | M7-27 | `create` refuses an existing path; `overwrite` requires `expected_hash` | Creating over a file is a lost update with no conflict to report. |
@@ -528,17 +528,24 @@ exit 3 is used for the first time.
 | M7-36 | `[mcp] allow_write` is ignored with one warning; the flag alone gates the server surfaces | One decision, one switch. A config file that silently enables writes for every agent is the failure D4 exists to prevent. |
 | M7-37 | Cross-corpus link resolution is in M7-7, not deferred | M6b handed it to M7, and without it `promote` writes a link no reader follows (`src/link.rs:135`), so the tool would ship inert. §0.1 names it as in scope; §0.2 keeps cross-corpus supersession out. |
 | M7-38 | The four write commands take `--workspace` and resolve a path against the primary unless it carries a `corpus:path` qualifier | `read_only` and a corpus role live only in a workspace (`src/workspace.rs:52`), and `promote` needs two corpora. §9.1's list of workspace-reading commands grows from ten to fourteen. |
+| M7-39 | M7-1 ships as two PRs of one phase, 1a (the hash and the manifest field) and 1b (the comparison, `status` and the `index` report) | The phase measured 253 logic and 426 test lines as one PR, against the 250/350 ceiling. 1a measures 108/168 and 1b 150/279, so the seam §5 names splits it inside the ceiling without shaving a comment or dropping a case. Wrong if either part exceeds its ceiling. |
+| M7-40 | `status` and the read reports count the config in freshness; `doctor` and `corpora` count the corpus only | One word, two questions. `status` answers "may I trust the stored metadata", so a config edit makes it stale and it names the reason. `search`, `facts`, `read` and `lineage` report `index.stale` only when a read declined to refresh, so the field keeps its meaning and gains the config as a second cause. `doctor` reports graph and link facts read from the generation, and a config edit is not one of them; `corpora` reports one row per corpus from its manifest and one digest. A phase that wants the config in either one adds it there and amends this row. |
+| M7-41 | A long-lived process keeps the config it started with, and never publishes a manifest under a config the file on disk disagrees with | `Engine.config` is loaded once. Two processes pinned to different configs would otherwise alternate a refresh and a publish on every read, and the type that answers would depend on who wrote last. So on a config mismatch a read re-reads the file: if the manifest already names the file's config it adopts it and publishes nothing, if the file names this process's config it publishes, and otherwise it publishes nothing and says `refresh: skipped, config changed elsewhere`. Reloading the config in `Engine` is a design change with its own risks and is not in this phase. Reopen it when a user reports that a server needed a restart to see a config edit. |
 
 ## 5. Phases
 
 ### M7-0 — The safety net (no code, no PR)
 
-**What.** Take a backup of the large corpus, restore it to a temporary directory, and compare
-by file count and content hash. Confirm that `[mcp] allow_write` is absent or false in both
-real configs, and that `McpConfig::allow_write` defaults to false.
+**What.** Take a backup of the large corpus, restore it to a temporary directory, and compare by
+file count, relative path list and content hash. The backup covers every file the writer can
+touch — all Markdown, `janus.toml`, and `.git/` and `.janus/` whole — plus every other file under
+50 MiB that is not media or a database. It excludes files at or above 50 MiB and the extensions
+`.mp4`, `.wav`, `.flac`, `.m4a`, `.mov`, `.zip`, `.sqlite3` and `.db`, because a 9.4 GiB copy of
+material the writer cannot touch proves nothing about the writer and risks the disk. Every
+exclusion is counted.
 
-**Record.** Three numbers in §12: files backed up, files restored, hashes that differ. The
-expected answer is "N, N, 0". No path is written into this document.
+**Record.** In §12: files backed up, files restored, files that differ, the excluded count and
+size, and any file the account could not read. The expected answer is "N, N, 0".
 
 **Accept.** The restore reproduces every file. A backup that has never been restored is not a
 backup.
@@ -559,7 +566,15 @@ comparison and the refresh trigger), `src/status.rs` (the stale reason), `tests/
 **Accept.** An edit to a covered section makes the index stale, one read cures it, and the new
 type answers; an edit to `[authority]` or `[links]` changes nothing about freshness.
 
-**Split seam.** The hash and the manifest field first; the report field and `status` second.
+**Split seam.** Taken (M7-39). 1a is the hash and the manifest field, with the build that writes
+them. 1b is the comparison, `status` and the `index` report field.
+
+**Amendment.** The original file list named six files and the change touches five more.
+`src/index/build.rs` gains the `config_hash` parameter of the manifest constructor, and
+`src/engine.rs` gains the field in the load-cache key, because both follow the manifest rather
+than the phase's subject. `src/doctor.rs` passes `None` to the witness, which is the decision
+M7-40 records. `tests/publish.rs` and `tests/staleness.rs` build a manifest directly, so they
+name the new field. The five are consequences of the field, not new scope.
 
 ### M7-2 — The patcher
 
@@ -757,6 +772,9 @@ The one measured product claim M7 makes is W4: **0 of 1** paths today, **1 of 1*
 | M7-7 `promote` + resolution | 550 | ~450 | 750 | ~500 |
 | M7-8 rehearsal | 200 | ~150 | 250 | ~150 |
 
+M7-1 is two PRs of one phase for the same reason (M7-39): 253 logic and 426 test lines as one
+PR, 108/168 and 150/279 as two.
+
 M7-4 was 500 until the review showed that three surfaces, eight codes with doc comments and
 five test files cannot fit it. It is now **two PRs of one phase**, 4a and 4b, so the phase
 stays inside `AGENTS.md`'s 600 logic ceiling instead of claiming an exception. M7-7 grew by the
@@ -815,4 +833,27 @@ and gets one warning, so no user is broken by the removal.
 
 ## 12. Implementation logs
 
-Empty. One entry per phase, appended when the phase merges. The M7-0 record goes first.
+One entry per phase, appended when the phase merges. The M7-0 record goes first.
+
+### M7-0 — The safety net
+
+**State.** Complete for every file this account can read. Run before M7-1.
+
+**Numbers.** 15,752 files backed up, 15,752 restored, **0** differ by content, mode, type or
+symlink target. The relative path lists are identical. 376 files (9.4 GiB) excluded by the rule
+above: media, databases, and two files at or above 50 MiB. 2,409 Markdown files, 3 config files,
+3,239 `.git/` files and 4 `.janus/` files are all inside the set.
+
+**The comparison can fail.** One byte appended to a restored file reported exactly 1 difference;
+restoring that file reported 0. One mode change reported exactly 1; reverting it reported 0.
+
+**Open, for the vault owner.** 6 files (4.4 MiB) are owned by another account at mode 0600 and
+are outside the backup and outside the comparison. A full restore would not bring them back.
+They must be made readable and the rehearsal re-run before the first phase that writes to that
+corpus (M7-3).
+
+**What the rehearsal cannot prove.** The backup and the restore were on one volume, so this
+proves the copy logic and not the survival of a disk failure. Extended attributes and ACLs were
+not compared. A live database and two appending logs made 4 files differ against the live tree;
+the snapshot comparison correctly ignores them, and a quiet snapshot needs those writers
+stopped.
