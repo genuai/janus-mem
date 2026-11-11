@@ -41,6 +41,8 @@
 //!   frontmatter isolation, metadata resolution, and identity derivation.
 //! * [`workspace`] — `workspace.toml`: the corpora one query reads together, and
 //!   `janus corpora` (M6b).
+//! * [`mod@write`] — the pure part of a frontmatter write: key spans, the value
+//!   writer, and the splice that produces a document's new bytes (M7).
 //! * [`scan`] — the `janus scan` command (discovery report so far).
 //! * [`tokenize`] — the one tokenizer shared by indexing and queries (M3).
 //! * [`error`] — the single error type and its exit-code mapping.
@@ -82,3 +84,4 @@ pub mod suggest;
 pub mod tokenize;
 pub mod vault;
 pub mod workspace;
+pub mod write;
