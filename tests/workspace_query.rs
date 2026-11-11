@@ -5,9 +5,9 @@
 //! in the same temporary tree, so no case reads the developer's own workspace and
 //! no case writes to the committed fixture.
 //!
-//! `--no-embeddings` is part of every invocation: the fixture's scores are then
-//! a function of its text and its config alone, and no case depends on whether a
-//! model happens to be installed on the machine.
+//! `--no-embeddings` is part of every invocation: a score then depends on the
+//! fixture's text, its config and the query date through `decay`, not on an
+//! installed model.
 //!
 //! The merge itself — exactness against the full union, the tie-break, the
 //! weighting arithmetic — is proved by the unit tests beside
@@ -201,7 +201,7 @@ fn case_2_2_all_returns_both_and_each_archived_row_carries_the_weight() {
     // parser can return a neighbour of the value that wrote it, so one factor
     // may move by one unit in the last place. Four factors then move the
     // product by a few ULPs, about 1e-16 relative. A tolerance of 1e-12 is
-    // four orders above that, so a real error of one part in a billion still
+    // four orders above that, so a real error of one part in a trillion still
     // fails this check.
     for row in rows {
         let scores = &row["scores"];
