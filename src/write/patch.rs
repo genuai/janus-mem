@@ -161,6 +161,9 @@ fn splice(
 }
 
 /// Wraps `lines` in a new block, after the prefix and before the body (M7-10).
+///
+/// A body that begins with `---` keeps that line: an unclosed opening fence is
+/// body text to the reader, and the created block goes before it.
 fn create_block(text: &str, scan: &Scan, appended: &[String]) -> String {
     let mut out = String::with_capacity(text.len() + 32);
     out.push_str(&text[..scan.span.start]);

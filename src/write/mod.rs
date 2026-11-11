@@ -18,6 +18,14 @@
 //! M7-4). A refusal returns [`PatchError`] and no bytes, so a caller cannot
 //! write a half-patched file.
 //!
+//! # Creating a block
+//!
+//! `create_frontmatter` puts one block after any BOM and before the body. A file
+//! that opens with `---` and never closes is body-only to the reader, so the new
+//! block goes before it and the stray fence becomes the body's first line. The
+//! alternative — refusing — would forbid a real document whose body opens with a
+//! horizontal rule.
+//!
 //! # Invariants this module keeps (SPEC §7.3)
 //!
 //! * I1 — every byte outside the patched spans is identical.

@@ -599,15 +599,15 @@ and report. Do not add a YAML crate and do not narrow the escape set to fit.
 **Split seam.** The scanner first (`scan.rs` and its cases), then the splice and the value
 writer. Each half is reviewable alone and neither needs the other's tests.
 
-**Amendment.** The seam is taken, because the phase measures 929 logic lines as one change
+**Amendment.** The seam is taken, because the phase measures 945 logic lines as one change
 against a ceiling of 600. Part 1 is branch `m7-2-scan` and holds `src/write/scan.rs`, the
 public surface it needs, and the shape half of the cases. Part 2 is branch `m7-2-patcher`,
 opened from part 1, and holds `patch.rs`, `value.rs` and every case that asserts a splice or a
 refusal.
 
-Part 1 measures 595 logic and 516 test lines against `main`; part 2 measures 360 logic and
-826 test lines against part 1. The two parts sum to 955 logic and 1342 test lines, and the
-phase as one change measures 929 and 1320, because part 2 rewrites part of part 1's
+Part 1 measures 595 logic and 516 test lines against `main`; part 2 measures 376 logic and
+855 test lines against part 1. The two parts sum to 971 logic and 1371 test lines, and the
+phase as one change measures 945 and 1349, because part 2 rewrites part of part 1's
 `src/write/mod.rs`.
 
 Three things in the plan move with the split, and none of them silently:

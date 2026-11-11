@@ -890,6 +890,21 @@ This file has no YAML block at all. Its date comes from the filename prefix.
 }
 
 #[test]
+fn case_1_10_an_unclosed_fence_is_body_and_a_created_block_goes_before_it() {
+    // The reader reports an opening fence with no closing fence as body-only, so
+    // a created block goes before it and the stray fence is now the body's first
+    // line. No byte is lost, and the new block is the one that gets read.
+    let input = "---\njust a body line\n";
+    let mut creating = patch(&[("type", Some("note"))]);
+    creating.create_frontmatter = true;
+
+    let plan = write::plan(input, &creating).expect("created");
+    assert_eq!(plan.text, "---\ntype: note\n---\n---\njust a body line\n");
+    assert_reads_as_frontmatter(&plan.text);
+    assert_eq!(typed(&plan.text).r#type.as_deref(), Some("note"));
+}
+
+#[test]
 fn case_1_11_empty_value_is_a_null_and_is_replaceable() {
     let input = "---\ntitle: Empty value\nstatus:\n---\nbody\n";
     let plan = write::plan(input, &patch(&[("status", Some("active"))])).expect("null value");
@@ -944,6 +959,20 @@ fn case_1_12_written_values_read_back_through_the_typed_reader() {
         "~",
     ];
     for value in fixed {
+        assert_value_round_trips(value);
+    }
+
+    // A bare write needs a YAML *string* back, not a coerced scalar. A boolean,
+    // a number, a null, and a YAML 1.1 boolean spelling are all quoted, because
+    // the file must not declare a type the caller did not ask for.
+    for value in [
+        "true", "false", "yes", "no", "on", "off", "null", "007", "1.0",
+    ] {
+        let rendered = write::render_value(Some(value));
+        assert!(
+            rendered.starts_with('"'),
+            "{value:?} was written bare as {rendered}"
+        );
         assert_value_round_trips(value);
     }
 }

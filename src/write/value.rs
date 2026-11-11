@@ -1,13 +1,19 @@
 //! How one value becomes bytes on a line (SPEC §7.3, plan §1.12b).
 //!
-//! A value is written bare only when it reads back as the same string.
-//! Otherwise it is double-quoted with the smallest escape set that still
+//! A value is written bare only when it reads back as a YAML **string** that is
+//! the same text. A coerced scalar is not enough: `true` reads back as the
+//! string "true" through this project's typed reader, but the file would hold a
+//! boolean, and every other consumer of the vault — an editor's property panel,
+//! a linter, a static site generator — would see a type the caller did not ask
+//! for. The same rule catches `1.0`, `007` and `null`.
+//!
+//! Otherwise the value is double-quoted with the smallest escape set that still
 //! round-trips. The parse-back decides; the character class below is only a
 //! cheap way to reject the values that obviously need quoting.
 //!
 //! Why the parse-back and not a class: `a: b` and `- x` both pass a permissive
-//! class and both change meaning when written bare, while `007` and `null` change
-//! from a string to a number and to a null. YAML decides, so YAML is asked.
+//! class and both change meaning when written bare. YAML decides, so YAML is
+//! asked.
 
 use oneyaml::Value;
 
@@ -53,12 +59,16 @@ fn plain_is_safe(text: &str) -> bool {
     })
 }
 
-/// Whether a bare write of `text` parses back as the same string.
+/// Whether a bare write of `text` parses back as the same *string*.
 ///
-/// The string comparison uses the same coercion as the typed reader, so a value
-/// that would read back as a number or a boolean is quoted. `k` is a scratch key
-/// because only the value is under test.
+/// Only `Value::String` is accepted. A number, a boolean or a null is a
+/// different type in the file, even when this project's typed reader would render
+/// it as the same text. `k` is a scratch key because only the value is under
+/// test.
 fn reads_back_bare(expected: &str) -> bool {
+    if is_yaml_1_1_bool(expected) {
+        return false;
+    }
     let line = format!("k: {expected}\n");
     let parsed: Value = match oneyaml::from_str(&line) {
         Ok(value) => value,
@@ -67,23 +77,18 @@ fn reads_back_bare(expected: &str) -> bool {
     let Some(mapping) = parsed.as_mapping() else {
         return false;
     };
-    let Some(value) = mapping.get_str("k") else {
-        return false;
-    };
-    as_string(value).is_some_and(|text| text == expected)
+    matches!(mapping.get_str("k"), Some(Value::String(text)) if text == expected)
 }
 
-/// The string the typed reader would report for a scalar.
+/// Spellings that a YAML 1.1 reader treats as a boolean.
 ///
-/// Mirrors `vault::frontmatter`: strings, numbers and booleans coerce, and every
-/// other shape has no string form.
-fn as_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => Some(text.clone()),
-        Value::Number(number) => Some(number.to_string()),
-        Value::Bool(flag) => Some(flag.to_string()),
-        _ => None,
-    }
+/// YAML 1.2 reads `yes` as a string, so the parse-back alone would write it
+/// bare. A YAML 1.1 consumer would then see a boolean, so these are quoted
+/// too.
+fn is_yaml_1_1_bool(text: &str) -> bool {
+    ["yes", "no", "true", "false", "on", "off"]
+        .iter()
+        .any(|word| text.eq_ignore_ascii_case(word))
 }
 
 /// A double-quoted scalar with the smallest escape set that round-trips.
