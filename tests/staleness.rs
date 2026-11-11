@@ -94,6 +94,9 @@ fn index(root: &Path) -> store::Manifest {
     )
     .expect("plan the vault");
     let digest = Signature::of(&walk.files).digest();
+    // A real build records the config it resolved under (M7-1), so this helper
+    // does too: without it every read would report a config change.
+    let config_hash = config.config_hash();
     store::publish(&Publication {
         dir: &dir,
         root,
@@ -103,7 +106,7 @@ fn index(root: &Path) -> store::Manifest {
         vectors_dropped: plan.vectors_dropped,
         built_at: BUILT_AT,
         corpus_sig: Some(&digest),
-        config_hash: None,
+        config_hash: Some(&config_hash),
     })
     .expect("publish")
 }
@@ -118,7 +121,14 @@ fn index_mtime(root: &Path) -> SystemTime {
 
 /// The witness for a walk, measured against the manifest on disk.
 fn stale(root: &Path, files: &[DiscoveredFile]) -> bool {
-    Witness::of(files, &read_manifest(root), Some(index_mtime(root))).stale
+    let config_hash = config(root).config_hash();
+    Witness::of(
+        files,
+        &read_manifest(root),
+        Some(index_mtime(root)),
+        Some(&config_hash),
+    )
+    .stale
 }
 
 /// A copy of `files` where one file was touched to `mtime`.
