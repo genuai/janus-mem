@@ -705,6 +705,10 @@ mod tests {
     use super::*;
     use chrono::Days;
 
+    use std::path::Path;
+
+    use crate::config::Config;
+
     /// The eval clock from §3.8: every test is frozen in time.
     const TODAY: (i32, u32, u32) = (2025, 4, 1);
 
@@ -1243,6 +1247,54 @@ mod tests {
         for intent in [Intent::History, Intent::Evolution, Intent::Exhaustive] {
             assert_eq!(score(&input(&old, intent, false)).decay, 1.0);
         }
+    }
+
+    // ───────────────────── the global half-life switch ─────────────────────
+
+    /// A journal dated ten days ago, with its type resolved by `config`.
+    fn journal_ten_days_old(config: &Config) -> ScoreDoc<'static> {
+        with_type(
+            with_date(doc(1, Status::Active), Some(days_ago(10))),
+            "journal",
+            config.resolve_type("journal").spec,
+        )
+    }
+
+    /// Parses config text with a fake origin, for tests that need no filesystem.
+    fn parse(text: &str) -> Config {
+        Config::from_toml(text, Path::new("<test>")).expect("config should parse")
+    }
+
+    #[test]
+    fn a_zero_global_half_life_turns_decay_off_for_every_type() {
+        // `[decay.by_type] journal = 180` cannot keep a journal decaying once
+        // the global value turns decay off. Ten days ago costs nothing.
+        let config = parse("[decay]\nhalf_life_days = 0\n\n[decay.by_type]\njournal = 180\n");
+
+        assert_eq!(score_doc(&journal_ten_days_old(&config)).decay, 1.0);
+        assert!(
+            config.resolve_type("principle").spec.timeless,
+            "the timeless rule must not depend on the half-life"
+        );
+    }
+
+    #[test]
+    fn a_positive_global_half_life_lets_the_override_set_the_rate() {
+        let config = parse("[decay]\nhalf_life_days = 180\n\n[decay.by_type]\njournal = 180\n");
+
+        // ln2 = 0.693147, age 10 days, half-life 180 days:
+        // exp(-0.693147 * 10 / 180) = exp(-0.0385082) = 0.962224.
+        // The assertion uses 6 decimal places.
+        let decay = score_doc(&journal_ten_days_old(&config)).decay;
+        assert!((decay - 0.962_224).abs() < 1e-6, "decay was {decay}");
+    }
+
+    #[test]
+    fn a_zero_global_and_a_zero_override_both_mean_off() {
+        let config = parse("[decay]\nhalf_life_days = 0\n\n[decay.by_type]\njournal = 0\n");
+
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+        assert_eq!(score_doc(&journal_ten_days_old(&config)).decay, 1.0);
     }
 
     #[test]

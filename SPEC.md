@@ -382,7 +382,7 @@ not scored zero — the gate is an inclusion rule (§7.1).
 
 **`finding` and `idea` are first-class types, not journal variants.** They carry the distinction that matters for reasoning: *what we observed* (finding) versus *what we might do* (idea) versus *what we chose* (decision). That distinction only pays off because of supersession: the canonical chain is `idea → decision`, and `finding → finding` when new evidence arrives. Modeling them as generic notes would throw away exactly the transitions the engine exists to track.
 
-Decay defaults: `decision`/`spec`/`principle` are `timeless: true` (no decay); `finding` decays slowly (365-day half-life — evidence ages, but slower than commentary); `journal`/`note` at 180; `idea` fast (90 days — an unexplored idea should not outrank current work). An explicit `timeless:` or per-type override in config always wins.
+Decay defaults: `decision`/`spec`/`principle` are `timeless: true` (no decay); `finding` decays slowly (365-day half-life — evidence ages, but slower than commentary); `journal`/`note` at 180; `idea` fast (90 days — an unexplored idea should not outrank current work). An explicit `timeless:` or per-type override in config always wins, with one exception: a global `[decay] half_life_days` of zero or less turns decay off for every type, so `[decay.by_type]` is ignored. A per-type override of zero still turns decay off for that type alone.
 
 ### 6.6.1 Types are an open registry, not an enum
 
