@@ -20,10 +20,10 @@ use serde_json::{Value, json};
 /// The fixture document every path-shaped call names.
 const POSTGRES: &str = "decisions/2024-11-02-postgres-cache.md";
 
-/// The eight wire names, in `Tool::ALL` order (case 5.4).
+/// The nine wire names, in `Tool::ALL` order (case 5.4).
 const WIRE_NAMES: &str = "search, get_authoritative_facts, get_lineage, read_document, \
                          janus_status, update_frontmatter, write_document, \
-                         supersede_document";
+                         supersede_document, promote_document";
 
 /// One finished `janus rpc` session.
 struct Session {
@@ -357,29 +357,29 @@ fn case_5_7_the_five_calls_equal_the_five_cli_calls() {
 // ──────────────────────────────── refusal ──────────────────────────────────
 
 #[test]
-fn case_5_8_a_write_name_needs_the_flag_and_an_unlanded_one_is_refused() {
+fn case_5_8_a_write_name_needs_the_flag_and_every_served_name_reaches_the_engine() {
     let dir = fixture_vault();
     let root = dir.path();
     index(root);
-    // The one name whose phase has not landed: refused with or without the
-    // flag, because this release does not serve it.
-    const UNLANDED: [&str; 1] = ["promote_document"];
+    // Every write name §9.3 lists is served by this release, so the flag is the
+    // only gate and none of them keeps a second refusal (M7-48).
+    const SERVED: [&str; 4] = [
+        "update_frontmatter",
+        "write_document",
+        "supersede_document",
+        "promote_document",
+    ];
     let writes = |allowed| Writes::new("janus rpc", allowed, false);
 
     // Without the flag, every write name answers `write_disabled`.
-    let names: Vec<&str> = UNLANDED
-        .iter()
-        .copied()
-        .chain(["update_frontmatter", "write_document", "supersede_document"])
-        .collect();
-    let script: String = names
+    let script: String = SERVED
         .iter()
         .enumerate()
         .map(|(id, name)| format!("{}\n", json!({ "id": id, "tool": name })))
         .collect();
     let gated = answers(root, false, &script);
     assert_eq!(gated.len(), 4, "{gated:?}");
-    for (id, (name, answer)) in names.iter().zip(&gated).enumerate() {
+    for (id, (name, answer)) in SERVED.iter().zip(&gated).enumerate() {
         assert_eq!(answer["id"], json!(id), "{answer}");
         assert_eq!(answer["api"], json!(1), "{answer}");
         assert_eq!(answer["ok"], json!(false), "{answer}");
@@ -394,27 +394,9 @@ fn case_5_8_a_write_name_needs_the_flag_and_an_unlanded_one_is_refused() {
         );
     }
 
-    // With the flag the unlanded name is still refused, and the shared
-    // helper is where that answer comes from.
-    let script: String = UNLANDED
-        .iter()
-        .enumerate()
-        .map(|(id, name)| format!("{}\n", json!({ "id": id, "tool": name })))
-        .collect();
-    let refused = answers(root, true, &script);
-    for (name, answer) in UNLANDED.iter().zip(&refused) {
-        assert_eq!(answer["code"], json!("refused"), "{name}: {answer}");
-        let shared = write_refusal(name, writes(true)).expect("an unlanded write is refused");
-        assert_eq!(
-            normalized(answer.clone()),
-            serde_json::to_value(shared).expect("a failure is JSON"),
-            "{name}"
-        );
-    }
-
-    // The three served names reach the engine, which answers the missing
-    // parameter and not a refusal.
-    for name in ["update_frontmatter", "write_document", "supersede_document"] {
+    // With the flag every one of them reaches the engine, which answers the
+    // missing parameter and not a refusal.
+    for name in SERVED {
         let script = format!("{}\n", json!({ "id": 1, "tool": name }));
         let mut reached = answers(root, true, &script);
         let answer = reached.remove(0);

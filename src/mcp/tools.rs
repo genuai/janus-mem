@@ -50,6 +50,7 @@ pub fn descriptors(writes: Writes) -> Value {
         listed.push(Tool::UpdateFrontmatter);
         listed.push(Tool::WriteDocument);
         listed.push(Tool::SupersedeDocument);
+        listed.push(Tool::PromoteDocument);
     }
     let tools: Vec<Value> = listed.iter().map(|tool| descriptor(*tool)).collect();
     json!({ "tools": tools })
@@ -230,6 +231,11 @@ fn describe(tool: Tool) -> &'static str {
              receipts and the chain. Needs expected_hash for the old document; new_path \
              must not exist. A failure puts both files back."
         }
+        Tool::PromoteDocument => {
+            "Declare a document in another corpus as lineage for one of this corpus, and \
+             return a receipt. mode link patches target_path and needs its expected_hash; \
+             mode adopt creates target_path. The source is read and never changed."
+        }
     }
 }
 
@@ -299,11 +305,18 @@ fn schema(tool: Tool) -> Value {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "The corpus path of the document whose chain to report."
+                    "description": "The corpus path of the document whose chain to report. \
+                                    A corpus:path qualifier names the corpus it is read in."
                 },
                 "topic": {
                     "type": "string",
                     "description": "A current query; the chain of its top result is reported."
+                },
+                "corpus": {
+                    "type": "string",
+                    "description": "Corpora to read: primary (default), all, or a workspace \
+                                    corpus id. A chain follows a qualified link into one of \
+                                    the corpora this reads."
                 }
             },
             "required": [],
@@ -468,6 +481,39 @@ fn schema(tool: Tool) -> Value {
                 }
             },
             "required": ["old_path", "new_path"],
+            "additionalProperties": false
+        }),
+        Tool::PromoteDocument => json!({
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "string",
+                    "description": "The source document, as corpus:path. It is read and \
+                                    never written."
+                },
+                "target_path": {
+                    "type": "string",
+                    "description": "The document this call writes: the one that gains the \
+                                    link, or the path of the copy. Default for mode adopt: \
+                                    the source path."
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "link patches target_path's supersedes with the qualified \
+                                    source and needs expected_hash; adopt creates \
+                                    target_path as a copy of the source."
+                },
+                "expected_hash": {
+                    "type": "string",
+                    "description": "The content_hash a read returned for target_path. \
+                                    Required for mode link without dry_run."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Report what would change and write nothing. Default false."
+                }
+            },
+            "required": ["source", "mode"],
             "additionalProperties": false
         }),
     }

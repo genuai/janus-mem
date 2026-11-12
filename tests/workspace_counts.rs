@@ -292,15 +292,9 @@ fn case_6_5_a_command_that_reads_no_workspace_still_refuses_the_flag() {
     let dir = copied();
     let named = dir.path().join("workspace.toml");
     // The list is deliberate: these commands read one corpus and apply no prune.
-    for command in [
-        "init",
-        "chunks",
-        "doctor",
-        "ids",
-        "moves",
-        "lineage",
-        "suggest-links",
-    ] {
+    // `doctor` reads a workspace for the corpora a qualified link may reach
+    // (M7-37), so it is not one of them.
+    for command in ["init", "chunks", "ids", "moves", "lineage", "suggest-links"] {
         let output = run(
             dir.path(),
             &["--workspace", &named.display().to_string(), command],

@@ -1,0 +1,5 @@
+index_dir = ".janus"
+corpus_id = "context"
+
+[embedding]
+enabled = false

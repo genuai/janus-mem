@@ -33,8 +33,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::api::dto::{
-    FactsParams, LineageParams, ReadParams, SearchParams, StatusParams, SupersedeParams,
-    SupersedeReceipt, UpdateParams, WriteMode, WriteParams,
+    FactsParams, LineageParams, PromoteMode, PromoteParams, PromoteReceipt, ReadParams,
+    SearchParams, StatusParams, SupersedeParams, SupersedeReceipt, UpdateParams, WriteMode,
+    WriteParams,
 };
 use crate::api::{ApiCode, Call, Failure, Receipt, Tool, Writes};
 use crate::clock::Clock;
@@ -44,13 +45,13 @@ use crate::index::embed::Embedder;
 use crate::index::refresh::Signature;
 use crate::index::store::{self, Manifest};
 use crate::lineage;
-use crate::link;
+use crate::link::{self, Corpora};
 use crate::read;
 use crate::search;
 use crate::search::federate::{self, Choice, Target};
 use crate::status;
 use crate::vault::{self, WalkOptions};
-use crate::workspace::{Role, Workspace};
+use crate::workspace::{Corpus, Role, Workspace};
 use crate::write::{self, CommitError, CommitOptions, Document, NoHooks, Patch, PatchError, Plan};
 
 /// What one call returned: the envelope, and the code when it failed (M6 §2.3).
@@ -237,17 +238,7 @@ impl Engine {
                 let options = lineage_options(&params(call)?);
                 // Exactly one of `path` and `topic`, decided before the read.
                 lineage::validate(&options)?;
-                let loaded = self.load()?;
-                let report = lineage::compute(
-                    &self.root,
-                    &self.config,
-                    self.clock.as_ref(),
-                    self.embedder(),
-                    &loaded.prepared,
-                    &options,
-                    started,
-                )?;
-                encode(&report)
+                self.lineage(&options, &Corpora::none())
             }
             Tool::ReadDocument => {
                 let options = read_options(&params(call)?);
@@ -279,7 +270,142 @@ impl Engine {
                 let params: SupersedeParams = params(call)?;
                 encode(self.supersede(&params)?)
             }
+            // A promotion reads a source in another corpus, so one engine
+            // cannot serve it: the fleet resolves the source and calls
+            // [`Engine::promote`] (M7-37).
+            Tool::PromoteDocument => Err(usage(
+                "promote_document needs a workspace: the source it names lives in another corpus",
+            )),
         }
+    }
+
+    /// One `get_lineage` answer, for a chain that may reach a corpus the query
+    /// selected (M7-37).
+    ///
+    /// The graph is built here, from this generation and the reachable ones, so
+    /// a qualified link is resolved on every query and a policy flip needs no
+    /// rebuild (case 7.7).
+    fn lineage(
+        &self,
+        options: &lineage::Options,
+        corpora: &Corpora<'_>,
+    ) -> Result<Value, JanusError> {
+        let started = Instant::now();
+        let loaded = self.load()?;
+        let report = lineage::compute(
+            &self.root,
+            &self.config,
+            self.clock.as_ref(),
+            self.embedder(),
+            &loaded.prepared,
+            options,
+            started,
+            corpora,
+        )?;
+        encode(&report)
+    }
+
+    /// One `promote_document` call: a link into another corpus, or a copy of it
+    /// (§6.11, M7-23).
+    ///
+    /// The gate runs first, so a read-only corpus answers before the source is
+    /// touched, and the source is only ever read: the fleet resolved it in
+    /// another corpus and refused the case where the two are one.
+    fn promote(
+        &self,
+        params: &PromoteParams,
+        source: &write::Source,
+    ) -> Result<PromoteReceipt, JanusError> {
+        let named = self.name.as_deref().unwrap_or(&self.config.corpus_id);
+        if let Some(refusal) = self.writes.refusal(named, &self.config.corpus_id) {
+            return Err(refusal);
+        }
+        let receipt = match params.mode {
+            PromoteMode::Link => self.link_to(params, source)?,
+            PromoteMode::Adopt => self.adopt(params, source)?,
+        };
+        Ok(PromoteReceipt {
+            receipt,
+            source_corpus: source.corpus.clone(),
+            source: source.qualified(),
+        })
+    }
+
+    /// The link half: patch the target's `supersedes` and nothing else (§3.7).
+    ///
+    /// The document is read before the patch is planned, because a link that
+    /// would replace another one is refused (case 7.1). The patch then goes
+    /// through the merged writer, so the etag, the lock and the receipt are the
+    /// ones every other patch has.
+    fn link_to(
+        &self,
+        params: &PromoteParams,
+        source: &write::Source,
+    ) -> Result<Receipt, JanusError> {
+        let Some(given) = params.target_path.as_deref() else {
+            return Err(usage(
+                "mode link needs target_path: the document that gains the link",
+            ));
+        };
+        let named = PathBuf::from(given);
+        let found = target(&self.root, given)?;
+        if !found.file_name().is_some_and(vault::is_markdown) {
+            return Err(usage(format!(
+                "{} is not Markdown; a write needs a .md or .markdown document",
+                named.display()
+            )));
+        }
+        let bytes = fs::read(&found).map_err(|error| JanusError::Write {
+            path: named.clone(),
+            source: error,
+        })?;
+        let text = String::from_utf8(bytes).map_err(|_| JanusError::DocumentNotInCorpus {
+            path: named.clone(),
+        })?;
+        let qualified = source.qualified();
+        write::check_link(&text, &self.config, &qualified).map_err(|error| match error {
+            write::PromoteError::AlreadyLinked { current } => JanusError::PromoteLinked {
+                path: named.clone(),
+                current,
+            },
+        })?;
+        let dry_run = params.dry_run.unwrap_or(false);
+        let patch = Patch {
+            path: named.clone(),
+            keys: vec![("supersedes".to_owned(), Some(qualified))],
+            expected_hash: params.expected_hash.clone(),
+            create_frontmatter: false,
+            dry_run,
+        };
+        self.apply(&named, &found, &text, patch, dry_run)
+    }
+
+    /// The adopt half: create a primary document that carries the source's text
+    /// (case 7.2).
+    ///
+    /// The create path is the one `write_document` uses, so an existing target is
+    /// `path_exists` and the receipt describes the whole file (M7-27).
+    fn adopt(&self, params: &PromoteParams, source: &write::Source) -> Result<Receipt, JanusError> {
+        if params.expected_hash.is_some() {
+            return Err(usage(
+                "mode adopt creates a document, so expected_hash has nothing to guard",
+            ));
+        }
+        // A copy is written where the caller says, and otherwise at the path the
+        // source holds. That default makes the two documents easy to pair by
+        // eye, and a path that is taken is refused like any other create.
+        let given = params
+            .target_path
+            .clone()
+            .unwrap_or_else(|| source.rel_path.clone());
+        self.write_document(&WriteParams {
+            path: given,
+            frontmatter: write::adopted(source),
+            body: source.body.clone(),
+            mode: WriteMode::Create,
+            expected_hash: None,
+            dry_run: params.dry_run,
+        })
     }
 
     /// One `update_frontmatter` call: the gate, then plan, then commit (§9.3).
@@ -325,16 +451,32 @@ impl Engine {
             create_frontmatter: false,
             dry_run,
         };
-        let plan = write::plan(&text, &patch).map_err(|error| patch_refusal(&named, error))?;
+        self.apply(&named, &found, &text, patch, dry_run)
+    }
+
+    /// The half every patch shares: plan the bytes, check the etag, commit.
+    ///
+    /// `text` is the bytes the caller read, so a promote that must inspect the
+    /// document before it patches it reads them once (M7-11).
+    fn apply(
+        &self,
+        named: &Path,
+        found: &Path,
+        text: &str,
+        patch: Patch,
+        dry_run: bool,
+    ) -> Result<Receipt, JanusError> {
+        let expected_hash = patch.expected_hash.clone();
+        let plan = write::plan(text, &patch).map_err(|error| patch_refusal(named, error))?;
         check_etag(
-            &named,
-            params.expected_hash.as_deref(),
+            named,
+            expected_hash.as_deref(),
             Some(&plan.old_hash),
             &plan.changed_keys,
             dry_run,
         )?;
         let receipt = Receipt {
-            path: relative(&self.root, &found),
+            path: relative(&self.root, found),
             changed_keys: plan.changed_keys.clone(),
             appended_keys: plan.appended_keys.clone(),
             old_hash: Some(plan.old_hash.clone()),
@@ -346,7 +488,7 @@ impl Engine {
         if dry_run {
             return Ok(receipt);
         }
-        self.commit(&found, &named, &plan)?;
+        self.commit(found, named, &plan)?;
         Ok(receipt)
     }
 
@@ -669,6 +811,20 @@ pub struct Fleet {
     writes: Writes,
 }
 
+/// One corpus a query read, with the generation a qualified link resolves
+/// against (M7-37).
+///
+/// The load is kept alive beside the two borrowed facts, because the graph reads
+/// the snapshot inside it and a link must not reopen a corpus.
+struct Reached<'a> {
+    /// The workspace's id for this corpus; the qualifier a link names.
+    id: &'a str,
+    /// The config the corpus's own rows are read with (§6.11).
+    config: &'a Config,
+    /// The generation this query already holds.
+    loaded: Arc<Cached>,
+}
+
 /// How one corpus resolves its embedder, as the edge decided it.
 type Resolver = Arc<dyn Fn(&Config) -> (Option<Box<dyn Embedder>>, Option<String>) + Send + Sync>;
 
@@ -899,12 +1055,53 @@ impl Fleet {
                 let member = self.one(found, &choice)?;
                 member.engine().answer(&Call::new(call.tool, fields))
             }
-            // A supersession chain is one corpus's graph. A qualified path or a
-            // `corpus` parameter would need a cross-corpus chain, which no read
-            // answers yet, so it is refused instead of guessed (§0.2).
+            // A promotion writes in the corpus the call names and reads a
+            // source in another one, so the fleet resolves the source and
+            // refuses a source the target corpus holds (M7-23, M7-37).
+            Tool::PromoteDocument => {
+                let params: PromoteParams = params(&Call::new(call.tool, fields))?;
+                let member = self.one(found, &choice)?;
+                let source = self.source(found, member, &params.source)?;
+                encode(member.engine().promote(&params, &source)?)
+            }
+            // A supersession chain is one corpus's graph, and it may reach the
+            // corpora this query read: a promoted link is readable here or
+            // nowhere (M7-37, case 7.6).
             Tool::Lineage => {
-                self.single_selection(&choice)?;
-                self.members[0].engine().answer(call)
+                let options = lineage_options(&params(call)?);
+                lineage::validate(&options)?;
+                // A chain is read in one corpus and may reach others. `all`
+                // names the reach: the chain stays in the primary, which owns an
+                // unqualified path, and a qualified path selects its corpus
+                // through `choice` already (M7-37, case 7.6).
+                let member = self.one(
+                    found,
+                    if choice == Choice::All {
+                        &Choice::Primary
+                    } else {
+                        &choice
+                    },
+                )?;
+                let loads = self.reach(found, &choice)?;
+                let selected: Vec<link::Corpus<'_>> = loads
+                    .iter()
+                    .map(|found| link::Corpus {
+                        id: found.id,
+                        snapshot: &found.loaded.prepared.snapshot,
+                        config: found.config,
+                    })
+                    .collect();
+                let known: Vec<&str> = found
+                    .corpora
+                    .iter()
+                    .map(|corpus| corpus.id.as_str())
+                    .collect();
+                let corpora = Corpora {
+                    allowed: found.search.allow_cross_corpus_links,
+                    selected,
+                    known,
+                };
+                member.engine().lineage(&options, &corpora)
             }
         }
     }
@@ -922,8 +1119,15 @@ impl Fleet {
         if !tool.names_a_path() {
             return Ok(Choice::parse(named.as_deref()));
         }
+        // A write names its corpus on the file it writes: `path` for the tools
+        // that patch one document, `target_path` for a promotion (M7-38).
+        let field = if tool == Tool::PromoteDocument {
+            "target_path"
+        } else {
+            "path"
+        };
         let path = params
-            .get("path")
+            .get(field)
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
@@ -940,7 +1144,7 @@ impl Fleet {
                 "the path names corpus {head:?} and `corpus` names {named:?}; pass one"
             )));
         }
-        params["path"] = Value::String(rest.to_owned());
+        params[field] = Value::String(rest.to_owned());
         Ok(Choice::Id(head.to_owned()))
     }
 
@@ -961,6 +1165,88 @@ impl Fleet {
                 "unknown corpus {id:?}; this read serves {declared:?} and no workspace names another"
             ))),
         }
+    }
+
+    /// One promotion's source: the corpus its qualifier names, and the document
+    /// it resolves to there (§6.11, M7-23).
+    ///
+    /// The source is read and never written. A target in the source corpus would
+    /// be a write to the archive, so it is refused as a read-only corpus before
+    /// a byte is read: the roles of the workspace cannot grant what the archive
+    /// must never allow (case 7.3).
+    fn source(
+        &self,
+        found: &Workspace,
+        member: &Member,
+        text: &str,
+    ) -> Result<write::Source, JanusError> {
+        let text = text.trim();
+        let Some((corpus_id, path)) = link::split_qualifier(text) else {
+            return Err(usage(format!(
+                "`{text}` names no corpus; a promote source is corpus:path"
+            )));
+        };
+        let corpus: &Corpus =
+            found
+                .corpus(corpus_id)
+                .ok_or_else(|| JanusError::CorpusNotInWorkspace {
+                    corpus: corpus_id.to_owned(),
+                    known: found
+                        .corpora
+                        .iter()
+                        .map(|corpus| corpus.id.clone())
+                        .collect(),
+                })?;
+        if corpus.id == member.name() {
+            return Err(JanusError::ReadOnlyCorpus {
+                corpus: corpus.id.clone(),
+            });
+        }
+        let named = PathBuf::from(path);
+        if !named.file_name().is_some_and(vault::is_markdown) {
+            return Err(usage(format!(
+                "{text} is not Markdown; a promotion needs a .md or .markdown document"
+            )));
+        }
+        let config = found.config_of(corpus)?;
+        let file = target(&corpus.root, path)?;
+        let bytes = fs::read(&file).map_err(|error| JanusError::Write {
+            path: named.clone(),
+            source: error,
+        })?;
+        let text = String::from_utf8(bytes).map_err(|_| JanusError::DocumentNotInCorpus {
+            path: named.clone(),
+        })?;
+        let read = vault::frontmatter::read(&text, &config);
+        Ok(write::Source {
+            corpus: corpus.id.clone(),
+            rel_path: relative(&corpus.root, &file),
+            body: read.body.to_owned(),
+            title: read.frontmatter.title.clone(),
+        })
+    }
+
+    /// The generation of every corpus this query reads, with the workspace id
+    /// and the config a qualified link needs (M7-37).
+    ///
+    /// The plan owns the selection, so a corpus the query excluded is not
+    /// loaded: a read never opens an index the user left out (case 7.8).
+    fn reach(&self, found: &Workspace, choice: &Choice) -> Result<Vec<Reached<'_>>, JanusError> {
+        let plan = federate::plan(found, choice)?;
+        let mut out = Vec::with_capacity(plan.corpora.len());
+        for (corpus, _factor) in &plan.corpora {
+            let member = self
+                .members
+                .iter()
+                .find(|member| member.id.as_deref() == Some(corpus.id.as_str()))
+                .ok_or_else(|| usage(format!("corpus {:?} is not loaded", corpus.id)))?;
+            out.push(Reached {
+                id: member.name(),
+                config: &member.config,
+                loaded: member.engine().load()?,
+            });
+        }
+        Ok(out)
     }
 
     /// The workspace, for the arms that need it.

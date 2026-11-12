@@ -39,9 +39,11 @@ use crate::id::DocId;
 use crate::index::refresh::Witness;
 use crate::index::store::{self, LoadOptions, Policy};
 use crate::index::{DanglingReason, Snapshot};
+use crate::link::{Corpora, Corpus};
 use crate::scan::API_VERSION;
 use crate::score::ScopeFilter;
 use crate::vault::{self, WalkOptions, identity, resolve};
+use crate::workspace::Workspace;
 
 /// The severity of a report check. A warning never changes the exit code.
 const ERROR: &str = "error";
@@ -57,6 +59,11 @@ pub struct Options {
 
 /// Runs `janus doctor`.
 ///
+/// `workspace` is the workspace whose file names this corpus, when one does. A
+/// qualified link resolves only through it: the policy and the corpora a link
+/// can name live in that file (M7-37). Without one, every qualified link is
+/// reported, as it was before `promote` (case 7.4).
+///
 /// # Errors
 ///
 /// Propagates corpus, config and walk failures. A missing or stale generation is
@@ -66,6 +73,7 @@ pub fn run(
     config: &Config,
     clock: &dyn Clock,
     options: Options,
+    workspace: Option<&Workspace>,
 ) -> Result<ExitCode, JanusError> {
     let walk = vault::walk(root, config, WalkOptions::default())?;
     let (mut documents, _skips) = resolve::resolve_all(&walk.files, config);
@@ -75,9 +83,34 @@ pub fn run(
     identity::derive_identity(&mut documents, None, config);
 
     let mut checks = scan_checks(&documents, config);
+    // One load per corpus this workspace puts in reach, and none when no
+    // workspace names this corpus.
+    let reach = reach(workspace, root, clock);
+    let selected: Vec<Corpus<'_>> = reach
+        .iter()
+        .map(|(id, own, snapshot)| Corpus {
+            id,
+            snapshot,
+            config: own,
+        })
+        .collect();
+    let known: Vec<&str> = workspace
+        .map(|found| {
+            found
+                .corpora
+                .iter()
+                .map(|corpus| corpus.id.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    let corpora = Corpora {
+        allowed: workspace.is_some_and(|found| found.search.allow_cross_corpus_links),
+        selected,
+        known,
+    };
     match generation(root, config, clock, &walk.files) {
         Some(found) => {
-            checks.extend(graph_checks(&found.snapshot, config));
+            checks.extend(graph_checks(&found.snapshot, config, &corpora));
             if found.stale {
                 checks.push(Check::new(
                     "index_stale",
@@ -381,9 +414,42 @@ fn generation(
     })
 }
 
+/// The corpora of the workspace a qualified link may reach, with the generation
+/// each one holds (M7-37).
+///
+/// The corpus this report describes is left out: a link that names it resolves
+/// locally and is no cross-corpus link at all. A corpus whose config or index
+/// cannot be read is left out too, and stays in the workspace's id list, so its
+/// links are reported rather than guessed.
+fn reach(
+    workspace: Option<&Workspace>,
+    own: &Path,
+    clock: &dyn Clock,
+) -> Vec<(String, Config, Snapshot)> {
+    let Some(workspace) = workspace else {
+        return Vec::new();
+    };
+    workspace
+        .corpora
+        .iter()
+        .filter(|corpus| corpus.root != own)
+        .filter_map(|corpus| {
+            let mut config = workspace.config_of(corpus).ok()?;
+            // The workspace owns each corpus's index location (M6b-11).
+            config.index_dir = corpus.index_dir.clone();
+            let load = store::load(&LoadOptions {
+                policy: Policy::Refuse,
+                ..LoadOptions::new(&corpus.root, &config, clock.today())
+            })
+            .ok()?;
+            Some((corpus.id.clone(), config, load.snapshot))
+        })
+        .collect()
+}
+
 /// Every check that reads the published generation.
-fn graph_checks(snapshot: &Snapshot, config: &Config) -> Vec<Check> {
-    let graph = Graph::for_snapshot(snapshot, config);
+fn graph_checks(snapshot: &Snapshot, config: &Config, corpora: &Corpora<'_>) -> Vec<Check> {
+    let (graph, ignored) = Graph::for_snapshot_linked(snapshot, config, corpora);
     let scopes = ScopeFilter::new(&[], false);
     let mut checks = Vec::new();
 
@@ -441,23 +507,29 @@ fn graph_checks(snapshot: &Snapshot, config: &Config) -> Vec<Check> {
         ));
     }
 
-    for link in &snapshot.dangling_links {
-        let (code, message) = match link.reason {
-            DanglingReason::NotFound => (
-                "dangling_link",
-                format!("a link target does not resolve: {}", link.target),
-            ),
-            DanglingReason::OtherCorpus => (
-                "cross_corpus_link_unsupported",
-                format!("a link names another corpus: {}", link.target),
-            ),
-        };
+    // A qualified link that resolved is a node in this graph and earns no row.
+    // One that did not is reported under the code its reason earns (M7-37).
+    for row in &ignored {
         checks.push(Check::new(
-            code,
+            row.code(),
+            ERROR,
+            path_of(&graph, row.declarer),
+            row.target.clone(),
+            row.message(&corpora.known),
+        ));
+    }
+
+    for link in snapshot
+        .dangling_links
+        .iter()
+        .filter(|link| link.reason == DanglingReason::NotFound)
+    {
+        checks.push(Check::new(
+            "dangling_link",
             ERROR,
             path_of(&graph, link.from),
             link.target.clone(),
-            message,
+            format!("a link target does not resolve: {}", link.target),
         ));
     }
 

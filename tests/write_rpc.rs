@@ -391,24 +391,14 @@ fn case_4_2_rpc_answers_the_gate_from_the_shared_helper() {
         assert!(message.contains("--allow-write"), "{message}");
     }
 
-    // With the flag the one unlanded name is still refused, and the served
-    // three reach the engine: an empty request is a usage failure, not a refusal.
+    // With the flag every write name of §9.3 reaches the engine, and none keeps
+    // a second refusal: an empty request is a usage failure, not a refusal
+    // (M7-48).
     let answers = session(Some(root), None, true, &requests);
     for (name, answer) in WRITE_NAMES.iter().zip(&answers) {
-        if matches!(
-            *name,
-            "update_frontmatter" | "write_document" | "supersede_document"
-        ) {
-            assert_eq!(code(answer), "usage", "{name}: {answer}");
-        } else {
-            assert_eq!(code(answer), "refused", "{name}: {answer}");
-            assert!(answer["hint"].is_string(), "{answer}");
-            assert!(write_refusal(name, writes(true)).is_some(), "{name}");
-        }
+        assert_eq!(code(answer), "usage", "{name}: {answer}");
+        assert!(write_refusal(name, writes(true)).is_none(), "{name}");
     }
-    assert!(write_refusal("update_frontmatter", writes(true)).is_none());
-    assert!(write_refusal("write_document", writes(true)).is_none());
-    assert!(write_refusal("supersede_document", writes(true)).is_none());
     assert!(write_refusal("search", writes(true)).is_none());
 
     // Not one byte moved through any of it.

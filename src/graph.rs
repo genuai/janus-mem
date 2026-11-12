@@ -23,6 +23,7 @@ use crate::config::Config;
 use crate::document::Status;
 use crate::id::DocId;
 use crate::index::{Edge, Snapshot};
+use crate::link::{self, Corpora, Ignored};
 use crate::score::ScopeFilter;
 
 /// The scope a document has when it declares none (§6.12).
@@ -206,42 +207,65 @@ impl Graph {
     /// what a node is.
     #[must_use]
     pub fn for_snapshot(snapshot: &Snapshot, config: &Config) -> Self {
+        Self::for_snapshot_linked(snapshot, config, &Corpora::none()).0
+    }
+
+    /// The graph of one generation, with the qualified links this query reaches
+    /// into the corpora it reads (M7-37).
+    ///
+    /// A link that resolved adds one node and one edge, and no edge reaches the
+    /// other corpus: the policy decides what this query reads, and its answers
+    /// are the only ones that change (case 7.7, §0.2). The links the query did
+    /// not follow come back with the reasons, so `lineage` can note them and
+    /// `doctor` can report them.
+    #[must_use]
+    pub fn for_snapshot_linked(
+        snapshot: &Snapshot,
+        config: &Config,
+        corpora: &Corpora<'_>,
+    ) -> (Self, Vec<Ignored>) {
         let mut endpoints = Vec::with_capacity(snapshot.docs.len() + snapshot.tombstones.len());
         for doc in &snapshot.docs {
-            endpoints.push(Endpoint::Live(NodeFacts {
-                id: doc.id,
-                rel_path: text(snapshot, doc.rel_path),
-                scope: text(snapshot, doc.scope),
-                shared_with: texts(snapshot, &doc.shared_with),
-                valid_from: doc.effective_from.or(doc.date),
-                effective_to: doc.effective_to,
-                declared_status: Some(doc.status),
-            }));
+            endpoints.push(Endpoint::Live(live_facts(snapshot, doc)));
         }
         for meta in &snapshot.tombstones {
-            // A retired path is the last entry of its history; nothing else
-            // stores it (§2.1, R2-5).
-            let rel_path = snapshot
-                .path_history
-                .get(&meta.id)
-                .and_then(|entries| entries.last())
-                .map(|entry| entry.rel_path.clone())
-                .unwrap_or_default();
-            endpoints.push(Endpoint::Retired(NodeFacts {
-                id: meta.id,
-                rel_path,
-                scope: meta.scope.clone(),
-                shared_with: meta.shared_with.clone(),
-                valid_from: meta.valid_from,
-                // A tombstone holds no valid-time end and no declared status.
-                effective_to: None,
-                declared_status: None,
-            }));
+            endpoints.push(Endpoint::Retired(retired_facts(snapshot, meta)));
         }
-        Self::build(
-            &snapshot.edges,
-            endpoints,
-            config.links.allow_disjoint_supersession,
+        let mut edges = snapshot.edges.clone();
+        let (foreign, ignored) = link::qualified(snapshot, corpora);
+        // An id already in this generation is the same document by this
+        // project's own identity rule, so it keeps the facts it has and gains
+        // the edge. Two facts rows for one id would let the render depend on the
+        // order the corpora were read in.
+        let present: BTreeSet<DocId> = endpoints
+            .iter()
+            .map(|endpoint| endpoint.facts().id)
+            .collect();
+        for found in foreign {
+            let corpus = &corpora.selected[found.corpus];
+            let Some(endpoint) = endpoint_of(corpus.snapshot, found.target) else {
+                continue;
+            };
+            let id = endpoint.facts().id;
+            if !present.contains(&id) {
+                // The qualified text is the node's path, so a chain reads as the
+                // link was written and two corpora cannot show one path (M7-37).
+                let mut facts = endpoint.facts().clone();
+                facts.rel_path = format!("{}:{}", corpus.id, facts.rel_path);
+                endpoints.push(match endpoint {
+                    Endpoint::Live(_) => Endpoint::Live(facts),
+                    Endpoint::Retired(_) => Endpoint::Retired(facts),
+                });
+            }
+            edges.push(Edge {
+                from: found.target,
+                to: found.declarer,
+                kind: crate::index::EdgeKind::Supersedes,
+            });
+        }
+        (
+            Self::build(&edges, endpoints, config.links.allow_disjoint_supersession),
+            ignored,
         )
     }
 
@@ -673,6 +697,56 @@ fn find_cycle(edges: &BTreeSet<Pair>) -> Option<Vec<Pair>> {
 
 fn text(snapshot: &Snapshot, id: crate::index::StringId) -> String {
     snapshot.strings.get(id).unwrap_or_default().to_owned()
+}
+
+/// The facts one live document contributes to the graph (§3.9).
+fn live_facts(snapshot: &Snapshot, doc: &crate::index::DocMeta) -> NodeFacts {
+    NodeFacts {
+        id: doc.id,
+        rel_path: text(snapshot, doc.rel_path),
+        scope: text(snapshot, doc.scope),
+        shared_with: texts(snapshot, &doc.shared_with),
+        valid_from: doc.effective_from.or(doc.date),
+        effective_to: doc.effective_to,
+        declared_status: Some(doc.status),
+    }
+}
+
+/// The facts one tombstone contributes to the graph (§3.9).
+fn retired_facts(snapshot: &Snapshot, meta: &crate::index::TombstoneMeta) -> NodeFacts {
+    // A retired path is the last entry of its history; nothing else stores it
+    // (§2.1, R2-5).
+    let rel_path = snapshot
+        .path_history
+        .get(&meta.id)
+        .and_then(|entries| entries.last())
+        .map(|entry| entry.rel_path.clone())
+        .unwrap_or_default();
+    NodeFacts {
+        id: meta.id,
+        rel_path,
+        scope: meta.scope.clone(),
+        shared_with: meta.shared_with.clone(),
+        valid_from: meta.valid_from,
+        // A tombstone holds no valid-time end and no declared status.
+        effective_to: None,
+        declared_status: None,
+    }
+}
+
+/// One document of one generation, live or retired, as an endpoint (M7-37).
+///
+/// The graph of this generation has no row for a document in another corpus, so
+/// a resolved qualified link asks here for the facts it needs.
+fn endpoint_of(snapshot: &Snapshot, id: DocId) -> Option<Endpoint> {
+    if let Some(doc) = snapshot.docs.iter().find(|doc| doc.id == id) {
+        return Some(Endpoint::Live(live_facts(snapshot, doc)));
+    }
+    snapshot
+        .tombstones
+        .iter()
+        .find(|meta| meta.id == id)
+        .map(|meta| Endpoint::Retired(retired_facts(snapshot, meta)))
 }
 
 fn texts(snapshot: &Snapshot, ids: &[crate::index::StringId]) -> Vec<String> {
