@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::config::Config;
 use crate::id::Blake3Hash;
 use crate::vault;
 
@@ -24,6 +25,7 @@ use super::PatchError;
 use super::atomic::{self, Mode};
 use super::commit::{self, CommitError, CommitOptions, Committed};
 use super::scan::{self, Scan, ValueShape, is_patch_key};
+use super::validate;
 use super::value::render_value;
 
 /// The whole file a request asks for, and the facts a receipt reports.
@@ -61,20 +63,27 @@ impl Document {
 /// not UTF-8 have no readable keys, so every key counts as changed and
 /// appended, and the hash still describes the bytes the caller saw.
 ///
+/// `config` decides which keys the reader interprets, and therefore which values
+/// the writer may store: a value the reader cannot interpret is refused before
+/// any byte is built (M7b-7). No file is read.
+///
 /// # Errors
 ///
 /// [`PatchError::KeyShape`] when a key is outside
 /// `[A-Za-z0-9][A-Za-z0-9._-]*`. A key is written as a line, so a newline or a
-/// colon inside one would add or split a key.
+/// colon inside one would add or split a key. [`PatchError::InvalidValue`] when a
+/// checked key holds a value the reader cannot interpret.
 pub fn plan(
+    config: &Config,
     frontmatter: &BTreeMap<String, Option<String>>,
     body: &str,
     existing: Option<&[u8]>,
 ) -> Result<Document, PatchError> {
-    for key in frontmatter.keys() {
+    for (key, value) in frontmatter {
         if !is_patch_key(key) {
             return Err(PatchError::KeyShape { key: key.clone() });
         }
+        validate::validate(config, key, value.as_deref())?;
     }
 
     let old_text = existing.and_then(|bytes| std::str::from_utf8(bytes).ok());

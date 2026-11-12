@@ -392,7 +392,8 @@ fn case_6_8_a_failed_second_write_restores_the_old_file_and_mode() {
     .expect("plan");
     let mut frontmatter: BTreeMap<String, Option<String>> = BTreeMap::new();
     frontmatter.insert("supersedes".to_owned(), Some("notes/old.md".to_owned()));
-    let new_document = plan_document(&frontmatter, "", None).expect("plan the new document");
+    let new_document =
+        plan_document(&config, &frontmatter, "", None).expect("plan the new document");
     let options = CommitOptions {
         path: old_path.clone(),
         root: root.to_path_buf(),

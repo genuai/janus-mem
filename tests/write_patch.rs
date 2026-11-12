@@ -801,7 +801,7 @@ fn case_1_7_duplicate_top_level_key_is_refused() {
     let error = write::plan(
         duplicated,
         &config(),
-        &patch(&[("status", Some("retired"))]),
+        &patch(&[("status", Some("superseded"))]),
     )
     .expect_err("refused");
     assert_eq!(
@@ -814,11 +814,11 @@ fn case_1_7_duplicate_top_level_key_is_refused() {
 
     // A duplicate elsewhere costs its own key, not the whole file.
     let elsewhere = "---\ntitle: Duplicate tag\ntags: [a]\ntags: [b]\nstatus: active\n---\nbody\n";
-    let plan = write::plan(elsewhere, &config(), &patch(&[("status", Some("retired"))]))
-        .expect("other keys");
+    let plan =
+        write::plan(elsewhere, &config(), &patch(&[("status", Some("active"))])).expect("ok");
     assert_eq!(
         plan.text,
-        "---\ntitle: Duplicate tag\ntags: [a]\ntags: [b]\nstatus: retired\n---\nbody\n"
+        "---\ntitle: Duplicate tag\ntags: [a]\ntags: [b]\nstatus: active\n---\nbody\n"
     );
 }
 
@@ -1005,12 +1005,14 @@ fn case_1_12_written_values_read_back_through_the_typed_reader() {
 }
 
 /// Plans one value into a document and reads it back through the typed reader.
+///
+/// The key is `title`, which is free text: a checked key refuses these values.
 fn assert_value_round_trips(value: &str) {
     let input = "---\ntitle: Round trip\nstatus: active\n---\nbody\n";
-    let plan = write::plan(input, &config(), &patch(&[("status", Some(value))]))
+    let plan = write::plan(input, &config(), &patch(&[("title", Some(value))]))
         .unwrap_or_else(|err| panic!("value {value:?} was refused: {err}"));
     assert_eq!(
-        typed(&plan.text).status.as_deref(),
+        typed(&plan.text).title.as_deref(),
         Some(value),
         "value {value:?} read back differently; written as:\n{}",
         plan.text
@@ -1277,11 +1279,11 @@ fn case_2_2_a_bare_value_written_again_changes_no_byte() {
     assert_eq!(plan.text, input);
     assert!(plan.changed_keys.is_empty(), "{:?}", plan.changed_keys);
 
-    // A request is a value, not a rendering: `"active"` with the quote
-    // characters in it is another value, so it writes.
-    let plan = planned(input, &[("status", Some("\"active\""))]);
-    assert_eq!(plan.changed_keys, ["status"]);
-    assert_eq!(typed(&plan.text).status.as_deref(), Some("\"active\""));
+    // A request is a value, not a rendering: the quote characters are part of
+    // it, so it writes. `title` is a free key; a checked key refuses the string.
+    let plan = planned(input, &[("title", Some("\"Bare\""))]);
+    assert_eq!(plan.changed_keys, ["title"]);
+    assert_eq!(typed(&plan.text).title.as_deref(), Some("\"Bare\""));
     assert_ne!(plan.text, input);
 }
 
@@ -1378,14 +1380,17 @@ fn a_timestamp_and_its_date_are_one_value() {
     assert_eq!(plan.changed_keys, ["date"]);
 }
 
-/// A value the date parser rejects is not a date, so two are two values.
+/// A rejected date and an accepted one are two values.
+///
+/// Two rejected values were the old shape of this case; a write now refuses a
+/// rejected request, so one side is the old file and the other the request.
 #[test]
-fn two_values_the_date_parser_rejects_are_two_values() {
+fn a_rejected_date_and_an_accepted_one_are_two_values() {
     let input = "---\ndate: 2026-10\n---\n\nbody\n";
 
-    let plan = planned(input, &[("date", Some("2026-11"))]);
+    let plan = planned(input, &[("date", Some("2026-11-01"))]);
     assert_eq!(plan.changed_keys, ["date"], "a rejected date is its bytes");
-    assert_eq!(plan.text, "---\ndate: 2026-11\n---\n\nbody\n");
+    assert_eq!(plan.text, "---\ndate: 2026-11-01\n---\n\nbody\n");
 }
 
 /// The empty string is a value, and a request for it is not a request for null.
@@ -1416,6 +1421,9 @@ fn a_flow_sequence_and_a_null_are_two_values() {
 
 proptest! {
     /// I1, I2, I4 and I5 over a generated document, with a generated value.
+    ///
+    /// The value goes into `title`, a free key, so every generated string is one
+    /// the writer may store.
     #[test]
     fn invariants_hold_for_a_generated_patch(
         value in any_value(),
@@ -1453,7 +1461,7 @@ proptest! {
         input.push_str("Body line two.");
         input.push_str(newline);
 
-        let plan = write::plan(&input, &config(), &patch(&[("status", Some(value.as_str()))]))
+        let plan = write::plan(&input, &config(), &patch(&[("title", Some(value.as_str()))]))
             .map_err(|err| TestCaseError::fail(err.to_string()))?;
 
         // I2: newline style and BOM. The value is escaped, so no line is added.
@@ -1470,7 +1478,7 @@ proptest! {
         prop_assert!(plan.text.ends_with(&input[scan.span.end..]));
         let after = write::scan(&plan.text).expect("output scans");
         for key in &scan.keys {
-            if key.key == "status" {
+            if key.key == "title" {
                 continue;
             }
             let found = after.keys.iter().find(|other| other.key == key.key).expect("key kept");
@@ -1484,7 +1492,7 @@ proptest! {
         // the string that was asked for.
         prop_assert!(frontmatter::read(&plan.text, &config()).raw.is_some());
         let read = typed(&plan.text);
-        prop_assert_eq!(read.status.as_deref(), Some(value.as_str()));
+        prop_assert_eq!(read.title.as_deref(), Some(value.as_str()));
     }
 
     /// I3: a refused shape yields no bytes at all. The generator builds a
@@ -1493,8 +1501,7 @@ proptest! {
     #[test]
     fn a_refused_patch_yields_no_bytes(
         lines in prop::collection::vec("[a-z]{0,6}", 1..4),
-    ) {
-        let mut input = String::from("---\nstatus: active\ntags:\n");
+    ) {        let mut input = String::from("---\nstatus: active\ntags:\n");
         for line in &lines {
             input.push_str("  - ");
             input.push_str(line);
@@ -1511,23 +1518,23 @@ proptest! {
             })
         );
 
-        let accepted = write::plan(&input, &config(), &patch(&[("status", Some("retired"))]))
+        let accepted = write::plan(&input, &config(), &patch(&[("status", Some("superseded"))]))
             .map_err(|err| TestCaseError::fail(err.to_string()))?;
         prop_assert!(accepted.text.contains("---\nbody\n"));
-        prop_assert!(accepted.text.starts_with("---\nstatus: retired\ntags:\n"));
+        prop_assert!(accepted.text.starts_with("---\nstatus: superseded\ntags:\n"));
     }
 
     /// Case 1.12 as a property: any value at all, written by the writer, reads
     /// back through the typed reader as the same string.
     #[test]
     fn any_value_round_trips_through_the_typed_reader(value in any_value()) {
-        let input = "---\nstatus: active\n---\nbody\n";
-        let plan = write::plan(input, &config(), &patch(&[("status", Some(value.as_str()))]))
+        let input = "---\ntitle: placeholder\nstatus: active\n---\nbody\n";
+        let plan = write::plan(input, &config(), &patch(&[("title", Some(value.as_str()))]))
             .map_err(|err| TestCaseError::fail(err.to_string()))?;
         let read = frontmatter::read(&plan.text, &config());
         prop_assert!(read.raw.is_some());
         prop_assert_eq!(
-            read.frontmatter.status.as_deref(),
+            read.frontmatter.title.as_deref(),
             Some(value.as_str()),
             "written as {:?}",
             plan.text

@@ -171,8 +171,12 @@ check() {
 while IFS='|' read -r path shape key set_owed sup_owed pro_owed same; do
   hash=$(etag "$path")
   [[ -n $hash ]] || { echo "error: no etag for $path" >&2; exit 2; }
+  # A status-keyed shape is asked for a real status. A nonsense one is refused
+  # before the scanner sees the block, and this pass measures the scanner.
+  value=Rehearsed
+  [[ $key == status ]] && value=superseded
   check set "$path" "$shape" "$set_owed" \
-    "$(outcome x "$JANUS" --workspace "$WS" set "$path" --expect-hash "$hash" --key "$key=Rehearsed" --dry-run --json)"
+    "$(outcome x "$JANUS" --workspace "$WS" set "$path" --expect-hash "$hash" --key "$key=$value" --dry-run --json)"
   check write "$path" "$shape" ok \
     "$(outcome x "$JANUS" --workspace "$WS" write "$path" --frontmatter "$ROOT/frontmatter.yaml" --body "$ROOT/body.md" --overwrite --expect-hash "$hash" --dry-run --json)"
   check supersede "$path" "$shape" "$sup_owed" \

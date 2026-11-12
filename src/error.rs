@@ -277,6 +277,23 @@ pub enum JanusError {
         reason: &'static str,
     },
 
+    /// A patch value the reader cannot interpret, so the write stores nothing
+    /// (§2.4, M7b-7). The message names the key, the value and the accepted set.
+    ///
+    /// A retry with the same request cannot succeed, so this is a refusal: the
+    /// caller must choose a different value. Exit 4.
+    #[error("{path}: `{key}` = {value:?} is not a value a read accepts: use {accepted}")]
+    InvalidValue {
+        /// The document the write named.
+        path: PathBuf,
+        /// The key the request names.
+        key: String,
+        /// The value the request asks for, or `null`.
+        value: String,
+        /// The values the key accepts, in a reader's words.
+        accepted: &'static str,
+    },
+
     /// A supersession would close a cycle, so no file is touched (case 6.4).
     ///
     /// The cycle is named as a path, so a caller can see the link that must be
@@ -392,6 +409,7 @@ impl JanusError {
             | Self::WriteDisabled { .. }
             | Self::ReadOnlyCorpus { .. }
             | Self::UnsupportedPatch { .. }
+            | Self::InvalidValue { .. }
             | Self::SupersessionCycle { .. }
             | Self::KeyShape { .. }
             | Self::NoFrontmatter { .. }

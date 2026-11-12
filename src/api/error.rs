@@ -76,6 +76,13 @@ impl ApiCode {
                 code: "unsupported_patch",
                 exit: 4,
             },
+            // A refused value: the request is well formed and the value is not
+            // storable, so a retry with the same request cannot succeed
+            // (M7b-10).
+            JanusError::InvalidValue { .. } => Self {
+                code: "invalid_value",
+                exit: 4,
+            },
             // A cycle is its own refusal: the caller must change the target,
             // not the shape of a key.
             JanusError::SupersessionCycle { .. } => Self {
