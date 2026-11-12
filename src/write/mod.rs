@@ -45,13 +45,16 @@
 //! * I5 — other keys, key order, comments and quoting are untouched.
 
 mod atomic;
+mod chain;
 mod commit;
 mod document;
 mod patch;
 mod scan;
+mod supersede;
 mod value;
 
 pub use atomic::{Mode, replace, sync_parent_dir};
+pub use chain::{Chain, LIMIT as CHAIN_LIMIT};
 pub use commit::{CommitError, CommitOptions, Committed, Hooks, NoHooks, commit};
 pub use document::{
     Document, create as create_document, new_target as document_target,
@@ -60,6 +63,7 @@ pub use document::{
 pub use patch::{Patch, Plan, plan};
 pub use scan::reason;
 pub use scan::{KeySpan, Scan, ValueShape, ValueSpan, is_patch_key, scan};
+pub use supersede::commit_pair;
 pub use value::render_value;
 
 use thiserror::Error;

@@ -33,8 +33,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::api::dto::{
-    FactsParams, LineageParams, ReadParams, SearchParams, StatusParams, UpdateParams, WriteMode,
-    WriteParams,
+    FactsParams, LineageParams, ReadParams, SearchParams, StatusParams, SupersedeParams,
+    SupersedeReceipt, UpdateParams, WriteMode, WriteParams,
 };
 use crate::api::{ApiCode, Call, Failure, Receipt, Tool, Writes};
 use crate::clock::Clock;
@@ -275,6 +275,10 @@ impl Engine {
                 let params: WriteParams = params(call)?;
                 encode(self.write_document(&params)?)
             }
+            Tool::SupersedeDocument => {
+                let params: SupersedeParams = params(call)?;
+                encode(self.supersede(&params)?)
+            }
         }
     }
 
@@ -438,6 +442,132 @@ impl Engine {
         let options = self.options(&found);
         write::overwrite_document(&document, &options)
             .map_err(|error| commit_refusal(named, error))?;
+        Ok(receipt)
+    }
+
+    /// One `supersede_document` call: the gate, the cycle check, then the
+    /// two-file transaction (§7.4, M7-6).
+    ///
+    /// Both documents are planned before either is staged, so a refused patch
+    /// writes neither (case 6.3). The cycle check reads frontmatter on disk, so
+    /// it runs on a corpus that was never indexed (M7-34). An existing
+    /// `new_path` is refused before anything is staged (M7-35).
+    fn supersede(&self, params: &SupersedeParams) -> Result<SupersedeReceipt, JanusError> {
+        let named = self.name.as_deref().unwrap_or(&self.config.corpus_id);
+        if let Some(refusal) = self.writes.refusal(named, &self.config.corpus_id) {
+            return Err(refusal);
+        }
+        let old_named = PathBuf::from(&params.old_path);
+        let new_named = PathBuf::from(&params.new_path);
+        for path in [&old_named, &new_named] {
+            if !path.file_name().is_some_and(vault::is_markdown) {
+                return Err(usage(format!(
+                    "{} is not Markdown; a write needs a .md or .markdown document",
+                    path.display()
+                )));
+            }
+        }
+
+        let old_found = target(&self.root, &params.old_path)?;
+        let new_found = write::document_target(&self.root, &new_named)
+            .map_err(|error| commit_refusal(&new_named, error))?;
+        if fs::symlink_metadata(&new_found).is_ok() {
+            return Err(JanusError::PathExists { path: new_named });
+        }
+        let old_rel = relative(&self.root, &old_found);
+        let new_rel = relative(&self.root, &new_found);
+        let dry_run = params.dry_run.unwrap_or(false);
+        let append_only = params.append_only.unwrap_or(false);
+
+        // The check reads the files, not the index: a write never refreshes the
+        // index, so a snapshot would be the one this call invalidates (M7-17).
+        let chain = write::Chain::read(&self.root, &self.config, &old_rel);
+        if let Some(cycle) = chain.cycle(&old_rel, &new_rel) {
+            return Err(JanusError::SupersessionCycle {
+                cycle: cycle.join(" -> "),
+            });
+        }
+
+        let old_bytes = fs::read(&old_found).map_err(|source| JanusError::Write {
+            path: old_named.clone(),
+            source,
+        })?;
+        let old_text =
+            String::from_utf8(old_bytes).map_err(|_| JanusError::DocumentNotInCorpus {
+                path: old_named.clone(),
+            })?;
+        let old_plan = (!append_only)
+            .then(|| {
+                let patch = Patch {
+                    path: old_named.clone(),
+                    keys: vec![
+                        ("status".to_owned(), Some("superseded".to_owned())),
+                        ("superseded_by".to_owned(), Some(new_rel.clone())),
+                    ],
+                    expected_hash: params.expected_hash.clone(),
+                    create_frontmatter: false,
+                    dry_run,
+                };
+                write::plan(&old_text, &patch).map_err(|error| patch_refusal(&old_named, error))
+            })
+            .transpose()?;
+
+        let mut frontmatter: std::collections::BTreeMap<String, Option<String>> =
+            std::collections::BTreeMap::new();
+        if let Some(title) = &params.new_title {
+            frontmatter.insert("title".to_owned(), Some(title.clone()));
+        }
+        frontmatter.insert("supersedes".to_owned(), Some(old_rel.clone()));
+        let new_document = write::plan_document(&frontmatter, "", None)
+            .map_err(|error| patch_refusal(&new_named, error))?;
+
+        let old_hash = old_plan.as_ref().map_or_else(
+            || crate::id::Blake3Hash::of_bytes(old_text.as_bytes()).to_hex(),
+            |plan| plan.old_hash.clone(),
+        );
+        let old_keys = old_plan
+            .as_ref()
+            .map_or(&[][..], |plan| plan.changed_keys.as_slice());
+        check_etag(
+            &old_named,
+            params.expected_hash.as_deref(),
+            Some(&old_hash),
+            old_keys,
+            dry_run,
+        )?;
+
+        let new_receipt = document_receipt(&self.root, &new_found, &new_document, dry_run);
+        let old_receipt = old_plan.as_ref().map(|plan| Receipt {
+            path: old_rel.clone(),
+            changed_keys: plan.changed_keys.clone(),
+            appended_keys: plan.appended_keys.clone(),
+            old_hash: Some(plan.old_hash.clone()),
+            new_hash: plan.new_hash.clone(),
+            dry_run,
+            bytes_before: plan.bytes_before,
+            bytes_after: plan.bytes_after,
+        });
+        let (primary, receipts) = match old_receipt {
+            Some(receipt) => (receipt.clone(), vec![receipt, new_receipt.clone()]),
+            None => (new_receipt.clone(), vec![new_receipt]),
+        };
+        let receipt = SupersedeReceipt {
+            receipt: primary,
+            receipts,
+            chain: chain.ordered(&old_rel, &new_rel),
+        };
+        if dry_run {
+            return Ok(receipt);
+        }
+
+        let options = self.options(&old_found);
+        if let Some(plan) = &old_plan {
+            write::commit_pair(plan, &new_found, new_document.text.as_bytes(), &options)
+                .map_err(|error| commit_refusal(&old_named, error))?;
+        } else {
+            write::create_document(&new_found, &new_document, &options)
+                .map_err(|error| commit_refusal(&new_named, error))?;
+        }
         Ok(receipt)
     }
 
@@ -765,7 +895,7 @@ impl Fleet {
             }
             // A write names one corpus's file, so it answers for one corpus,
             // and the qualifier or `corpus` parameter decides which (M7-38).
-            Tool::UpdateFrontmatter | Tool::WriteDocument => {
+            Tool::UpdateFrontmatter | Tool::WriteDocument | Tool::SupersedeDocument => {
                 let member = self.one(found, &choice)?;
                 member.engine().answer(&Call::new(call.tool, fields))
             }
@@ -1068,6 +1198,26 @@ fn commit_refusal(path: &Path, error: CommitError) -> JanusError {
         CommitError::Busy { path } => JanusError::LockTimeout { path },
         CommitError::OutsideCorpus { path } => JanusError::PathEscape { path },
         CommitError::Exists { path } => JanusError::PathExists { path },
+        CommitError::RolledBack {
+            failed,
+            restored,
+            cause,
+        } => JanusError::TransactionRolledBack {
+            failed,
+            restored,
+            cause: cause.to_string(),
+        },
+        CommitError::Inconsistent {
+            failed,
+            old,
+            cause,
+            restore,
+        } => JanusError::TransactionInconsistent {
+            failed,
+            old,
+            cause: cause.to_string(),
+            restore: restore.to_string(),
+        },
         CommitError::Unsynced { path, source } | CommitError::Io { path, source } => {
             JanusError::Write { path, source }
         }

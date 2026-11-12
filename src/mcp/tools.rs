@@ -49,6 +49,7 @@ pub fn descriptors(writes: Writes) -> Value {
     if writes.enabled() {
         listed.push(Tool::UpdateFrontmatter);
         listed.push(Tool::WriteDocument);
+        listed.push(Tool::SupersedeDocument);
     }
     let tools: Vec<Value> = listed.iter().map(|tool| descriptor(*tool)).collect();
     json!({ "tools": tools })
@@ -223,6 +224,11 @@ fn describe(tool: Tool) -> &'static str {
             "Write one whole file and return a receipt: a frontmatter block, then \
              the body. mode create refuses an existing path; mode overwrite needs \
              expected_hash, the content_hash a read returned."
+        }
+        Tool::SupersedeDocument => {
+            "Retire one document and record its successor in one call, and return both \
+             receipts and the chain. Needs expected_hash for the old document; new_path \
+             must not exist. A failure puts both files back."
         }
     }
 }
@@ -429,6 +435,39 @@ fn schema(tool: Tool) -> Value {
                 }
             },
             "required": ["path", "frontmatter", "body", "mode"],
+            "additionalProperties": false
+        }),
+        Tool::SupersedeDocument => json!({
+            "type": "object",
+            "properties": {
+                "old_path": {
+                    "type": "string",
+                    "description": "The corpus path of the document to retire."
+                },
+                "expected_hash": {
+                    "type": "string",
+                    "description": "The content_hash a read returned for the old document. \
+                                    Required: without it the call changes nothing."
+                },
+                "new_path": {
+                    "type": "string",
+                    "description": "The corpus path of the successor. It must not exist."
+                },
+                "new_title": {
+                    "type": "string",
+                    "description": "The title written on the new document. Default: no title."
+                },
+                "append_only": {
+                    "type": "boolean",
+                    "description": "Create the new document and leave the old one untouched. \
+                                    Default false."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Report what would change and write nothing. Default false."
+                }
+            },
+            "required": ["old_path", "new_path"],
             "additionalProperties": false
         }),
     }

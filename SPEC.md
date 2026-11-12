@@ -770,9 +770,9 @@ DECISION GATE: span-preserving YAML. `serde_yaml` is unmaintained and lossy by d
 
 A convenience wrapper over two `update_frontmatter` calls, executed as a **transaction**:
 
-1. Dry-run both patches; validate both docs exist, are inside the vault, and that the resulting graph has no cycle.
-2. Stage both temp files.
-3. Rename both (old first, then new). If the second rename fails, roll back the first from its staged backup and return an error naming the inconsistent state.
+1. Dry-run both patches; validate the old document exists, the new path is absent, both are inside the vault, and that the resulting graph has no cycle.
+2. Patch the old document under the corpus lock.
+3. Create the new document. If the create fails, restore the old document from the plan's original bytes and mode and return an error naming the file that failed and the file that was restored.
 
 4. Return both receipts plus the resolved canonical chain.
 
@@ -1120,7 +1120,7 @@ name. Every other command works on one corpus and **refuses** `--workspace` with
 point: a command that parsed the flag and ignored it would publish one corpus and look
 like it read the workspace.
 
-Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash, `4` refused (unsafe or unsupported operation). Human output is a compact table; `--json` is stable and versioned. From M7, `3` is carried by `conflict` and `precondition_required`: both mean re-read, then retry (§9.3).
+Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash, `4` refused (unsafe or unsupported operation). Human output is a compact table; `--json` is stable and versioned. From M7, `3` is carried by `conflict` and `precondition_required`: both mean re-read, then retry (§9.3). `cycle` is a refusal at exit 4: the proposed supersession would close a cycle, so the target must change.
 
 `--allow-write` gates the two server surfaces, `janus mcp` and `janus rpc`, and nothing else. A CLI write command needs no flag, because typing the command is the consent (M7-15). `janus set` **requires** `--expect-hash`: a person typing the command sees the requirement in `--help`, and a server answers `precondition_required` when an agent omits it (M7-51).
 

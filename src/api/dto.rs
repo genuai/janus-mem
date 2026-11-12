@@ -235,6 +235,30 @@ pub struct WriteParams {
     pub dry_run: Option<bool>,
 }
 
+/// The parameters of one `supersede_document` call (§9.3, M7-6).
+///
+/// `expected_hash` is the old document's etag. `new_path` must not exist: the
+/// wire contract has one etag, so the created document cannot be guarded too
+/// (M7-35). `append_only` creates the new document and leaves the old one
+/// byte-identical. `new_title` writes the one optional key the new document
+/// asks for; `supersedes` is always written.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupersedeParams {
+    /// The corpus path of the document being retired.
+    pub old_path: String,
+    /// The etag a read returned for the old document.
+    pub expected_hash: Option<String>,
+    /// The corpus path of the document that replaces it. It must not exist.
+    pub new_path: String,
+    /// The title to write on the new document, when one is wanted.
+    pub new_title: Option<String>,
+    /// Create the new document and leave the old one untouched. Default false.
+    pub append_only: Option<bool>,
+    /// Report what would change and write nothing.
+    pub dry_run: Option<bool>,
+}
+
 /// One write's receipt (§2.3, M7-14).
 ///
 /// A receipt is not an envelope: it carries the shared head and these fields,
@@ -259,4 +283,21 @@ pub struct Receipt {
     pub bytes_before: usize,
     /// The file's length after the write, in bytes.
     pub bytes_after: usize,
+}
+
+/// The receipt of one `supersede_document` call (§2.3, M7-6).
+///
+/// The shared fields describe the first file the call wrote: the old document
+/// in place, or the new one in append-only mode. `receipts` carries one receipt
+/// per file, in the order they were written, and `chain` is the resolved chain
+/// oldest first. Both fields are additive, so `api` stays 1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SupersedeReceipt {
+    /// The first file the call wrote, flattened into the standard fields.
+    #[serde(flatten)]
+    pub receipt: Receipt,
+    /// One receipt per file, in the order they were written.
+    pub receipts: Vec<Receipt>,
+    /// The resolved supersession chain, oldest first.
+    pub chain: Vec<String>,
 }

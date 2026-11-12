@@ -17,7 +17,9 @@ pub mod dto;
 pub mod error;
 
 pub use crate::scan::API_VERSION;
-pub use dto::{Failure, Ok, Receipt, UpdateParams, WriteMode, WriteParams};
+pub use dto::{
+    Failure, Ok, Receipt, SupersedeParams, SupersedeReceipt, UpdateParams, WriteMode, WriteParams,
+};
 pub use error::ApiCode;
 
 use serde_json::Value;
@@ -44,6 +46,8 @@ pub enum Tool {
     UpdateFrontmatter,
     /// `write_document`: one whole file, created or overwritten.
     WriteDocument,
+    /// `supersede_document`: retire one document and record its successor.
+    SupersedeDocument,
 }
 
 impl Tool {
@@ -56,6 +60,7 @@ impl Tool {
         Self::Status,
         Self::UpdateFrontmatter,
         Self::WriteDocument,
+        Self::SupersedeDocument,
     ];
 
     /// The wire name an agent sends and reads (§9.2).
@@ -69,6 +74,7 @@ impl Tool {
             Self::Status => "janus_status",
             Self::UpdateFrontmatter => "update_frontmatter",
             Self::WriteDocument => "write_document",
+            Self::SupersedeDocument => "supersede_document",
         }
     }
 
@@ -78,7 +84,10 @@ impl Tool {
     pub const fn names_a_path(self) -> bool {
         matches!(
             self,
-            Self::ReadDocument | Self::UpdateFrontmatter | Self::WriteDocument
+            Self::ReadDocument
+                | Self::UpdateFrontmatter
+                | Self::WriteDocument
+                | Self::SupersedeDocument
         )
     }
 
@@ -131,11 +140,11 @@ impl Call {
 
 /// The write tools this release names but does not serve yet (§3.8).
 ///
-/// `update_frontmatter` left this list in M7-4, and `write_document` in M7-5,
-/// which serve them. A caller that sends one of the two remaining names gets a
-/// refusal, not "no such tool": the name is legal and the phase that serves it
-/// has not landed. Each phase deletes its own name.
-const UNLANDED_WRITE_TOOLS: [&str; 2] = ["supersede_document", "promote_document"];
+/// `update_frontmatter` left this list in M7-4, `write_document` in M7-5, and
+/// `supersede_document` in M7-6, which serve them. A caller that sends the one
+/// remaining name gets a refusal, not "no such tool": the name is legal and
+/// the phase that serves it has not landed. Each phase deletes its own name.
+const UNLANDED_WRITE_TOOLS: [&str; 1] = ["promote_document"];
 
 /// The four write names of §9.3, served or not.
 const WRITE_TOOLS: [&str; 4] = [

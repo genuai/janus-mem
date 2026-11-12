@@ -75,6 +75,12 @@ impl ApiCode {
                 code: "unsupported_patch",
                 exit: 4,
             },
+            // A cycle is its own refusal: the caller must change the target,
+            // not the shape of a key.
+            JanusError::SupersessionCycle { .. } => Self {
+                code: "cycle",
+                exit: 4,
+            },
             JanusError::KeyShape { .. } => Self {
                 code: "key_shape",
                 exit: 4,
@@ -145,7 +151,11 @@ impl ApiCode {
                 code: "unstable_corpus",
                 exit: 1,
             },
-            JanusError::Write { .. } => Self {
+            // A two-file transaction that rolled back is a write failure. The
+            // message names both files; the code stays `write`.
+            JanusError::Write { .. }
+            | JanusError::TransactionRolledBack { .. }
+            | JanusError::TransactionInconsistent { .. } => Self {
                 code: "write",
                 exit: 1,
             },

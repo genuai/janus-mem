@@ -266,6 +266,16 @@ pub enum JanusError {
         reason: &'static str,
     },
 
+    /// A supersession would close a cycle, so no file is touched (case 6.4).
+    ///
+    /// The cycle is named as a path, so a caller can see the link that must be
+    /// removed before the request can succeed.
+    #[error("the supersession would close a cycle: {cycle}")]
+    SupersessionCycle {
+        /// The cycle, as paths joined by ` -> `.
+        cycle: String,
+    },
+
     /// A patch key is outside `[A-Za-z0-9][A-Za-z0-9._-]*` (§2.1). A key is
     /// written as a line, so a key with a newline, `: `, `#` or a quote could
     /// add or split a key.
@@ -291,6 +301,40 @@ pub enum JanusError {
     PathExists {
         /// The path the create named.
         path: PathBuf,
+    },
+
+    /// A two-file write failed on its second file, and the first file is back
+    /// at its original bytes and mode.
+    ///
+    /// This is a runtime failure: the failed file may be fixed and the call
+    /// retried. The message names both files, so a reader knows the vault is
+    /// consistent again.
+    #[error("{failed}: {cause}; {restored} was restored from its original bytes and mode")]
+    TransactionRolledBack {
+        /// The second file, whose write failed.
+        failed: PathBuf,
+        /// The first file, whose original bytes are back on disk.
+        restored: PathBuf,
+        /// The failure that started the rollback.
+        cause: String,
+    },
+
+    /// A two-file write failed on its second file, and restoring the first
+    /// file failed too.
+    ///
+    /// The message names the inconsistent state. It never claims a restore.
+    #[error(
+        "{failed}: {cause}; {old} could NOT be restored ({restore}), so the vault is inconsistent"
+    )]
+    TransactionInconsistent {
+        /// The second file, whose write failed.
+        failed: PathBuf,
+        /// The first file, whose bytes could not be put back.
+        old: PathBuf,
+        /// The failure that started the rollback.
+        cause: String,
+        /// The failure that stopped the restore.
+        restore: String,
     },
 
     /// A command-line combination that cannot mean anything: understood, but
@@ -323,6 +367,7 @@ impl JanusError {
             | Self::WriteDisabled { .. }
             | Self::ReadOnlyCorpus { .. }
             | Self::UnsupportedPatch { .. }
+            | Self::SupersessionCycle { .. }
             | Self::KeyShape { .. }
             | Self::NoFrontmatter { .. }
             | Self::PathExists { .. } => 4,
@@ -334,6 +379,8 @@ impl JanusError {
             Self::VaultResolve { .. }
             | Self::VaultNotFound { .. }
             | Self::PathResolve { .. }
+            | Self::TransactionRolledBack { .. }
+            | Self::TransactionInconsistent { .. }
             | Self::DocumentNotInCorpus { .. }
             | Self::DocumentChanged { .. }
             | Self::TopicNotFound { .. }
