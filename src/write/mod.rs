@@ -46,12 +46,17 @@
 
 mod atomic;
 mod commit;
+mod document;
 mod patch;
 mod scan;
 mod value;
 
 pub use atomic::{Mode, replace, sync_parent_dir};
 pub use commit::{CommitError, CommitOptions, Committed, Hooks, NoHooks, commit};
+pub use document::{
+    Document, create as create_document, new_target as document_target,
+    overwrite as overwrite_document, plan as plan_document,
+};
 pub use patch::{Patch, Plan, plan};
 pub use scan::reason;
 pub use scan::{KeySpan, Scan, ValueShape, ValueSpan, is_patch_key, scan};

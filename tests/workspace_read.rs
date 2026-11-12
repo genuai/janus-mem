@@ -463,7 +463,7 @@ fn case_3_5_a_write_tool_is_refused_whatever_the_corpus_says() {
         let answer = mcp(
             dir.path(),
             allow_write,
-            "write_document",
+            "supersede_document",
             json!({ "path": SHARED, "body": "rewritten" }),
         );
         assert_eq!(answer["ok"], json!(false), "{answer}");

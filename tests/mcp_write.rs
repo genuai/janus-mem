@@ -203,8 +203,8 @@ fn case_4_1_with_the_flag_the_served_tool_reaches_its_contract() {
     let written = text(root, "notes/one.md");
     assert_eq!(written, ONE.replace("status: active", "status: superseded"));
 
-    // The three whose phases have not landed are refused even with the flag.
-    for name in ["write_document", "supersede_document", "promote_document"] {
+    // The two whose phases have not landed are refused even with the flag.
+    for name in ["supersede_document", "promote_document"] {
         let envelope = call(Some(root), None, true, name, json!({}));
         assert_eq!(code(&envelope), "refused", "{name}: {envelope}");
     }

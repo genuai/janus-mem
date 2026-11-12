@@ -202,6 +202,39 @@ impl UpdateParams {
     }
 }
 
+/// The mode of one `write_document` call (§9.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WriteMode {
+    /// Write a path that does not exist. An existing path is `path_exists`.
+    Create,
+    /// Replace a file the caller has read. `expected_hash` is required.
+    Overwrite,
+}
+
+/// The parameters of one `write_document` call (§9.3).
+///
+/// `frontmatter` is one object of key to string-or-null, and `body` is written
+/// byte for byte after the block. `mode` decides which half of the contract
+/// runs: `create` refuses an existing path, and `overwrite` requires the
+/// `content_hash` a read returned.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriteParams {
+    /// The corpus path of the document; required.
+    pub path: String,
+    /// The keys to write, and the value of each. `null` writes `null`.
+    pub frontmatter: BTreeMap<String, Option<String>>,
+    /// The text written after the closing fence, byte for byte.
+    pub body: String,
+    /// `create` or `overwrite`.
+    pub mode: WriteMode,
+    /// The etag a read returned. Required for an overwrite that writes.
+    pub expected_hash: Option<String>,
+    /// Report what would change and write nothing.
+    pub dry_run: Option<bool>,
+}
+
 /// One write's receipt (§2.3, M7-14).
 ///
 /// A receipt is not an envelope: it carries the shared head and these fields,
@@ -216,8 +249,8 @@ pub struct Receipt {
     pub changed_keys: Vec<String>,
     /// Keys that were absent and are now written, sorted.
     pub appended_keys: Vec<String>,
-    /// blake3 of the bytes before the write.
-    pub old_hash: String,
+    /// blake3 of the bytes before the write; `null` for a create.
+    pub old_hash: Option<String>,
     /// blake3 of the bytes after the write.
     pub new_hash: String,
     /// True when nothing was written.

@@ -4,7 +4,7 @@
 //! the same operations can be exposed over MCP and JSON-RPC without duplicating
 //! decisions (§9.5).
 
-use std::io::{IsTerminal as _, Write};
+use std::io::{IsTerminal as _, Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -308,6 +308,46 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                 emit_json(&answer);
             } else {
                 // A closed pipe is not a command failure (`janus set … | head`).
+                let _ = render_receipt(&answer, &mut std::io::stdout().lock());
+            }
+            Ok(())
+        }
+
+        // A whole-file write. Like `set`, it is a typed command, so it needs no
+        // `--allow-write` (M7-15), and it reads a workspace (M7-38).
+        Command::Write {
+            path,
+            frontmatter,
+            body,
+            create,
+            overwrite,
+            expect_hash,
+            dry_run,
+            json,
+        } => {
+            let fleet = resolve_fleet(
+                workspace,
+                cli.vault,
+                false,
+                Writes::new("janus write", true, false),
+            )?;
+            let mode = if create && !overwrite {
+                "create"
+            } else {
+                "overwrite"
+            };
+            let params = serde_json::json!({
+                "path": path.to_string_lossy(),
+                "frontmatter": frontmatter_object(&frontmatter)?,
+                "body": body_text(&body)?,
+                "mode": mode,
+                "expected_hash": expect_hash,
+                "dry_run": dry_run,
+            });
+            let answer = fleet.answer(&Call::new(Tool::WriteDocument, params))?;
+            if json {
+                emit_json(&answer);
+            } else {
                 let _ = render_receipt(&answer, &mut std::io::stdout().lock());
             }
             Ok(())
@@ -791,6 +831,7 @@ fn reads_workspace(command: &Command) -> bool {
             | Command::Index { .. }
             | Command::Corpora { .. }
             | Command::Set { .. }
+            | Command::Write { .. }
             | Command::Rpc { .. }
             | Command::Mcp { .. }
     )
@@ -856,6 +897,85 @@ fn patch(keys: &[String]) -> Result<serde_json::Map<String, serde_json::Value>, 
         patch.insert(key.to_owned(), value);
     }
     Ok(patch)
+}
+
+/// The frontmatter file as the object one write request carries.
+///
+/// The file is one YAML mapping. A value must be a string or `null`, because the
+/// writer has only those two shapes: a number, a bool, a sequence or a mapping
+/// would need a serializer, and the block is written one `key: value` line at a
+/// time (M7-5). A caller that wants a number as text quotes it.
+///
+/// # Errors
+///
+/// [`JanusError::Usage`] when the file is not one mapping, a key is not a string,
+/// or a value is not a string or null.
+fn frontmatter_object(
+    path: &Path,
+) -> Result<serde_json::Map<String, serde_json::Value>, JanusError> {
+    let text = std::fs::read_to_string(path).map_err(|source| JanusError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let parsed: oneyaml::Value = oneyaml::from_str(&text).map_err(|error| JanusError::Usage {
+        message: format!("{}: {error}", path.display()),
+    })?;
+    let mapping = parsed.as_mapping().ok_or_else(|| JanusError::Usage {
+        message: format!("{} must hold one mapping of keys to values", path.display()),
+    })?;
+    let mut out = serde_json::Map::new();
+    for index in 0..mapping.len() {
+        let Some((key, value)) = mapping.get_index(index) else {
+            continue;
+        };
+        let Some(key) = key.as_str() else {
+            return Err(JanusError::Usage {
+                message: format!("{}: a frontmatter key must be a string", path.display()),
+            });
+        };
+        let value = match value {
+            oneyaml::Value::Null => serde_json::Value::Null,
+            oneyaml::Value::String(text) => serde_json::Value::String(text.clone()),
+            _ => {
+                return Err(JanusError::Usage {
+                    message: format!(
+                        "{}: `{key}` must be a string or null; quote the value to write it as text",
+                        path.display()
+                    ),
+                });
+            }
+        };
+        out.insert(key.to_owned(), value);
+    }
+    Ok(out)
+}
+
+/// The body one write request carries: a file, or `-` for stdin.
+///
+/// The writer never invents bytes, so a body that is not UTF-8 is a usage error
+/// (case 5.5).
+///
+/// # Errors
+///
+/// [`JanusError::Usage`] when the bytes are not UTF-8, and
+/// [`JanusError::Write`] when the file cannot be read.
+fn body_text(spec: &str) -> Result<String, JanusError> {
+    let bytes = if spec == "-" {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .lock()
+            .read_to_end(&mut bytes)
+            .map_err(JanusError::Io)?;
+        bytes
+    } else {
+        std::fs::read(spec).map_err(|source| JanusError::Write {
+            path: PathBuf::from(spec),
+            source,
+        })?
+    };
+    String::from_utf8(bytes).map_err(|_| JanusError::Usage {
+        message: "the body is not valid UTF-8; a write never invents bytes".to_owned(),
+    })
 }
 
 /// Writes the human form of one receipt (§2.3).
@@ -930,6 +1050,7 @@ fn failure_envelope_wanted(cli: &Cli) -> bool {
             | Command::Read { json: true, .. }
             | Command::Status { json: true, .. }
             | Command::Set { json: true, .. }
+            | Command::Write { json: true, .. }
     )
 }
 

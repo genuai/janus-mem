@@ -396,6 +396,11 @@ prints one warning naming `--allow-write`. The key is parsed today and used by n
 
 ### 3.5 `write_document` (P5)
 
+**Statement.** The file is a frontmatter block built from the request, then the body byte for
+byte. A key is one `key: value` line, rendered by `src/write/value.rs`. The keys are sorted,
+because a JSON object reaches the engine as a map and its insertion order is already gone
+(M7-53).
+
 **Case 5.1.** `create` on an absent path writes the file and answers a receipt with
 `old_hash: null`.
 
@@ -570,6 +575,8 @@ exit 3 is used for the first time.
 | M7-50 | M7-4 lands as three PRs, split by surface: 4a-1 (codes, switch, engine, `janus rpc`), 4a-2 (MCP, `status`, the ignored config key) and 4b (`janus set`) | The phase measured 1068 logic and 1472 test lines as two PRs, and 4a alone was 936 against the 600 ceiling: the one diff a reviewer will not read. A split by surface is testable at each step, which a split by layer is not, because each later PR adds a surface whose cases it can run. The shared mechanism — `src/api/*`, `src/error.rs`, `src/engine.rs`, `src/status.rs` — is carried whole by 4a-1, so no later PR rewrites it. 4a-1 measures 784 logic and 890 test lines against `main` — 6 of the logic lines are the size script fix below — so the tests fit (890 of 900) and the logic does not: about 540 of the lines are code and 190 are comments the public-item gate and the safety argument need. `scripts/pr-size.sh` sliced the new side of a deleted file from the wrong offset, so the 135 deleted lines of `tests/mcp_gate.rs` were reported as logic; a deletion now costs nothing. Cutting to 600 means deleting the reason the eight codes and the etag checks exist, so the number is reported instead. The next seam, if it is still too large, is a fourth PR holding only the eight codes, their table and the receipt type. 4a-2 and 4b report their own numbers in their bodies. The fourth split was considered and rejected: a codes-only PR leaves a code table with no path that raises it, and a table-only review is worse than a larger one whose paths are proven. Wrong if a reviewer reports that 4a-1 is too large to hold in one reading. |
 | M7-51 | `--expect-hash` stays required on `janus set`, so `precondition_required` is not reachable through the CLI | A person typing the command sees the requirement in `--help` and the parser refuses before a file is read (exit 2). The code belongs to the surface an agent drives: a tool call without an etag reads the document, plans the patch, and answers `precondition_required` with a one-line preview, so the agent learns what would change and what to re-read. Making the flag optional would move that report onto the CLI and turn a `--help` line into a runtime failure. Wrong if a user reports that a shell script needs the hash before it can preview, which `--dry-run` already answers. |
 | M7-52 | A write needs a `.md` or `.markdown` target; a Markdown file that `[index] exclude` keeps out of search stays writable | An etag is not a secret: a caller can hash any file, so `expected_hash` cannot be what keeps a write on a document. The extension is the corpus's own admission rule (`vault::is_markdown`), and a write uses it, so a copied document under `.txt` is refused with `usage`. The exclude rule shapes the index, not the corpus's documents: a draft kept out of search is still a file the user may edit, and refusing it would make an index setting decide a write. Wrong if a user needs to write a document whose extension the walk does not admit. |
+| M7-53 | `write_document` writes frontmatter keys sorted, not in the JSON object's order | The request reaches the engine as a JSON object, and that map is ordered by key before the writer sees it; `update_frontmatter` has the same property. Sorting makes the block deterministic on every surface instead of depending on a parser feature. Wrong if a surface later preserves insertion order and a caller relies on it. |
+| M7-54 | M7-5 ships as one PR at 790 logic and 579 test lines; the create/overwrite seam does not put either half under the phase ceiling | The phase estimated ~180 and measured 790, because a create still needs the DTO, the engine branch, the MCP descriptor, the CLI command and the whole-file renderer. That shared work leaves the create half at about 660, over the repository's 600. The PR carries the `large-pr` label and these numbers. Wrong if the create half measures 250 or less after review, which would mean this row chose the wrong seam. |
 
 ## 5. Phases
 
@@ -870,6 +877,11 @@ resolver (M7-37) and by its cases 7.6–7.8.
 
 Estimates run two to three times low in this repository. Each phase names its split seam, and
 the agent splits before the ceiling rather than shaving a comment or dropping a test.
+
+M7-5 measured **790 logic and 579 test lines** against `main` (M7-54). The create half alone
+would be about 660, because the DTO, the engine branch, the MCP descriptor, the CLI command and
+the whole-file renderer are shared by both modes. The phase therefore ships as one PR with the
+`large-pr` label and these numbers, and this table's 250 is reported as missed, not passed.
 
 ## 10. SPEC corrections
 

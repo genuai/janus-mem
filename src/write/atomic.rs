@@ -43,39 +43,79 @@ pub enum Mode {
 /// Attempts at a unique temp name before giving up.
 const TEMP_ATTEMPTS: u32 = 16;
 
-/// Replaces `path` with `bytes`, durably, under the [`Mode`] policy.
+/// Creates `path` with `bytes`, refusing a path that exists.
 ///
-/// The sequence is: a temp file in the same directory, the target's owner and
-/// mode applied to it under [`Mode::Preserve`], `fsync` the file, `rename` over
-/// the target, `fsync` the directory. A symlink at `path` is replaced, not
-/// followed: [`super::commit`] resolves a link before it reaches here.
+/// A rename replaces its target, so it must never create one: it would replace a
+/// file the caller did not name. This function opens the target itself with
+/// `create_new`, which is atomic and fails with `AlreadyExists` before a byte is
+/// written (M7-27, case 5.2).
 ///
 /// # Errors
 ///
+/// [`CommitError::Exists`] when the path is already there, and
+/// [`CommitError::Io`] naming the path for any other failure.
+fn create_new(path: &Path, bytes: &[u8]) -> Result<(), CommitError> {
+    let dir = parent(path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // The umask applies exactly as it does for any other new file.
+        options.mode(0o666);
+    }
+    let mut file = options.open(path).map_err(|source| {
+        if source.kind() == io::ErrorKind::AlreadyExists {
+            CommitError::Exists {
+                path: path.to_path_buf(),
+            }
+        } else {
+            io_failure(path, source)
+        }
+    })?;
+    if let Err(source) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        // The file is new, so removing it restores the state the caller saw.
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(io_failure(path, source));
+    }
+    drop(file);
+    sync_parent_dir(dir)
+}
+
+/// Writes `path` with `bytes`, durably, under the [`Mode`] policy.
+///
+/// Under [`Mode::Preserve`] the sequence is: a temp file in the same directory,
+/// the target's owner and mode applied to it, `fsync` the file, `rename` over
+/// the target, `fsync` the directory. A symlink at `path` is replaced, not
+/// followed: [`super::commit`] resolves a link before it reaches here.
+///
+/// Under [`Mode::New`] the target is opened with `create_new`, so the umask
+/// decides its mode and an existing path is refused instead of replaced. A
+/// create is the one call that could destroy a file the caller did not name, so
+/// it never reaches the rename.
+///
+/// # Errors
+///
+/// [`CommitError::Exists`] under [`Mode::New`] when the path is already there.
 /// [`CommitError::Io`] naming the path that failed, with the target unchanged:
 /// a failure before the rename leaves the old bytes and no temp file. The one
 /// exception is [`CommitError::Unsynced`], which reports a rename that happened
 /// and a directory sync that did not.
 pub fn replace(path: &Path, bytes: &[u8], mode: Mode) -> Result<(), CommitError> {
+    if mode == Mode::New {
+        return create_new(path, bytes);
+    }
     let dir = parent(path)?;
-    let existing = match mode {
-        Mode::Preserve => Some(fs::metadata(path).map_err(|source| io_failure(path, source))?),
-        Mode::New => None,
-    };
-    // Under `Preserve` the exact mode is set a moment later, so the creation mode
-    // only has to be safe if that step never runs. Under `New` the umask must
-    // decide, exactly as it does for a plain create.
-    let creation = match mode {
-        Mode::Preserve => 0o600,
-        Mode::New => 0o666,
-    };
+    let existing = fs::metadata(path).map_err(|source| io_failure(path, source))?;
+    // The exact mode is set a moment later, so the creation mode only has to be
+    // safe if that step never runs.
+    let creation = 0o600;
 
     let (mut temp, mut file) = create_temp(dir, creation)?;
-    if let Some(meta) = existing {
-        copy_owner(&meta, &file);
-        file.set_permissions(meta.permissions())
-            .map_err(|source| io_failure(temp.path(), source))?;
-    }
+    copy_owner(&existing, &file);
+    file.set_permissions(existing.permissions())
+        .map_err(|source| io_failure(temp.path(), source))?;
     // Both go before the sync, so the fsync makes the bytes and their metadata
     // durable together.
     file.write_all(bytes)

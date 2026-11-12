@@ -20,9 +20,9 @@ use serde_json::{Value, json};
 /// The fixture document every path-shaped call names.
 const POSTGRES: &str = "decisions/2024-11-02-postgres-cache.md";
 
-/// The six wire names, in `Tool::ALL` order (case 5.4).
+/// The seven wire names, in `Tool::ALL` order (case 5.4).
 const WIRE_NAMES: &str = "search, get_authoritative_facts, get_lineage, read_document, \
-                         janus_status, update_frontmatter";
+                         janus_status, update_frontmatter, write_document";
 
 /// One finished `janus rpc` session.
 struct Session {
@@ -360,16 +360,16 @@ fn case_5_8_a_write_name_needs_the_flag_and_an_unlanded_one_is_refused() {
     let dir = fixture_vault();
     let root = dir.path();
     index(root);
-    // The three names whose phases have not landed: refused with or without
+    // The two names whose phases have not landed: refused with or without
     // the flag, because this release does not serve them.
-    const UNLANDED: [&str; 3] = ["write_document", "supersede_document", "promote_document"];
+    const UNLANDED: [&str; 2] = ["supersede_document", "promote_document"];
     let writes = |allowed| Writes::new("janus rpc", allowed, false);
 
     // Without the flag, every write name answers `write_disabled`.
     let names: Vec<&str> = UNLANDED
         .iter()
         .copied()
-        .chain(["update_frontmatter"])
+        .chain(["update_frontmatter", "write_document"])
         .collect();
     let script: String = names
         .iter()
@@ -393,7 +393,7 @@ fn case_5_8_a_write_name_needs_the_flag_and_an_unlanded_one_is_refused() {
         );
     }
 
-    // With the flag the unlanded three are still refused, and the shared
+    // With the flag the unlanded two are still refused, and the shared
     // helper is where that answer comes from.
     let script: String = UNLANDED
         .iter()
@@ -411,13 +411,15 @@ fn case_5_8_a_write_name_needs_the_flag_and_an_unlanded_one_is_refused() {
         );
     }
 
-    // `update_frontmatter` left that list in M7-4: with the flag it reaches the
-    // engine, which answers the missing parameter and not a refusal.
-    let script = format!("{}\n", json!({ "id": 1, "tool": "update_frontmatter" }));
-    let mut reached = answers(root, true, &script);
-    let answer = reached.remove(0);
-    assert_eq!(answer["code"], json!("usage"), "{answer}");
-    assert!(write_refusal("update_frontmatter", writes(true)).is_none());
+    // The two served names reach the engine, which answers the missing
+    // parameter and not a refusal.
+    for name in ["update_frontmatter", "write_document"] {
+        let script = format!("{}\n", json!({ "id": 1, "tool": name }));
+        let mut reached = answers(root, true, &script);
+        let answer = reached.remove(0);
+        assert_eq!(answer["code"], json!("usage"), "{name}: {answer}");
+        assert!(write_refusal(name, writes(true)).is_none(), "{name}");
+    }
 
     // A read name is not gated either.
     assert!(write_refusal("search", writes(false)).is_none());
