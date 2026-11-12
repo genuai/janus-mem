@@ -562,6 +562,9 @@ exit 3 is used for the first time.
 | M7-45 | `CommitOptions` carries the corpus root and the `Config`, and `commit` resolves the lock directory with `config::resolve_index_dir` | One resolution, one lock file. A free-form directory field lets one caller pass `root/.janus` and another pass a moved `index_dir`; both verify the same etag, both rename, and the first write is lost with no error. The function is the one the builder calls, so the writer cannot drift from it. Wrong if the corpus root must be readable and still the lock is not found. |
 | M7-46 | M7-3 lands as one PR at 508 logic and 570 test lines, against the phase ceiling of 300 and 450 and `AGENTS.md`'s 600 and 900 | Round 1 measured 328/366. Round 2 added the owner copy, the mode policy, the resolved lock directory, the resolved link, the unsynced answer and four cases, and each one closes a way to lose or misreport a file. 195 of the 478 added lines in the two new files are comments the public-item gate and the safety argument need, so reaching 300 means deleting the reason the checks exist. The split seam is not taken: `commit` cannot be reviewed without the `replace` it calls, and a second read of one interface costs the attention the ceiling protects. Wrong if a reviewer reports that this diff is too large to hold in one reading. |
 | M7-47 | A temp file left by a killed process is reported by `doctor` in M8, never swept by the writer | A crash between the create and the rename leaves one `.tmp` file in a document's directory. A sweeper that removes files it did not create can remove a user's file that happens to start with `.tmp`, on a corpus the writer does not own. A report costs one line in `doctor` and loses nothing. Wrong if the files become common enough to hide the corpus, which the report would show. |
+| M7-48 | One write switch: `--allow-write` is read once in `main`, becomes `api::Writes`, and travels in the `Fleet`; the engine's gate is the only check, and `write_refusal` reads the same value | Two switches with one meaning drift. If the adapters checked the flag and the engine did not, the CLI would need a third path, and a surface added later would answer a write it forgot to gate. If the engine checks it, a caller that skips an adapter is still refused, and a test can prove the refusal without a server. The three names whose phases have not landed keep a second refusal of their own: `write_disabled` without the flag, `refused` with it, because their phase owns them. Wrong if any surface answers a write while `Writes.allowed` is false, or if a new surface must pass a second value by hand. |
+| M7-50 | M7-4 lands as three PRs, split by surface: 4a-1 (codes, switch, engine, `janus rpc`), 4a-2 (MCP, `status`, the ignored config key) and 4b (`janus set`) | The phase measured 1068 logic and 1472 test lines as two PRs, and 4a alone was 936 against the 600 ceiling: the one diff a reviewer will not read. A split by surface is testable at each step, which a split by layer is not, because each later PR adds a surface whose cases it can run. The shared mechanism — `src/api/*`, `src/error.rs`, `src/engine.rs`, `src/status.rs` — is carried whole by 4a-1, so no later PR rewrites it. 4a-1 measures 784 logic and 890 test lines against `main` — 6 of the logic lines are the size script fix below — so the tests fit (890 of 900) and the logic does not: about 540 of the lines are code and 190 are comments the public-item gate and the safety argument need. `scripts/pr-size.sh` sliced the new side of a deleted file from the wrong offset, so the 135 deleted lines of `tests/mcp_gate.rs` were reported as logic; a deletion now costs nothing. Cutting to 600 means deleting the reason the eight codes and the etag checks exist, so the number is reported instead. The next seam, if it is still too large, is a fourth PR holding only the eight codes, their table and the receipt type. 4a-2 and 4b report their own numbers in their bodies. The fourth split was considered and rejected: a codes-only PR leaves a code table with no path that raises it, and a table-only review is worse than a larger one whose paths are proven. Wrong if a reviewer reports that 4a-1 is too large to hold in one reading. |
+| M7-52 | A write needs a `.md` or `.markdown` target; a Markdown file that `[index] exclude` keeps out of search stays writable | An etag is not a secret: a caller can hash any file, so `expected_hash` cannot be what keeps a write on a document. The extension is the corpus's own admission rule (`vault::is_markdown`), and a write uses it, so a copied document under `.txt` is refused with `usage`. The exclude rule shapes the index, not the corpus's documents: a draft kept out of search is still a file the user may edit, and refusing it would make an index setting decide a write. Wrong if a user needs to write a document whose extension the walk does not admit. |
 
 ## 5. Phases
 
@@ -692,10 +695,26 @@ without the flag is impossible; a config key cannot enable it.
 **Split seam.** **Taken, not optional.** This phase ships as two pull requests, because it is
 the only phase whose work cannot fit one review at `AGENTS.md`'s ceiling.
 
-- **4a — the engine, MCP and rpc.** `src/engine.rs`, `src/api/*`, `src/error.rs`,
-  `src/mcp/*`, `src/rpc.rs`, `src/status.rs`, `src/config.rs`, `tests/mcp_write.rs`,
-  `tests/cli_rpc.rs`, `tests/cli_mcp.rs`, `tests/cli_status.rs`, `tests/api_envelope.rs`.
-  Cases 2.1–2.3, 2.7a, 2.7b, 2.8, 4.1–4.6.
+- **4a — the write tool on a server surface.** This became three PRs (M7-50), split by
+  surface because a surface is testable alone.
+  - **4a-1 — the codes, the switch, the engine path, and `janus rpc`.** `src/error.rs`,
+    `src/api/*`, `src/engine.rs`, `src/status.rs`, `src/rpc.rs`, `src/main.rs` (the fleet
+    plumbing and the rpc arm), `src/mcp/*` (the `Writes` argument and the two descriptor arms
+    the new tool variant forces), `tests/write_rpc.rs`, `tests/cli_rpc.rs`, `tests/cli_mcp.rs`,
+    `tests/workspace_read.rs`, `SPEC.md` §9.1, §9.3, §9.4. Cases 2.1–2.3, 2.7a, 2.7b, 2.8,
+    4.2, 4.5.
+  - **4a-2 — MCP, `status`, and the instructions string.** `src/mcp/*` (the list, the
+    instructions string), `src/main.rs` (the MCP arm), `src/config.rs`, `src/engine.rs` (the
+    config warnings), `tests/mcp_write.rs`, `tests/cli_mcp.rs`, `tests/workspace_read.rs`,
+    `tests/cli_status.rs`, `SPEC.md` §9.2, §16.1. Cases 4.1, 4.3, 4.4, 4.6.
+
+  Two files move with 4a-1, and neither silently. `tests/mcp_gate.rs` is deleted: both of its
+  cases assert the M6 gate that this phase replaces, and the file says so itself.
+  `tests/api_envelope.rs` is untouched: case 4.5 asserts the receipt's key set in
+  `tests/write_rpc.rs`, beside the call that builds it. `tests/cli_mcp.rs` case 8.2 and
+  `tests/workspace_read.rs` case 3.5 pin the MCP surface, which 4a-1 does not serve yet, so
+  they answer `write_disabled` in 4a-1 and their final shape in 4a-2; each PR states that in
+  its body.
 - **4b — `janus set`.** `src/cli.rs`, `src/main.rs`, `tests/cli_set.rs`. The human table, the
   refusal list, and the workspace resolution of a write path (M7-38).
 
@@ -826,7 +845,7 @@ The one measured product claim M7 makes is W4: **0 of 1** paths today, **1 of 1*
 | M7-1 config freshness | 250 | ~150 | 350 | ~200 |
 | M7-2 patcher | 600 | ~450 | 900 | ~600 |
 | M7-3 atomic replace + lock | 300 | ~200 | 450 | ~250 |
-| M7-4 `update_frontmatter` + `set`, two PRs (4a engine/MCP/rpc ~380, 4b CLI ~220) | 600 | ~600 | 900 | ~700 |
+| M7-4 `update_frontmatter` + `set`, three PRs (4a-1 codes/engine/rpc, 4a-2 MCP/status, 4b CLI) | 600 | ~600 | 900 | ~700 |
 | M7-5 `write_document` | 250 | ~180 | 400 | ~250 |
 | M7-6 `supersede` | 400 | ~300 | 600 | ~400 |
 | M7-7 `promote` + resolution | 550 | ~450 | 750 | ~500 |
@@ -837,8 +856,10 @@ PR, 124/181 and 233/437 after the review rounds, and 352/597 cumulative against 
 phase ceiling is reported on 1b, not passed (M7-39).
 
 M7-4 was 500 until the review showed that three surfaces, eight codes with doc comments and
-five test files cannot fit it. It is now **two PRs of one phase**, 4a and 4b, so the phase
-stays inside `AGENTS.md`'s 600 logic ceiling instead of claiming an exception. M7-7 grew by the
+five test files cannot fit it. It is now **three PRs of one phase**, split by surface: 4a-1
+(codes, switch, engine, `janus rpc`), 4a-2 (MCP, `status`, the ignored config key) and 4b
+(`janus set`). 4a-2 measures 61 logic and 4b 132, both inside the ceiling; 4a-1 measures 745,
+which is over it, and M7-50 reports why rather than claiming the phase fits. M7-7 grew by the
 resolver (M7-37) and by its cases 7.6–7.8.
 
 Estimates run two to three times low in this repository. Each phase names its split seam, and

@@ -107,7 +107,11 @@ summary=$(git diff -U0 "$RANGE" -- . ':(exclude)Cargo.lock' ':(exclude)*.md' \
     }
     /^diff --git/ { file = ""; next }
     /^\+\+\+ / {
-      f = substr($0, 7)
+      # `+++ b/path` names the new side. The new side of a deleted file is
+      # `/dev/null`, which names nothing: those lines are neither logic nor
+      # tests, so they are not counted at all. Reading the offset as 5 is what
+      # makes a deletion cost nothing.
+      f = substr($0, 5)
       sub(/^b\//, "", f)
       file = (f == "/dev/null") ? "" : f
       next

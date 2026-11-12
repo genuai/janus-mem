@@ -32,8 +32,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::api::dto::{FactsParams, LineageParams, ReadParams, SearchParams, StatusParams};
-use crate::api::{ApiCode, Call, Failure, Tool};
+use crate::api::dto::{
+    FactsParams, LineageParams, ReadParams, SearchParams, StatusParams, UpdateParams,
+};
+use crate::api::{ApiCode, Call, Failure, Receipt, Tool, Writes};
 use crate::clock::Clock;
 use crate::config::{self, Config};
 use crate::error::JanusError;
@@ -48,6 +50,7 @@ use crate::search::federate::{self, Choice, Target};
 use crate::status;
 use crate::vault::{self, WalkOptions};
 use crate::workspace::Workspace;
+use crate::write::{self, CommitError, CommitOptions, NoHooks, Patch, PatchError, Plan};
 
 /// What one call returned: the envelope, and the code when it failed (M6 §2.3).
 #[derive(Debug, Clone)]
@@ -103,6 +106,13 @@ struct Cached {
 pub struct Engine {
     root: PathBuf,
     config: Config,
+    /// The workspace's name for this corpus, when a workspace named it. A
+    /// refusal reports this name and the declared `corpus_id`, because they can
+    /// differ and the caller typed the first one.
+    name: Option<String>,
+    /// What this surface may write here, and whether the corpus allows it
+    /// (M7-15, M7-16). The only write switch.
+    writes: Writes,
     /// Shared with every engine a [`Fleet`] builds, so two corpora of one query
     /// cannot disagree about today (§7.2).
     clock: Arc<dyn Clock>,
@@ -117,6 +127,9 @@ pub struct Engine {
 impl Engine {
     /// An engine over one corpus, with the clock and the embedder its caller
     /// resolved at the edge.
+    ///
+    /// Writes are off until [`Engine::with_writes`] says otherwise, so a caller
+    /// that forgets the gate gets refusals and not a write.
     #[must_use]
     pub fn new(
         root: PathBuf,
@@ -128,6 +141,8 @@ impl Engine {
         Self {
             root,
             config,
+            name: None,
+            writes: Writes::off("this engine"),
             clock: Arc::from(clock),
             embedder,
             degraded,
@@ -135,6 +150,19 @@ impl Engine {
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
+    }
+
+    /// The same engine, with the writes one surface of one corpus accepts.
+    #[must_use]
+    pub fn with_writes(mut self, writes: Writes) -> Self {
+        self.writes = writes;
+        self
+    }
+
+    /// What this engine may write, for the adapters' shared refusal.
+    #[must_use]
+    pub const fn writes(&self) -> Writes {
+        self.writes
     }
 
     /// Answers one tool call. Never prints, never exits, never panics on a
@@ -238,7 +266,80 @@ impl Engine {
                 let _: StatusParams = params(call)?;
                 encode(self.status_report()?)
             }
+            Tool::UpdateFrontmatter => {
+                let params: UpdateParams = params(call)?;
+                encode(self.update(&params)?)
+            }
         }
+    }
+
+    /// One `update_frontmatter` call: the gate, then plan, then commit (§9.3).
+    ///
+    /// The order is the contract. The gate runs first, so no surface reaches a
+    /// file without it (M7-15, M7-36). The etag decides next, so a refused write
+    /// touches nothing (cases 2.1, 2.2). Plan and commit are the merged writer,
+    /// so this function adds no second splice (M7-11).
+    fn update(&self, params: &UpdateParams) -> Result<Receipt, JanusError> {
+        let named = self.name.as_deref().unwrap_or(&self.config.corpus_id);
+        if let Some(refusal) = self.writes.refusal(named, &self.config.corpus_id) {
+            return Err(refusal);
+        }
+        // `named` is the caller's path, for a message a reader can act on;
+        // `found` is the canonical file, for the read, the lock and the rename.
+        let named = PathBuf::from(&params.path);
+        let found = target(&self.root, &params.path)?;
+        // A write patches Markdown frontmatter, and a caller can compute an
+        // etag for any file, so the extension is what keeps a write on a
+        // document. The walk admits a document by the same rule, which is why a
+        // file `[index] exclude` keeps out of search stays writable: it is still
+        // a document the user may edit (M7-52).
+        if !found.file_name().is_some_and(vault::is_markdown) {
+            return Err(usage(format!(
+                "{} is not Markdown; a write needs a .md or .markdown document",
+                named.display()
+            )));
+        }
+        let bytes = fs::read(&found).map_err(|source| JanusError::Write {
+            path: named.clone(),
+            source,
+        })?;
+        // A write never invents bytes: a file that is not UTF-8 is not a
+        // document this corpus can patch.
+        let text = String::from_utf8(bytes).map_err(|_| JanusError::DocumentNotInCorpus {
+            path: named.clone(),
+        })?;
+        let dry_run = params.dry_run.unwrap_or(false);
+        let patch = Patch {
+            path: named.clone(),
+            keys: params.keys(),
+            expected_hash: params.expected_hash.clone(),
+            create_frontmatter: false,
+            dry_run,
+        };
+        let plan = write::plan(&text, &patch).map_err(|error| patch_refusal(&named, error))?;
+        check_etag(&named, params.expected_hash.as_deref(), &plan, dry_run)?;
+        let receipt = receipt(&self.root, &found, &plan, dry_run);
+        if dry_run {
+            return Ok(receipt);
+        }
+        self.commit(&found, &named, &plan)?;
+        Ok(receipt)
+    }
+
+    /// Replaces the document under the corpus lock, or refuses (M7-3, M7-9).
+    fn commit(&self, path: &Path, named: &Path, plan: &Plan) -> Result<(), JanusError> {
+        write::commit(
+            plan,
+            &CommitOptions {
+                path: path.to_path_buf(),
+                root: self.root.clone(),
+                config: &self.config,
+                timeout: store::LOCK_TIMEOUT,
+                hooks: &NoHooks,
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| commit_refusal(named, error))
     }
 
     /// One status answer, unrendered: the same value the `status` arm encodes.
@@ -246,6 +347,7 @@ impl Engine {
         status::compute(
             &self.root,
             &self.config,
+            self.writes.enabled(),
             self.embedder.is_some(),
             self.degraded.clone(),
             self.cache(),
@@ -315,6 +417,9 @@ pub struct Fleet {
     /// The clock every engine of this fleet shares, so two corpora of one query
     /// cannot disagree about today (§7.2).
     clock: Arc<dyn Clock>,
+    /// What this surface may write, without a corpus: the switch every write
+    /// check reads (M7-15, M7-36). Each member adds its corpus's `read_only`.
+    writes: Writes,
 }
 
 /// How one corpus resolves its embedder, as the edge decided it.
@@ -326,6 +431,8 @@ struct Member {
     id: Option<String>,
     root: PathBuf,
     config: Config,
+    /// The writes this surface may make to this corpus (M7-16).
+    writes: Writes,
     /// The clock and the embedder resolver every engine here shares.
     clock: Arc<dyn Clock>,
     resolve: Resolver,
@@ -343,6 +450,8 @@ impl Member {
             Engine {
                 root: self.root.clone(),
                 config: self.config.clone(),
+                name: self.id.clone(),
+                writes: self.writes,
                 clock: Arc::clone(&self.clock),
                 embedder,
                 degraded,
@@ -356,19 +465,25 @@ impl Member {
 
 impl Fleet {
     /// One corpus, with the engine its caller already built.
+    ///
+    /// The engine already carries the writes its surface accepts, so the fleet
+    /// copies them rather than asking for a second switch.
     #[must_use]
     pub fn single(engine: Engine) -> Self {
+        let writes = engine.writes();
         Self {
             clock: Arc::clone(&engine.clock),
             members: vec![Member {
-                id: None,
+                id: engine.name.clone(),
                 root: engine.root.clone(),
                 config: engine.config.clone(),
+                writes,
                 clock: Arc::clone(&engine.clock),
                 resolve: Arc::new(|_| (None, None)),
                 engine: OnceLock::from(engine),
             }],
             workspace: None,
+            writes,
         }
     }
 
@@ -376,6 +491,9 @@ impl Fleet {
     ///
     /// The workspace owns each corpus's index location (M6b-11), and the plan
     /// owns the weight of an archived corpus, so both are read from one place.
+    /// `writes` is the surface's answer to `--allow-write`; each member adds its
+    /// corpus's `read_only`, so a read-only corpus refuses every write whatever
+    /// the flag says (M7-16, case 2.7a).
     ///
     /// # Errors
     ///
@@ -384,6 +502,7 @@ impl Fleet {
         found: &Workspace,
         clock: Arc<dyn Clock>,
         resolve: Resolver,
+        writes: Writes,
     ) -> Result<Self, JanusError> {
         let plan = federate::plan(found, &Choice::All)?;
         let mut members = Vec::with_capacity(plan.corpora.len());
@@ -399,6 +518,7 @@ impl Fleet {
                 id: Some(corpus.id.clone()),
                 root: corpus.root.clone(),
                 config,
+                writes: Writes::new(writes.surface, writes.allowed, corpus.read_only),
                 clock: Arc::clone(&clock),
                 resolve: Arc::clone(&resolve),
                 engine: OnceLock::new(),
@@ -408,7 +528,14 @@ impl Fleet {
             members,
             workspace: Some(found.clone()),
             clock,
+            writes,
         })
+    }
+
+    /// What this surface may write, for [`crate::api::write_refusal`].
+    #[must_use]
+    pub const fn writes(&self) -> Writes {
+        self.writes
     }
 
     /// The corpora one selection reads, and the note about the ones it left out.
@@ -453,7 +580,7 @@ impl Fleet {
         let Some(found) = &self.workspace else {
             // One corpus answers exactly as it always has: no `corpora`, no
             // per-row `corpus`, no weight (M6b §3.5).
-            if call.tool == Tool::ReadDocument {
+            if call.tool.names_a_path() {
                 self.single_selection(&choice)?;
             }
             return self.members[0]
@@ -495,6 +622,12 @@ impl Fleet {
                 let member = self.one(found, &choice)?;
                 encode(member.engine().status_report()?.in_workspace(found))
             }
+            // A write names one corpus's file, so it answers for one corpus,
+            // and the qualifier or `corpus` parameter decides which (M7-38).
+            Tool::UpdateFrontmatter => {
+                let member = self.one(found, &choice)?;
+                member.engine().answer(&Call::new(call.tool, fields))
+            }
             // A supersession chain is one corpus's graph. A qualified path or a
             // `corpus` parameter would need a cross-corpus chain, which no read
             // answers yet, so it is refused instead of guessed (§0.2).
@@ -515,7 +648,7 @@ impl Fleet {
             .get("corpus")
             .and_then(Value::as_str)
             .map(str::to_owned);
-        if tool != Tool::ReadDocument {
+        if !tool.names_a_path() {
             return Ok(Choice::parse(named.as_deref()));
         }
         let path = params
@@ -662,6 +795,139 @@ fn selection(corpus: Option<&str>) -> Result<Choice, JanusError> {
 fn usage(message: impl Into<String>) -> JanusError {
     JanusError::Usage {
         message: message.into(),
+    }
+}
+
+// ─────────────────────────────── the write path ───────────────────────────
+
+/// The file a write may touch: `given` inside `root` (case 2.8).
+///
+/// The corpus rule is the one every read uses ([`vault::confine`]), so `.git/`,
+/// `.janus/` and a path outside the root answer `path_escape` here exactly as
+/// they do on the read path. A relative path is the corpus's, never the working
+/// directory's: the receipt names a corpus path, and a write is the last place
+/// to guess which file was meant.
+fn target(root: &Path, given: &str) -> Result<PathBuf, JanusError> {
+    let candidate = if Path::new(given).is_absolute() {
+        PathBuf::from(given)
+    } else {
+        root.join(given)
+    };
+    match vault::confine(root, &candidate) {
+        Ok(resolved) => Ok(resolved),
+        Err(JanusError::PathEscape { path }) => Err(JanusError::PathEscape { path }),
+        // A path that cannot be resolved inside the corpus names no document in
+        // it, which is the answer a caller can act on.
+        Err(_) => Err(JanusError::DocumentNotInCorpus {
+            path: PathBuf::from(given),
+        }),
+    }
+}
+
+/// Refuses a write whose etag is stale or absent (cases 2.1, 2.2).
+///
+/// Neither answer writes anything: the file is byte-identical afterwards. A dry
+/// run needs no etag, because it writes nothing, and its receipt is the full
+/// preview M7-13 points at.
+fn check_etag(
+    path: &Path,
+    expected: Option<&str>,
+    plan: &Plan,
+    dry_run: bool,
+) -> Result<(), JanusError> {
+    match expected {
+        Some(expected) if expected != plan.old_hash.as_str() => Err(JanusError::Conflict {
+            path: path.to_path_buf(),
+            expected: expected.to_owned(),
+            current: plan.old_hash.clone(),
+        }),
+        Some(_) => Ok(()),
+        None if dry_run => Ok(()),
+        None => Err(JanusError::PreconditionRequired {
+            path: path.to_path_buf(),
+            preview: preview(plan),
+        }),
+    }
+}
+
+/// The one line a write with no etag offers instead of a preview (M7-13).
+fn preview(plan: &Plan) -> String {
+    let keys = match plan.changed_keys.as_slice() {
+        [] => "no key would change".to_owned(),
+        keys => format!("would change: {}", keys.join(", ")),
+    };
+    format!(
+        "{keys}; read the document and pass its content_hash as expected_hash, or pass \
+         dry_run for the full preview"
+    )
+}
+
+/// The receipt for one planned write (§2.3, M7-14).
+fn receipt(root: &Path, path: &Path, plan: &Plan, dry_run: bool) -> Receipt {
+    Receipt {
+        path: relative(root, path),
+        changed_keys: plan.changed_keys.clone(),
+        appended_keys: plan.appended_keys.clone(),
+        old_hash: plan.old_hash.clone(),
+        new_hash: plan.new_hash.clone(),
+        dry_run,
+        bytes_before: plan.bytes_before,
+        bytes_after: plan.bytes_after,
+    }
+}
+
+/// The corpus-relative path a receipt names, with `/` separators (§2.3, §8.6).
+fn relative(root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    rel.components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// The refusal a [`PatchError`] becomes, with the document named (§2.4, case 2.8).
+///
+/// A request that names no key, or one key twice, is `usage`: the caller can fix
+/// the request before retrying. Everything else is a refusal of the document's
+/// shape, which a retry without a change of request cannot cure.
+fn patch_refusal(path: &Path, error: PatchError) -> JanusError {
+    match error {
+        PatchError::EmptyRequest | PatchError::DuplicateRequestKey { .. } => {
+            usage(error.to_string())
+        }
+        PatchError::KeyShape { key } => JanusError::KeyShape {
+            path: path.to_path_buf(),
+            key,
+        },
+        PatchError::UnsupportedShape { key, reason } => JanusError::UnsupportedPatch {
+            path: path.to_path_buf(),
+            key,
+            reason,
+        },
+        PatchError::NoFrontmatter => JanusError::NoFrontmatter {
+            path: path.to_path_buf(),
+        },
+    }
+}
+
+/// The failure a [`CommitError`] becomes (§2.4).
+///
+/// A busy corpus is the lock timeout this crate already reports (M7-9). A link
+/// that resolves outside the corpus is the same refusal the read path gives. A
+/// write that landed with an unsynced directory is a runtime failure and not a
+/// refusal, because the bytes are on disk.
+fn commit_refusal(path: &Path, error: CommitError) -> JanusError {
+    match error {
+        CommitError::Conflict { expected, current } => JanusError::Conflict {
+            path: path.to_path_buf(),
+            expected,
+            current,
+        },
+        CommitError::Busy { path } => JanusError::LockTimeout { path },
+        CommitError::OutsideCorpus { path } => JanusError::PathEscape { path },
+        CommitError::Unsynced { path, source } | CommitError::Io { path, source } => {
+            JanusError::Write { path, source }
+        }
     }
 }
 

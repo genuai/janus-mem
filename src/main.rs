@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
-use janus_mem::api::{Call, Failure, Tool};
+use janus_mem::api::{Call, Failure, Tool, Writes};
 use janus_mem::cli::{Cli, Command, Progress};
 use janus_mem::clock::SystemClock;
 use janus_mem::config::{self, Config};
@@ -254,7 +254,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // A read answers through the fleet, so the CLI tests the function the
         // rpc loop and the MCP server call (§3.3).
         Command::Read { path, corpus, json } => {
-            let fleet = resolve_fleet(workspace, cli.vault, false)?;
+            let fleet = resolve_fleet(workspace, cli.vault, false, Writes::off("janus read"))?;
             let mut params = serde_json::json!({ "path": path.to_string_lossy() });
             if let Some(corpus) = corpus {
                 params["corpus"] = serde_json::Value::String(corpus);
@@ -266,7 +266,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // nothing and takes no lock, so it works while a writer holds the index.
         // In a workspace it also lists every corpus the workspace names.
         Command::Status { json } => {
-            let fleet = status_fleet(workspace, cli.vault)?;
+            let fleet = status_fleet(workspace, cli.vault, Writes::off("janus status"))?;
             call_tool(
                 &fleet,
                 Tool::Status,
@@ -292,12 +292,18 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
 
         // The rpc loop answers tool calls over stdin and stdout (§3.5). A
         // startup failure exits before the loop starts; every failure after
-        // that is a response line, so a caller never loses its session.
+        // that is a response line, so a caller never loses its session. The
+        // flag becomes the fleet's write switch, and it is read here once
+        // (M7-15, M7-36).
         Command::Rpc { allow_write } => {
-            let fleet = resolve_fleet(workspace, cli.vault, false)?;
+            let fleet = resolve_fleet(
+                workspace,
+                cli.vault,
+                false,
+                Writes::new("janus rpc", allow_write, false),
+            )?;
             rpc::run(
                 &fleet,
-                allow_write,
                 &mut std::io::stdin().lock(),
                 &mut std::io::stdout().lock(),
             );
@@ -308,17 +314,13 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // failure exits before the loop starts; every failure after that is an
         // answer, so a client never loses its session (§3.6).
         Command::Mcp { allow_write } => {
-            let fleet = resolve_fleet(workspace, cli.vault, false)?;
-            // This release serves no write, so the flag cannot grant one. It is
-            // accepted anyway, so a client config does not change at M7, and it
-            // says once on stderr what it did (§3.8 case 8.3). Stdout stays
-            // protocol only (§3.10).
-            if allow_write {
-                eprintln!("writes are not implemented yet; --allow-write has no effect");
-            }
+            // The MCP surface serves its writes in the next PR of this phase, so
+            // this arm hands the fleet no write yet. The flag is read and named
+            // here so the switch has one place to change.
+            let _ = allow_write;
+            let fleet = resolve_fleet(workspace, cli.vault, false, Writes::off("janus mcp"))?;
             mcp::run(
                 &fleet,
-                allow_write,
                 &mut std::io::stdin().lock(),
                 &mut std::io::stdout().lock(),
             );
@@ -437,7 +439,8 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             let choice = federate::Choice::parse(corpus.as_deref());
             match query_workspace(workspace, cli.vault.is_some())? {
                 Some(found) => {
-                    let fleet = workspace_fleet(&found, no_embeddings)?;
+                    let fleet =
+                        workspace_fleet(&found, no_embeddings, Writes::off("janus search"))?;
                     let (targets, notes) = fleet.scope(&choice)?;
                     federate::run_search(&targets, &SystemClock, options(None), notes)
                 }
@@ -493,7 +496,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             let choice = federate::Choice::parse(corpus.as_deref());
             match query_workspace(workspace, cli.vault.is_some())? {
                 Some(found) => {
-                    let fleet = workspace_fleet(&found, no_embeddings)?;
+                    let fleet = workspace_fleet(&found, no_embeddings, Writes::off("janus facts"))?;
                     let (targets, notes) = fleet.scope(&choice)?;
                     federate::run_facts(&targets, &SystemClock, &options(None), notes)
                 }
@@ -549,15 +552,16 @@ fn resolve_fleet(
     explicit: Option<PathBuf>,
     root: Option<PathBuf>,
     no_embeddings: bool,
+    writes: Writes,
 ) -> Result<Fleet, JanusError> {
     match query_workspace(explicit, root.is_some())? {
-        Some(found) => workspace_fleet(&found, no_embeddings),
+        Some(found) => workspace_fleet(&found, no_embeddings, writes),
         None => {
             let root = vault::resolve_corpus(root)?;
             tracing::info!(vault = %root.display(), "corpus resolved");
 
             let config = Config::load(&root)?;
-            Ok(single_fleet(root, config, no_embeddings))
+            Ok(single_fleet(root, config, no_embeddings, writes))
         }
     }
 }
@@ -566,7 +570,11 @@ fn resolve_fleet(
 ///
 /// The embedder stays unresolved until a corpus is read, so a query that names
 /// the primary does not load a model for an archived corpus.
-fn workspace_fleet(found: &workspace::Workspace, no_embeddings: bool) -> Result<Fleet, JanusError> {
+fn workspace_fleet(
+    found: &workspace::Workspace,
+    no_embeddings: bool,
+    writes: Writes,
+) -> Result<Fleet, JanusError> {
     for warning in &found.warnings {
         eprintln!("warning: {warning}");
     }
@@ -574,19 +582,16 @@ fn workspace_fleet(found: &workspace::Workspace, no_embeddings: bool) -> Result<
         found,
         Arc::new(SystemClock),
         Arc::new(move |config: &Config| read_embedder(config, no_embeddings)),
+        writes,
     )
 }
 
 /// One corpus, as every command read it before M6b.
-fn single_fleet(root: PathBuf, config: Config, no_embeddings: bool) -> Fleet {
+fn single_fleet(root: PathBuf, config: Config, no_embeddings: bool, writes: Writes) -> Fleet {
     let (embedder, degraded) = read_embedder(&config, no_embeddings);
-    Fleet::single(Engine::new(
-        root,
-        config,
-        Box::new(SystemClock),
-        embedder,
-        degraded,
-    ))
+    Fleet::single(
+        Engine::new(root, config, Box::new(SystemClock), embedder, degraded).with_writes(writes),
+    )
 }
 
 /// The fleet a status call answers from (§6.11, M6b-20, M6b-30).
@@ -594,13 +599,17 @@ fn single_fleet(root: PathBuf, config: Config, no_embeddings: bool) -> Fleet {
 /// A named root is one corpus, and its config carries the workspace's prune of
 /// it, so the digest status compares is the digest the build wrote. Without a
 /// root the workspace names the corpora, as every other read reads it.
-fn status_fleet(workspace: Option<PathBuf>, root: Option<PathBuf>) -> Result<Fleet, JanusError> {
+fn status_fleet(
+    workspace: Option<PathBuf>,
+    root: Option<PathBuf>,
+    writes: Writes,
+) -> Result<Fleet, JanusError> {
     match root {
         Some(root) => {
             let (root, config) = corpus_config(workspace, Some(root))?;
-            Ok(single_fleet(root, config, false))
+            Ok(single_fleet(root, config, false, writes))
         }
-        None => resolve_fleet(workspace, None, false),
+        None => resolve_fleet(workspace, None, false, writes),
     }
 }
 

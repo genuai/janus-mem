@@ -10,6 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use std::collections::BTreeMap;
+
 use crate::api::error::ApiCode;
 use crate::error::JanusError;
 use crate::scan::API_VERSION;
@@ -67,8 +69,20 @@ impl Failure {
             ok: false,
             code: ApiCode::of(err).code,
             message: err.to_string(),
-            hint: None,
+            hint: hint(err),
         }
+    }
+}
+
+/// The advice one failure carries, when the error itself holds it.
+///
+/// A refused write with no etag names the keys that would change, in one line
+/// (M7-13). The full preview is a `dry_run` call, because §9.4 says a failure
+/// carries no `results`.
+fn hint(err: &JanusError) -> Option<String> {
+    match err {
+        JanusError::PreconditionRequired { preview, .. } => Some(preview.clone()),
+        _ => None,
     }
 }
 
@@ -156,4 +170,60 @@ pub struct ReadParams {
     /// The corpora to read: `primary` (default), or a workspace corpus id. A
     /// path may carry the same name as a `corpus:path` qualifier instead.
     pub corpus: Option<String>,
+}
+
+/// The parameters of one `update_frontmatter` call (§9.3).
+///
+/// `patch` is one object of key to string-or-null. A `null` writes `null`; a
+/// key is never deleted (M7-6). `expected_hash` is the `content_hash` a read
+/// returned, and the write refuses without it. The map is a `BTreeMap`, so the
+/// keys arrive in one order whatever the caller sent.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateParams {
+    /// The corpus path of the document; required.
+    pub path: String,
+    /// The keys to write, and the value of each. `null` writes `null`.
+    pub patch: BTreeMap<String, Option<String>>,
+    /// The etag a read returned. Required for a write that is not a dry run.
+    pub expected_hash: Option<String>,
+    /// Report what would change and write nothing.
+    pub dry_run: Option<bool>,
+}
+
+impl UpdateParams {
+    /// The patch as the writer's sorted key list.
+    #[must_use]
+    pub fn keys(&self) -> Vec<(String, Option<String>)> {
+        self.patch
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+}
+
+/// One write's receipt (§2.3, M7-14).
+///
+/// A receipt is not an envelope: it carries the shared head and these fields,
+/// and no `results` and no `notes`, because it describes bytes and not rows.
+/// `new_hash` is the hash of the bytes written, so a caller can present it as the
+/// next `expected_hash` (M7-18).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Receipt {
+    /// The corpus-relative path of the document that was written.
+    pub path: String,
+    /// Keys whose bytes differ after the patch, sorted (M7-44).
+    pub changed_keys: Vec<String>,
+    /// Keys that were absent and are now written, sorted.
+    pub appended_keys: Vec<String>,
+    /// blake3 of the bytes before the write.
+    pub old_hash: String,
+    /// blake3 of the bytes after the write.
+    pub new_hash: String,
+    /// True when nothing was written.
+    pub dry_run: bool,
+    /// The file's length before the write, in bytes.
+    pub bytes_before: usize,
+    /// The file's length after the write, in bytes.
+    pub bytes_after: usize,
 }
