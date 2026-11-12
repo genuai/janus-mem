@@ -1,7 +1,7 @@
-//! The pure part of the writer: a patch becomes new bytes, or a refusal
-//! (SPEC §7.3).
+//! The writer: a patch becomes new bytes, and the bytes reach the disk under the
+//! corpus lock, or nothing changes (SPEC §7.3).
 //!
-//! Three jobs, in this order:
+//! The pure half, in three jobs:
 //!
 //! 1. [`scan`] finds the byte range of every top-level key's value, and refuses
 //!    the shapes it does not read.
@@ -10,13 +10,23 @@
 //! 3. [`plan`] replaces the smallest byte range that holds each value and copies
 //!    everything else.
 //!
+//! The IO half, in two:
+//!
+//! 4. [`commit`] resolves the path it may write, compares the hash the caller saw
+//!    with the bytes on disk, takes the corpus lock, compares again under it, and
+//!    replaces the file.
+//! 5. [`replace`] makes that replacement durable: temp file, `fsync`, `rename`,
+//!    parent `fsync`. An existing document keeps its mode and owner; a new one
+//!    takes the umask's mode ([`Mode`]).
+//!
 //! # What this module refuses to do
 //!
-//! It reads no file, writes no file and takes no lock. It does not compare an
-//! `expected_hash`, it does not build a receipt, and it does not map an error to
-//! an exit code. Those belong to the phases that own IO and the surface (M7-3,
-//! M7-4). A refusal returns [`PatchError`] and no bytes, so a caller cannot
-//! write a half-patched file.
+//! [`plan`] reads no file and takes no lock. [`commit`] does not decide whether
+//! writes are enabled, builds no receipt, and maps no error to a code or an exit
+//! code: the surface does that (M7-4). It never refreshes the index (M7-17). A
+//! refusal returns an error and no bytes, so a caller cannot write a half-patched
+//! file. The one answer that is not a refusal is [`CommitError::Unsynced`]: the
+//! bytes are written and only their survival across a crash is in doubt.
 //!
 //! # Creating a block
 //!
@@ -34,10 +44,14 @@
 //! * I4 — every accepted patch re-reads as valid frontmatter plus a body.
 //! * I5 — other keys, key order, comments and quoting are untouched.
 
+mod atomic;
+mod commit;
 mod patch;
 mod scan;
 mod value;
 
+pub use atomic::{Mode, replace, sync_parent_dir};
+pub use commit::{CommitError, CommitOptions, Committed, Hooks, NoHooks, commit};
 pub use patch::{Patch, Plan, plan};
 pub use scan::reason;
 pub use scan::{KeySpan, Scan, ValueShape, ValueSpan, is_patch_key, scan};

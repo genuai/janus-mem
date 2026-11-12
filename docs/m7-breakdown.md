@@ -307,6 +307,15 @@ check and before the lock is taken, through the test seam of M7-33. The commit a
 `conflict` and writes nothing. Without this case, deleting the under-lock re-read leaves every
 other case green, and that re-read is the only thing the lock buys between two writers.
 
+**Case 2.4b (the seam that is not called).** A commit with a hook that panics in
+`before_second_rename` succeeds, because a one-file commit renames once (M7-33). Without this
+case, "the second seam stays uncalled in M7-3" is asserted nowhere.
+
+**Case 2.4c (a link).** An in-corpus symlink is admitted as a document under its own path, so
+the bytes live at its target. A commit through the link replaces the target and leaves the link
+a link; replacing the link itself would leave the target stale and the corpus with two
+documents. A link that resolves outside the corpus answers `path_escape` and writes nothing.
+
 **Case 2.5.** Two commits on the same file, in sequence, with the same etag: the first wins and
 the second answers `conflict`. Run with two lock acquisitions, so the lock is proved.
 
@@ -328,19 +337,35 @@ workspace, so a caller is never told "read-only" by a mode that has no such fiel
 **Statement.** The file is replaced by a rename of a complete temp file in the same directory.
 A crash leaves either the old file or the new file, never a mixture.
 
+**The temp file and a dead process.** A process killed between the create and the rename leaves
+one `.tmp` file in the document's directory. Nothing sweeps that directory: a writer that deletes
+files it did not create is worse than one file that `doctor` can report, and M8 reports it
+(M7-47). A running process removes its temp file on every error path.
+
 **Case 3.1.** A successful write leaves no temp file in the directory, before or after the
 return.
 
-**Case 3.2.** A refused or failed write leaves no temp file.
+**Case 3.2.** A refused or failed write leaves no temp file. Both paths are covered: a stale
+etag, which stages nothing, and a rename that fails after the temp file exists.
 
 **Case 3.3.** The file mode is preserved (0o640 stays 0o640). On Unix the inode changes, which
 proves the replace was a rename and not a truncate.
 
+**Case 3.3b.** The file's owner and group are preserved. A rename installs a new inode owned by
+the writer, so `chgrp` to a second group the process belongs to, commit, and assert the group is
+unchanged. Skipped when the process has one group, because then nothing can change.
+
 **Case 3.4.** A write into a directory without write permission fails with `write`, and the
 file is byte-identical. Skipped on Windows.
 
-**Case 3.5.** The parent directory is synced after the rename. The test asserts the call
-happens through one function; the effect is not observable and is not claimed.
+**Case 3.5.** The parent directory is synced after the rename. The call site is unobservable,
+so the test asserts the one function that performs it: it syncs a directory and names the one it
+cannot sync. The effect is not claimed.
+
+**Case 3.6.** A new document (`Mode::New`) takes `0o666` masked by the process umask, because
+the mode is set at creation. The test creates a probe file with a plain create and compares the
+two modes, so it reads no umask. A umask of `0o077` makes both modes `0o600`, and then the case
+cannot tell a mask from a hardcoded mode; no other umask hides it.
 
 ### 3.4 The gate on three surfaces (P4)
 
@@ -534,6 +559,9 @@ exit 3 is used for the first time.
 | M7-42 | A null value's span is empty and sits directly after the key's colon; the rendered value carries its own separator space | §2.1 says the span starts at the value's first byte, and a null has no byte. The point after the colon keeps the spacing before a trailing comment where the file put it, so `status:  # none` becomes `status: superseded  # none` and not `status: superseded# none`. Wrong if a later phase needs to put a value anywhere but directly after the colon. |
 | M7-43 | A refusal costs one key, except a line at column 0 that is not a key | A quoted key, or a name with a space, is a real key that no patch can name: it is reported `Unsupported(Nested)` and left alone, and the other keys still splice. A column-0 line with no key at all means the block is not a mapping, so no key in it can be spliced safely and the whole block is refused. Wrong if a vault reports "cannot patch this file" for a file whose only oddity is one unreachable key. |
 | M7-44 | `changed_keys` names a key only when its bytes differ after the patch; an absent key always differs | A receipt describes bytes (M7-14), so a patch that writes the value the file already had reports no change and the same `old_hash` and `new_hash`. A caller can then tell "nothing to do" from "wrote something". Wrong if a caller needs a receipt to list a key it wrote with an unchanged value. |
+| M7-45 | `CommitOptions` carries the corpus root and the `Config`, and `commit` resolves the lock directory with `config::resolve_index_dir` | One resolution, one lock file. A free-form directory field lets one caller pass `root/.janus` and another pass a moved `index_dir`; both verify the same etag, both rename, and the first write is lost with no error. The function is the one the builder calls, so the writer cannot drift from it. Wrong if the corpus root must be readable and still the lock is not found. |
+| M7-46 | M7-3 lands as one PR at 508 logic and 570 test lines, against the phase ceiling of 300 and 450 and `AGENTS.md`'s 600 and 900 | Round 1 measured 328/366. Round 2 added the owner copy, the mode policy, the resolved lock directory, the resolved link, the unsynced answer and four cases, and each one closes a way to lose or misreport a file. 195 of the 478 added lines in the two new files are comments the public-item gate and the safety argument need, so reaching 300 means deleting the reason the checks exist. The split seam is not taken: `commit` cannot be reviewed without the `replace` it calls, and a second read of one interface costs the attention the ceiling protects. Wrong if a reviewer reports that this diff is too large to hold in one reading. |
+| M7-47 | A temp file left by a killed process is reported by `doctor` in M8, never swept by the writer | A crash between the create and the rename leaves one `.tmp` file in a document's directory. A sweeper that removes files it did not create can remove a user's file that happens to start with `.tmp`, on a corpus the writer does not own. A report costs one line in `doctor` and loses nothing. Wrong if the files become common enough to hide the corpus, which the report would show. |
 
 ## 5. Phases
 
@@ -624,19 +652,25 @@ Three things in the plan move with the split, and none of them silently:
 
 ### M7-3 — The atomic replace and the lock
 
-**Files.** `src/write/atomic.rs`, `src/write/commit.rs` (both new), `src/index/store.rs`
-(expose the lock for the writer), `tests/write_atomic.rs` (new).
+**Files.** `src/write/atomic.rs`, `src/write/commit.rs` (both new), `src/write/mod.rs` (the
+exports), `tests/write_atomic.rs` (new). `src/index/store.rs` is untouched: `Lock::acquire`,
+`LOCK_FILE` and `LOCK_TIMEOUT` were already public, so the writer reuses them and copies nothing
+(M7-9).
 
 **Build.** Temp file, `fsync`, `rename`, parent `fsync`, mode preserve; lock, re-read, verify,
 and the two `Hooks` seams (M7-33).
 
-**Tests.** Cases 2.4, 2.4a, 2.5, 2.6, 3.1–3.5.
+**Tests.** Cases 2.4, 2.4a, 2.4b, 2.4c, 2.5, 2.6, 3.1–3.6.
 
 **Accept.** A failed write leaves the file byte-identical and no temp file behind. A file
 changed after the pre-lock check and before the lock answers `conflict`, and the test proves
 it by removing the under-lock re-read and watching case 2.4a fail.
 
-**Split seam.** The atomic replace first, then the lock and the verification.
+**Split seam.** The atomic replace first, then the lock and the verification. Not taken: the
+phase measured over its ceiling, and M7-46 reports both numbers.
+
+**Decisions.** M7-45 (the lock directory is resolved, not passed), M7-46 (the size) and M7-47
+(a temp file left by a killed process is reported, not swept).
 
 ### M7-4 — `update_frontmatter` and `janus set`
 
@@ -824,26 +858,31 @@ the agent splits before the ceiling rather than shaving a comment or dropping a 
    pattern, the escape set, and the append position (M7-3, M7-7, M7-8, M7-5).
 5. **§7.3 step 5.** State that a `null` patch writes `null` and that deletion is not in v1
    (M7-6).
-6. **§7.4.** State that in-place writes `status` and `superseded_by` on the old document and
+6. **§7.3 step 7.** State that a new document's mode is `0o666` masked by the umask and that
+   an existing document keeps its mode and owner; that a link is resolved before the write and
+   a resolved path outside the corpus is refused; and that a failed directory sync after a
+   successful rename is reported as a write that happened, never as a refusal (M7-45, M7-47).
+7. **§7.4.** State that in-place writes `status` and `superseded_by` on the old document and
    `supersedes` on the new one; that `--append-only` creates the new document and leaves the
    old one untouched; and that no `effective_to` and no `doc_version` is written (M7-20, M7-21,
    M7-35). **Step 1 of §7.4 also changes**: the new document must not exist, and an existing
    one is `path_exists` — step 1's "validate both docs exist" is true of the old document
    only. This closes open questions 4 and 23 for this milestone.
-7. **§8.3.** Add `config_hash`, the four sections it covers, the reason for each section that
+8. **§8.3.** Add `config_hash`, the four sections it covers, the reason for each section that
    is outside it, and the refresh-trigger rule for a manifest without it (M7-24, M7-25, M7-32).
-8. **§6.11.** State that a qualified cross-corpus link resolves when
+9. **§6.11.** State that a qualified cross-corpus link resolves when
    `allow_cross_corpus_links` is true, and that `get_lineage` follows it (M7-37).
-9. **§16.1.** Remove `[mcp] allow_write` from the shipped config and state that it is ignored
+10. **§16.1.** Remove `[mcp] allow_write` from the shipped config and state that it is ignored
    with a warning (M7-36).
-10. **§11 M7.** Replace the done-when with the numbered rows of §8, including the rehearsal
+11. **§11 M7.** Replace the done-when with the numbered rows of §8, including the rehearsal
     phase and the fixture rule.
 
 ## 11. Handoff
 
 - **M8** inherits the writer: `watch` must not race it, and the mmap load path must read a
   generation a write did not build. M8 also inherits cross-corpus *supersession*, which §0.2
-  keeps out of M7 because it changes another corpus's windows and status.
+  keeps out of M7 because it changes another corpus's windows and status. And `doctor` reports
+  stray temp files in a document directory in M8, because a killed writer leaves them (M7-47).
 - **The shipped config changes once.** `[mcp] allow_write` leaves `janus.toml` and the config
 guide in M7-4, because the flag alone gates a server (M7-36). An existing config keeps the key
 and gets one warning, so no user is broken by the removal.
