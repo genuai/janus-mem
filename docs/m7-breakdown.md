@@ -380,9 +380,10 @@ with the flag, each reaches its own contract. 4 of 4 names, 1 of 1 surface.
 **Case 4.3.** `janus_status` reports `writes_enabled: false` without the flag, `true` with it,
 and `false` in both cases on a `read_only` corpus.
 
-**Case 4.4.** The MCP `instructions` string states that writes exist, names the four tools, and
-says that a write needs the etag a read returned. The golden that holds the string moves once,
-and the diff is one paragraph.
+**Case 4.4.** The MCP `instructions` string stops saying "This release reads. It does not
+write.", names the write tool this release serves, and says that a write needs the etag a read
+returned and that a server without `--allow-write` refuses every write. The golden that holds the
+string moves once, and the diff is one paragraph (M7-49).
 
 **Case 4.5.** A receipt is not an envelope: it carries `api` and `ok`, and no `results` and no
 `notes`. A test asserts the absent keys, so a later field cannot leak in.
@@ -562,6 +563,9 @@ exit 3 is used for the first time.
 | M7-45 | `CommitOptions` carries the corpus root and the `Config`, and `commit` resolves the lock directory with `config::resolve_index_dir` | One resolution, one lock file. A free-form directory field lets one caller pass `root/.janus` and another pass a moved `index_dir`; both verify the same etag, both rename, and the first write is lost with no error. The function is the one the builder calls, so the writer cannot drift from it. Wrong if the corpus root must be readable and still the lock is not found. |
 | M7-46 | M7-3 lands as one PR at 508 logic and 570 test lines, against the phase ceiling of 300 and 450 and `AGENTS.md`'s 600 and 900 | Round 1 measured 328/366. Round 2 added the owner copy, the mode policy, the resolved lock directory, the resolved link, the unsynced answer and four cases, and each one closes a way to lose or misreport a file. 195 of the 478 added lines in the two new files are comments the public-item gate and the safety argument need, so reaching 300 means deleting the reason the checks exist. The split seam is not taken: `commit` cannot be reviewed without the `replace` it calls, and a second read of one interface costs the attention the ceiling protects. Wrong if a reviewer reports that this diff is too large to hold in one reading. |
 | M7-47 | A temp file left by a killed process is reported by `doctor` in M8, never swept by the writer | A crash between the create and the rename leaves one `.tmp` file in a document's directory. A sweeper that removes files it did not create can remove a user's file that happens to start with `.tmp`, on a corpus the writer does not own. A report costs one line in `doctor` and loses nothing. Wrong if the files become common enough to hide the corpus, which the report would show. |
+| M7-50 | M7-4 lands as two PRs at 936 + 132 logic and 1086 + 386 test lines against the phase ceiling of 600 and 900 | The phase measures 1068 logic and 1472 test lines, and 4a alone is over both ceilings: its estimate was 380 logic. 567 of 4a's added src lines are code, 211 are comments the public-item gate and the safety argument need, and the rest are blank, so reaching 600 means deleting the reason the checks exist or dropping a case (eight codes, three surfaces, two corpora modes). The two-PR seam is taken as the plan requires; 4b fits on its own base at 132/386. A third split — codes and engine, then surfaces and gate — would fit, and it is the lead's call whether to take it now or after 4a's review. Wrong if a reviewer reports that 4a is too large to hold in one reading. |
+| M7-48 | One write switch: `--allow-write` is read once in `main`, becomes `api::Writes`, and travels in the `Fleet`; the engine's gate is the only check, and `write_refusal` reads the same value | Two switches with one meaning drift. If the adapters checked the flag and the engine did not, the CLI would need a third path, and a surface added later would answer a write it forgot to gate. If the engine checks it, a caller that skips an adapter is still refused, and a test can prove the refusal without a server. The three names whose phases have not landed keep a second refusal of their own: `write_disabled` without the flag, `refused` with it, because their phase owns them. Wrong if any surface answers a write while `Writes.allowed` is false, or if a new surface must pass a second value by hand. |
+| M7-49 | `tools/list` lists `update_frontmatter` only when the server serves writes, and the `instructions` string names the one write tool this release serves | A client that discovers no write tool cannot call one it was not offered, and a list that advertises a refused tool teaches a model to ignore the list. The string is a compile-time constant, so it cannot ask the flag; it states the tool, the etag rule, and that a server without the flag refuses every write, which is true in both modes. This amends case 4.4's "names the four tools": three of them answer `refused` until their phases land. Wrong if a client needs the three unlanded names in the handshake to plan around them. |
 
 ## 5. Phases
 
@@ -694,8 +698,15 @@ the only phase whose work cannot fit one review at `AGENTS.md`'s ceiling.
 
 - **4a — the engine, MCP and rpc.** `src/engine.rs`, `src/api/*`, `src/error.rs`,
   `src/mcp/*`, `src/rpc.rs`, `src/status.rs`, `src/config.rs`, `tests/mcp_write.rs`,
-  `tests/cli_rpc.rs`, `tests/cli_mcp.rs`, `tests/cli_status.rs`, `tests/api_envelope.rs`.
-  Cases 2.1–2.3, 2.7a, 2.7b, 2.8, 4.1–4.6.
+  `tests/cli_rpc.rs`, `tests/cli_mcp.rs`, `tests/cli_status.rs`, `tests/workspace_read.rs`,
+  `SPEC.md`. Cases 2.1–2.3, 2.7a, 2.7b, 2.8, 4.1–4.6.
+
+  Three files move with it, and none of them silently. `tests/mcp_gate.rs` is deleted: both of
+  its cases assert the M6 gate that this phase replaces, and the file says so itself.
+  `tests/api_envelope.rs` is untouched: case 4.5 asserts the receipt's key set in
+  `tests/mcp_write.rs`, beside the writer that builds it. `tests/workspace_read.rs` case 3.5
+  asserted `refused` in both flag modes, which is now `write_disabled` without the flag and
+  `refused` with it.
 - **4b — `janus set`.** `src/cli.rs`, `src/main.rs`, `tests/cli_set.rs`. The human table, the
   refusal list, and the workspace resolution of a write path (M7-38).
 

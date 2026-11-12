@@ -208,6 +208,87 @@ pub enum JanusError {
         reason: String,
     },
 
+    /// The surface was started without `--allow-write`, so it serves no write
+    /// (M7-15, M7-36). The flag is the only switch; a config key cannot grant
+    /// a write.
+    #[error("{surface} serves no write: start it with --allow-write")]
+    WriteDisabled {
+        /// The surface that refused, e.g. `janus mcp`.
+        surface: String,
+    },
+
+    /// The corpus refuses every write: it is archived or `read_only` (M7-16,
+    /// M7-28). The field exists only in a workspace, so this refusal cannot
+    /// fire in single-corpus mode (case 2.7b).
+    #[error("corpus {corpus} is read-only, so no write may reach it")]
+    ReadOnlyCorpus {
+        /// The workspace's name for the corpus.
+        corpus: String,
+    },
+
+    /// The bytes on disk are not the bytes the caller saw, so the write would
+    /// erase another writer's change (§9.4, M7-12). Both hashes are reported, so
+    /// the caller can re-read and retry. Exit 3.
+    #[error("the file changed since it was read: expected {expected}, found {current} ({path})")]
+    Conflict {
+        /// The document the write named.
+        path: PathBuf,
+        /// The hash the caller presented.
+        expected: String,
+        /// The hash of the bytes on disk now.
+        current: String,
+    },
+
+    /// A write to an existing file carried no etag, so it never happened
+    /// (case 2.1, M7-12). `preview` is the one line the failure offers in
+    /// `hint`: the keys that would change (M7-13). Exit 3.
+    #[error("no expected_hash for {path}; read the document and pass the content_hash it returned")]
+    PreconditionRequired {
+        /// The document the write named.
+        path: PathBuf,
+        /// The one-line preview the failure carries in `hint`.
+        preview: String,
+    },
+
+    /// A patch key's value has a shape the writer cannot splice, so the write is
+    /// refused and the file keeps its bytes (§2.4).
+    #[error("{path}: `{key}` holds a value the writer cannot splice: {reason}")]
+    UnsupportedPatch {
+        /// The document the write named.
+        path: PathBuf,
+        /// The key whose value is refused.
+        key: String,
+        /// Why it is refused, from [`crate::write::reason`].
+        reason: &'static str,
+    },
+
+    /// A patch key is outside `[A-Za-z0-9][A-Za-z0-9._-]*` (§2.1). A key is
+    /// written as a line, so a key with a newline, `: `, `#` or a quote could
+    /// add or split a key.
+    #[error("{path}: `{key}` is not a key: use letters, digits, dot, underscore or dash")]
+    KeyShape {
+        /// The document the write named.
+        path: PathBuf,
+        /// The offending key, as the request wrote it.
+        key: String,
+    },
+
+    /// The document has no frontmatter block and the request did not ask for
+    /// one, so there is nothing to patch.
+    #[error("{path} has no frontmatter block to patch")]
+    NoFrontmatter {
+        /// The document the write named.
+        path: PathBuf,
+    },
+
+    /// A create named a path that already holds a file (§2.4, M7-27). A retry
+    /// with the same request cannot succeed, so this is a refusal.
+    #[error("{path} already exists; use a mode that replaces it")]
+    PathExists {
+        /// The path the create named.
+        path: PathBuf,
+    },
+
     /// A command-line combination that cannot mean anything: understood, but
     /// rejected before any work (§9.1 code 2).
     #[error("{message}")]
@@ -234,7 +315,17 @@ impl JanusError {
             // retry a transient error without retrying a policy decision.
             Self::ConfigExists { .. }
             | Self::VaultNotDirectory { .. }
-            | Self::PathEscape { .. } => 4,
+            | Self::PathEscape { .. }
+            | Self::WriteDisabled { .. }
+            | Self::ReadOnlyCorpus { .. }
+            | Self::UnsupportedPatch { .. }
+            | Self::KeyShape { .. }
+            | Self::NoFrontmatter { .. }
+            | Self::PathExists { .. } => 4,
+
+            // A write that lost a race, and a write with no etag: both are
+            // cured by re-reading and retrying (M7-12).
+            Self::Conflict { .. } | Self::PreconditionRequired { .. } => 3,
 
             Self::VaultResolve { .. }
             | Self::VaultNotFound { .. }

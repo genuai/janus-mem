@@ -10,10 +10,14 @@
 //! ignores (M6-8, case 7.6). A legal shape with a bad combination stays a tool
 //! result with `ok: false`, because the caller must read `code`, not the
 //! transport error.
+//!
+//! `update_frontmatter` is listed only when the server was started with
+//! `--allow-write` (M7-4). A client that discovers no write tool cannot call one
+//! it was not offered, and a server without the flag refuses the name anyway.
 
 use serde_json::{Map, Value, json};
 
-use crate::api::{Call, Failure, Tool, write_refusal};
+use crate::api::{Call, Failure, Tool, Writes, write_refusal};
 use crate::engine::Fleet;
 use crate::mcp::protocol::{self, Error, INTERNAL_ERROR, INVALID_PARAMS};
 
@@ -30,9 +34,15 @@ const LISTED: [Tool; 5] = [
 ];
 
 /// The answer to one `tools/list` request.
+///
+/// The write tool joins the five read tools only when the surface serves writes.
 #[must_use]
-pub fn descriptors() -> Value {
-    let tools: Vec<Value> = LISTED.iter().map(|tool| descriptor(*tool)).collect();
+pub fn descriptors(writes: Writes) -> Value {
+    let mut listed: Vec<Tool> = LISTED.to_vec();
+    if writes.allowed {
+        listed.push(Tool::UpdateFrontmatter);
+    }
+    let tools: Vec<Value> = listed.iter().map(|tool| descriptor(*tool)).collect();
     json!({ "tools": tools })
 }
 
@@ -46,7 +56,7 @@ pub fn descriptors() -> Value {
 /// [`INVALID_PARAMS`] when the request has no legal shape: a missing tool name,
 /// an `arguments` value that is not an object, a name this server does not serve,
 /// or an argument the tool's schema does not accept.
-pub fn call(fleet: &Fleet, params: &Value, allow_write: bool) -> Result<Value, Error> {
+pub fn call(fleet: &Fleet, params: &Value, writes: Writes) -> Result<Value, Error> {
     let fields = params.as_object().ok_or_else(|| {
         Error::new(
             INVALID_PARAMS,
@@ -69,9 +79,10 @@ pub fn call(fleet: &Fleet, params: &Value, allow_write: bool) -> Result<Value, E
             ));
         }
     };
-    // The name is legal and the release is not: no write tool is served, in
-    // either `--allow-write` mode (M6-7, case 8.2).
-    if let Some(failure) = write_refusal(name, allow_write) {
+    // The name is legal and this surface is not: every write name is refused
+    // without `--allow-write`, and a name whose phase has not landed is refused
+    // in both modes (M6-7, M7-4).
+    if let Some(failure) = write_refusal(name, writes) {
         return Ok(tool_result(&encode(failure)?));
     }
     let tool = Tool::parse(name).map_err(|error| Error::new(INVALID_PARAMS, error.to_string()))?;
@@ -195,6 +206,10 @@ fn describe(tool: Tool) -> &'static str {
         Tool::Status => {
             "Index freshness, the embedder this process resolved, and the cache \
              counters. Builds nothing and takes no lock."
+        }
+        Tool::UpdateFrontmatter => {
+            "Write frontmatter keys and return a receipt. Needs expected_hash: the \
+             content_hash a read returned. A shape the writer cannot splice is refused."
         }
     }
 }
@@ -341,6 +356,31 @@ fn schema(tool: Tool) -> Value {
             "type": "object",
             "properties": {},
             "required": [],
+            "additionalProperties": false
+        }),
+        Tool::UpdateFrontmatter => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The corpus path of the document to change."
+                },
+                "patch": {
+                    "type": "object",
+                    "description": "Keys to write, mapped to a string or null. A value \
+                                    that is not a string or null is a usage failure."
+                },
+                "expected_hash": {
+                    "type": "string",
+                    "description": "The content_hash a read returned. Required: without \
+                                    it the call changes nothing."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Report what would change and write nothing. Default false."
+                }
+            },
+            "required": ["path", "patch"],
             "additionalProperties": false
         }),
     }

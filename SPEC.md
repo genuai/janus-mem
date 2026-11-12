@@ -1120,7 +1120,9 @@ name. Every other command works on one corpus and **refuses** `--workspace` with
 point: a command that parsed the flag and ignored it would publish one corpus and look
 like it read the workspace.
 
-Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash, `4` refused (unsafe or unsupported operation). Human output is a compact table; `--json` is stable and versioned.
+Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash, `4` refused (unsafe or unsupported operation). Human output is a compact table; `--json` is stable and versioned. From M7, `3` is carried by `conflict` and `precondition_required`: both mean re-read, then retry (§9.3).
+
+`--allow-write` gates the two server surfaces, `janus mcp` and `janus rpc`, and nothing else. A CLI write command needs no flag, because typing the command is the consent (M7-15).
 
 Exit codes belong to the CLI. A command exits; a server answers. A tool failure inside `janus rpc` or `janus mcp` is a response line with `ok: false` and a stable `code`, and the process exits `0` when its input ends. Only a startup failure — no corpus, no config — exits `1`, and it exits before the loop starts. §9.4 states the failure object.
 
@@ -1161,7 +1163,7 @@ A process may cache one loaded generation, and only one: the payload of `index.b
 
 ### 9.2 MCP read tools
 
-The `initialize` result carries an `instructions` string that describes the type ladder and the rule for promoting a note.
+The `initialize` result carries an `instructions` string that describes the type ladder and the rule for promoting a note. It also names the write tool and the etag rule, because an agent that reads a false capability line will not call the tool that exists (M7-29).
 
 | Tool | Params | Returns |
 |---|---|---|
@@ -1194,7 +1196,7 @@ MCP reads inherit the index refresh and the refusal. They expose no `--no-rebuil
   "cache": { "hits": 2, "misses": 1 } }
 ```
 
-Before the first build, `index.present` is `false` and every other `index` field is `null`. While the index is stale because the config changed, the report also carries `index.stale_reason`: `"config"` when the config is the only cause, `"corpus,config"` when both moved. The field is absent when the index is fresh, and absent when only the corpus changed, so those answers keep the shape they had before M7-1. A process keeps the config it started with, so a long-lived server reports the config mismatch until it restarts; its reads adopt a generation the file agrees with and publish nothing (M7-41). `embeddings.available` answers "can this process embed a query now", so it comes from the resolved embedder. `embeddings.model` answers "what produced the stored vectors", so it comes from the manifest. The two may disagree: a binary with embeddings compiled out can read stored vectors and cannot embed a query. `writes_enabled` is `false` until M7 adds a writer. A status call never builds and never takes the writer lock, so an agent can ask "is this fresh?" while another process holds the index.
+Before the first build, `index.present` is `false` and every other `index` field is `null`. While the index is stale because the config changed, the report also carries `index.stale_reason`: `"config"` when the config is the only cause, `"corpus,config"` when both moved. The field is absent when the index is fresh, and absent when only the corpus changed, so those answers keep the shape they had before M7-1. A process keeps the config it started with, so a long-lived server reports the config mismatch until it restarts; its reads adopt a generation the file agrees with and publish nothing (M7-41). `embeddings.available` answers "can this process embed a query now", so it comes from the resolved embedder. `embeddings.model` answers "what produced the stored vectors", so it comes from the manifest. The two may disagree: a binary with embeddings compiled out can read stored vectors and cannot embed a query. `writes_enabled` is true only when this surface was started with `--allow-write` **and** the corpus is not `read_only` (M7-16). A config key cannot set it (M7-36). A status call never builds and never takes the writer lock, so an agent can ask "is this fresh?" while another process holds the index.
 
 In a workspace the answer gains `workspace` and `corpora`: the workspace file's path, and one row per corpus with its `id`, `role`, `root`, `read_only`, `index_dir`, `config_present`, `index_present` and `index_stale`. The rows are the ones `janus corpora` prints, read the same way: one manifest per corpus and one walk only for the digest. Nothing is built and no lock is taken. Both fields are absent in single-corpus mode, so that answer keeps its shape. The head fields describe the primary corpus, which is the corpus an unqualified read names. A workspace's `id` and a corpus's declared `corpus_id` are two names for the same corpus; the head reports `corpus_id` and the rows report `id`, so a reader sees both when they differ.
 
@@ -1215,7 +1217,7 @@ The type counts stay in `scan --json`, which reports both halves of the question
 | `supersede_document` | `old_path`, **`expected_hash`**, `new_path?`, `new_title?`, `dry_run?` | Transactional dual patch (or append-only with `new_path` created first) |
 | `promote_document` | `source` (`corpus:path`), `target_path?`, `mode` (`link`/`adopt`), `expected_hash?`, `dry_run?` | Declares an archived document as lineage for a primary one; never moves or rewrites the archive (§6.11) |
 
-`expected_hash` is the `content_hash`/etag returned by every read tool. It is **required** for `update_frontmatter`, `supersede_document`, and for `write_document` in `overwrite` mode. Without it, the call returns `PreconditionRequired` and a dry-run preview; it never mutates. All write tools return receipts, and a hash mismatch returns `Conflict` with both hashes so the agent can re-read and retry.
+`expected_hash` is the `content_hash`/etag returned by every read tool. It is **required** for `update_frontmatter`, `supersede_document`, and for `write_document` in `overwrite` mode. Without it, the call answers `precondition_required` with a one-line preview in `hint` — the keys that would change, and the instruction to re-read — and changes nothing. The full preview is a `dry_run` call, because a failure carries no `results` (M7-13). All write tools return receipts, and a hash mismatch returns `Conflict` with both hashes so the agent can re-read and retry.
 
 ### 9.5 Controller-agnostic surfaces
 
@@ -1287,6 +1289,22 @@ agent and not for the human. A failure carries no `results`.
 stdout when `--json` is set, and then exit with the code of §9.1. A receipt
 command prints its `error:` line on stderr and nothing on stdout, so a caller can
 tell "no report" from "a report with no rows".
+
+**Receipt.** A write tool answers a receipt, not an envelope:
+
+```json
+{ "api": 1, "ok": true, "path": "decisions/2026-10-29-postgres.md",
+  "changed_keys": ["status", "superseded_by"],
+  "appended_keys": ["superseded_by"],
+  "old_hash": "…", "new_hash": "…", "dry_run": false,
+  "bytes_before": 412, "bytes_after": 470 }
+```
+
+No `results` and no `notes`: a receipt describes bytes, and a list beside it
+would invite a reader to read it as rows (M7-14). `changed_keys` names a key only
+when its bytes differ after the patch, so "nothing to do" is visible (M7-44).
+`new_hash` is the hash of the bytes written, so it is the `expected_hash` of the
+next write (M7-18).
 
 **Etag.** Every document row carries `content_hash`. `read_document` hashes the
 bytes it returned, so the value always describes the text beside it. A `search`,
@@ -1665,7 +1683,7 @@ batch_size = 32
 alpha = 0.5                    # semantic weight; clamped to [0, 1], 0.0 = lexical only
 
 [mcp]
-allow_write = false
+# `allow_write` is ignored: only `--allow-write` gates a server surface (M7-36).
 max_chars = 4000
 ```
 

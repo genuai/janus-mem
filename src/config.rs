@@ -554,6 +554,11 @@ impl Config {
             });
         }
 
+        // `[mcp] allow_write` is read so an existing config still parses, and it
+        // decides nothing (M7-36). One warning says so.
+        if raw.mcp.allow_write == Some(true) {
+            warnings.push(ConfigWarning::WriteSettingIgnored);
+        }
         Self {
             corpus_id,
             index_dir,
@@ -996,6 +1001,10 @@ pub enum ConfigWarning {
         /// The configured value.
         value: String,
     },
+    /// `[mcp] allow_write` cannot enable a write. The flag alone gates a server
+    /// surface, because one decision with two switches is one switch too many
+    /// (M7-36, D4).
+    WriteSettingIgnored,
     /// `[decay] undated` was neither `median` nor `none`; the resolved config
     /// uses `median`.
     UnknownUndatedDecay {
@@ -1045,6 +1054,11 @@ impl fmt::Display for ConfigWarning {
             Self::UnknownUndatedDecay { value } => write!(
                 f,
                 "`decay.undated` is `{value}`; expected `median` or `none`, so `median` is used"
+            ),
+            Self::WriteSettingIgnored => write!(
+                f,
+                "`[mcp] allow_write` is ignored; a server serves writes only when it is started \
+                 with --allow-write, so remove the key"
             ),
         }
     }

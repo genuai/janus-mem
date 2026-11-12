@@ -162,6 +162,9 @@ struct Cache {
 ///
 /// `available` and `degraded` are the embedder this process resolved, and they
 /// arrive as arguments because nothing below `main` may read the environment.
+/// `writes_enabled` is the surface's answer to `--allow-write` combined with the
+/// corpus's `read_only`, so a capability flag never promises a write that must
+/// fail (M7-16).
 ///
 /// # Errors
 ///
@@ -170,6 +173,7 @@ struct Cache {
 pub fn compute(
     root: &Path,
     config: &Config,
+    writes_enabled: bool,
     available: bool,
     degraded: Option<String>,
     cache: CacheStats,
@@ -187,9 +191,9 @@ pub fn compute(
     Ok(Report {
         vault: root.display().to_string(),
         corpus_id: config.corpus_id.clone(),
-        // M6 serves no write, whatever `[mcp] allow_write` says. Phase 5 refuses
-        // a write tool and M7 adds the writer (§3.8).
-        writes_enabled: false,
+        // A write is reachable only when this surface serves writes and this
+        // corpus accepts one (M7-16). No config key can set it (M7-36).
+        writes_enabled,
         embeddings: Embeddings {
             available,
             // The three vector fields of a manifest are one fact, so an

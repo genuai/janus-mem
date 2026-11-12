@@ -173,14 +173,14 @@ pub enum Command {
 
     /// Answer tool calls as line-delimited JSON on stdin and stdout (§9.5)
     Rpc {
-        /// Accepted now, and it changes no answer until writes exist (M6-7)
+        /// Serve the write tools too; without it every write name is refused
         #[arg(long)]
         allow_write: bool,
     },
 
     /// Serve the read tools over MCP, JSON-RPC 2.0 on stdin and stdout (§9.2)
     Mcp {
-        /// Accepted now, and it changes no answer until writes exist (M6-7)
+        /// Serve the write tools too; without it every write name is refused
         #[arg(long)]
         allow_write: bool,
     },

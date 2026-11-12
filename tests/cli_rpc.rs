@@ -13,16 +13,16 @@ use std::path::Path;
 use std::time::Duration;
 
 use common::{fixture_vault, index, janus, write_document};
-use janus_mem::api::write_refusal;
+use janus_mem::api::{Writes, write_refusal};
 use janus_mem::index::store::Lock;
 use serde_json::{Value, json};
 
 /// The fixture document every path-shaped call names.
 const POSTGRES: &str = "decisions/2024-11-02-postgres-cache.md";
 
-/// The five wire names, in `Tool::ALL` order (case 5.4).
-const WIRE_NAMES: &str =
-    "search, get_authoritative_facts, get_lineage, read_document, janus_status";
+/// The six wire names, in `Tool::ALL` order (case 5.4).
+const WIRE_NAMES: &str = "search, get_authoritative_facts, get_lineage, read_document, \
+                         janus_status, update_frontmatter";
 
 /// One finished `janus rpc` session.
 struct Session {
@@ -356,44 +356,72 @@ fn case_5_7_the_five_calls_equal_the_five_cli_calls() {
 // ──────────────────────────────── refusal ──────────────────────────────────
 
 #[test]
-fn case_5_8_a_write_tool_is_refused_by_the_shared_helper() {
+fn case_5_8_a_write_name_needs_the_flag_and_an_unlanded_one_is_refused() {
     let dir = fixture_vault();
     let root = dir.path();
     index(root);
-    const WRITE: [&str; 4] = [
-        "update_frontmatter",
-        "write_document",
-        "supersede_document",
-        "promote_document",
-    ];
-    for allow_write in [false, true] {
-        let script: String = WRITE
-            .iter()
-            .enumerate()
-            .map(|(index, name)| format!("{}\n", json!({ "id": index, "tool": name })))
-            .collect();
-        let answers = answers(root, allow_write, &script);
-        assert_eq!(answers.len(), 4, "{answers:?}");
-        for (index, (name, answer)) in WRITE.iter().zip(&answers).enumerate() {
-            assert_eq!(answer["id"], json!(index), "{answer}");
-            assert_eq!(answer["api"], json!(1), "{answer}");
-            assert_eq!(answer["ok"], json!(false), "{answer}");
-            assert_eq!(answer["code"], json!("refused"), "{answer}");
-            let hint = answer["hint"].as_str().expect("a hint");
-            assert!(hint.contains("M7"), "{hint}");
-            // The same object comes from the shared helper, so rpc did not
-            // re-implement the refusal.
-            let shared = write_refusal(name, allow_write).expect("a write name is refused");
-            assert_eq!(
-                normalized(answer.clone()),
-                serde_json::to_value(shared).expect("a failure is JSON"),
-                "{name}"
-            );
-        }
+    // The three names whose phases have not landed: refused with or without
+    // the flag, because this release does not serve them.
+    const UNLANDED: [&str; 3] = ["write_document", "supersede_document", "promote_document"];
+    let writes = |allowed| Writes::new("janus rpc", allowed, false);
+
+    // Without the flag, every write name answers `write_disabled`.
+    let names: Vec<&str> = UNLANDED
+        .iter()
+        .copied()
+        .chain(["update_frontmatter"])
+        .collect();
+    let script: String = names
+        .iter()
+        .enumerate()
+        .map(|(id, name)| format!("{}\n", json!({ "id": id, "tool": name })))
+        .collect();
+    let gated = answers(root, false, &script);
+    assert_eq!(gated.len(), 4, "{gated:?}");
+    for (id, (name, answer)) in names.iter().zip(&gated).enumerate() {
+        assert_eq!(answer["id"], json!(id), "{answer}");
+        assert_eq!(answer["api"], json!(1), "{answer}");
+        assert_eq!(answer["ok"], json!(false), "{answer}");
+        assert_eq!(answer["code"], json!("write_disabled"), "{answer}");
+        // The same object comes from the shared helper, so rpc did not
+        // re-implement the gate.
+        let shared = write_refusal(name, writes(false)).expect("a write name is refused");
+        assert_eq!(
+            normalized(answer.clone()),
+            serde_json::to_value(shared).expect("a failure is JSON"),
+            "{name}"
+        );
     }
-    // A read name is not refused: it goes to the tool table.
-    assert!(write_refusal("search", false).is_none());
-    assert!(write_refusal("search", true).is_none());
+
+    // With the flag the unlanded three are still refused, and the shared
+    // helper is where that answer comes from.
+    let script: String = UNLANDED
+        .iter()
+        .enumerate()
+        .map(|(id, name)| format!("{}\n", json!({ "id": id, "tool": name })))
+        .collect();
+    let refused = answers(root, true, &script);
+    for (name, answer) in UNLANDED.iter().zip(&refused) {
+        assert_eq!(answer["code"], json!("refused"), "{name}: {answer}");
+        let shared = write_refusal(name, writes(true)).expect("an unlanded write is refused");
+        assert_eq!(
+            normalized(answer.clone()),
+            serde_json::to_value(shared).expect("a failure is JSON"),
+            "{name}"
+        );
+    }
+
+    // `update_frontmatter` left that list in M7-4: with the flag it reaches the
+    // engine, which answers the missing parameter and not a refusal.
+    let script = format!("{}\n", json!({ "id": 1, "tool": "update_frontmatter" }));
+    let mut reached = answers(root, true, &script);
+    let answer = reached.remove(0);
+    assert_eq!(answer["code"], json!("usage"), "{answer}");
+    assert!(write_refusal("update_frontmatter", writes(true)).is_none());
+
+    // A read name is not gated either.
+    assert!(write_refusal("search", writes(false)).is_none());
+    assert!(write_refusal("search", writes(true)).is_none());
 }
 
 // ───────────────────────────── stdout discipline ───────────────────────────
