@@ -455,6 +455,8 @@ fn case_3_5_a_write_tool_is_refused_whatever_the_corpus_says() {
     assert_eq!(report["corpora"][1]["read_only"], json!(false));
     assert_eq!(report["writes_enabled"], json!(false), "M6 serves no write");
 
+    // This surface serves no write yet, so the name is gated rather than
+    // refused for its phase.
     for allow_write in [false, true] {
         let answer = mcp(
             dir.path(),
@@ -463,7 +465,7 @@ fn case_3_5_a_write_tool_is_refused_whatever_the_corpus_says() {
             json!({ "path": SHARED, "body": "rewritten" }),
         );
         assert_eq!(answer["ok"], json!(false), "{answer}");
-        assert_eq!(answer["code"], json!("refused"), "{answer}");
+        assert_eq!(answer["code"], json!("write_disabled"), "{answer}");
     }
     // The archived document is still the bytes the fixture holds.
     let read = json(

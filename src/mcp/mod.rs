@@ -6,7 +6,8 @@
 //!
 //! It is a thin adapter. [`crate::engine::Fleet::call`] computes every tool
 //! answer, and [`crate::api::write_refusal`] refuses every write name, so MCP
-//! cannot disagree with `janus rpc` or the CLI (§9.5).
+//! cannot disagree with `janus rpc` or the CLI (§9.5). The one write switch is
+//! the fleet's [`crate::api::Writes`], which `main` built from `--allow-write`.
 //!
 //! # Stdout discipline
 //!
@@ -31,12 +32,12 @@ use crate::mcp::protocol::{Error, Message};
 /// ends the loop; a failed write, such as a closed pipe, ends it too, because
 /// the client has stopped reading.
 ///
-/// `allow_write` travels to the shared refusal and changes no answer in this
-/// release: a write tool is refused in both modes (M6-7).
-pub fn run(fleet: &Fleet, allow_write: bool, input: &mut dyn BufRead, out: &mut dyn Write) {
+/// The write gate is not a parameter: it lives in the fleet, which `main` built
+/// from `--allow-write`, so there is one switch and no adapter can pass another
+/// value (M7-36).
+pub fn run(fleet: &Fleet, input: &mut dyn BufRead, out: &mut dyn Write) {
     let mut session = Session {
         fleet,
-        allow_write,
         initialized: false,
     };
     // One buffer, cleared per line: `read_line` appends, so a buffer that is
@@ -60,10 +61,9 @@ pub fn run(fleet: &Fleet, allow_write: bool, input: &mut dyn BufRead, out: &mut 
     }
 }
 
-/// One open session: the corpora, the flag, and the one handshake fact.
+/// One open session: the corpora and the one handshake fact.
 struct Session<'a> {
     fleet: &'a Fleet,
-    allow_write: bool,
     /// True once `initialize` has been answered.
     initialized: bool,
 }
@@ -103,7 +103,7 @@ impl Session<'_> {
             }
             "tools/call" => {
                 self.ready()?;
-                tools::call(self.fleet, params, self.allow_write)
+                tools::call(self.fleet, params, self.fleet.writes())
             }
             other => Err(Error::new(
                 protocol::METHOD_NOT_FOUND,

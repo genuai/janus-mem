@@ -636,7 +636,11 @@ fn is_hidden(name: &OsStr) -> bool {
 /// Case-insensitive because macOS and Windows filesystems are: `README.MD` is
 /// the same file as `readme.md` to the OS, so treating them differently would be
 /// a cross-platform bug (§8.7).
-fn is_markdown(name: &OsStr) -> bool {
+///
+/// The walk admits a document by this rule, and a write uses it as well: an
+/// etag is not a secret, so the extension is what keeps a write on a document
+/// (M7-52).
+pub fn is_markdown(name: &OsStr) -> bool {
     Path::new(name)
         .extension()
         .and_then(OsStr::to_str)

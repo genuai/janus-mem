@@ -18,7 +18,7 @@ use common::{
     write_document,
 };
 use janus_mem::api::dto::{FactsParams, LineageParams, ReadParams, SearchParams, StatusParams};
-use janus_mem::api::write_refusal;
+use janus_mem::api::{Writes, write_refusal};
 use janus_mem::index::store::Lock;
 use janus_mem::mcp::protocol::{INSTRUCTIONS, SUPPORTED_VERSIONS};
 use serde_json::{Value, json};
@@ -737,6 +737,10 @@ fn case_8_2_a_write_name_is_refused_by_the_shared_helper() {
     let dir = fixture_vault();
     let root = dir.path();
     index(root);
+    // This surface serves no write yet, so every name answers `write_disabled`
+    // in both modes, and the object is the shared helper's own: MCP did not
+    // re-implement the gate. The flag reaches this surface in the next PR of
+    // the phase, which serves it.
     for allow_write in [false, true] {
         let answers = mcp(root, allow_write, &write_script()).answers;
         assert_eq!(answers.len(), 5, "{answers:?}");
@@ -746,19 +750,20 @@ fn case_8_2_a_write_name_is_refused_by_the_shared_helper() {
             assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
             let envelope = mcp_envelope(answer);
             assert_eq!(envelope["ok"], json!(false), "{envelope}");
-            assert_eq!(envelope["code"], json!("refused"), "{envelope}");
-            let hint = envelope["hint"].as_str().expect("a hint");
-            assert!(hint.contains("M7"), "{hint}");
+            assert_eq!(envelope["code"], json!("write_disabled"), "{envelope}");
+            let message = envelope["message"].as_str().expect("a message");
+            assert!(message.contains("--allow-write"), "{message}");
             // The same object comes from the shared helper, so MCP did not
-            // re-implement the refusal.
-            let shared = write_refusal(name, allow_write).expect("a write name is refused");
+            // re-implement the gate.
+            let shared =
+                write_refusal(name, Writes::off("janus mcp")).expect("a write name is gated");
             assert_eq!(
                 envelope,
                 &serde_json::to_value(shared).expect("a failure is JSON")
             );
         }
     }
-    assert!(write_refusal("search", true).is_none());
+    assert!(write_refusal("search", Writes::off("janus mcp")).is_none());
 }
 
 /// The handshake and one call per write name.

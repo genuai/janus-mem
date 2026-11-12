@@ -31,12 +31,13 @@ use crate::error::JanusError;
 /// is not a legal request answers one failure line, and the loop continues, so
 /// one bad line never ends a session.
 ///
-/// `allow_write` travels to the shared refusal, and it changes no answer in
-/// this release: a write tool is refused in both modes (M6-7).
+/// The write gate is not a parameter: it lives in the fleet, which `main` built
+/// from `--allow-write`, so there is one switch and no adapter can pass another
+/// value (M7-36).
 ///
 /// End of input ends the loop. A failed write on stdout, such as a closed pipe,
 /// also ends it: the caller has stopped reading, and that is not an error.
-pub fn run(fleet: &Fleet, allow_write: bool, input: &mut dyn BufRead, out: &mut dyn Write) {
+pub fn run(fleet: &Fleet, input: &mut dyn BufRead, out: &mut dyn Write) {
     // One buffer, cleared per line: `read_line` appends, and a buffer that is
     // never cleared would answer the whole session's input at once.
     let mut line = String::new();
@@ -53,7 +54,7 @@ pub fn run(fleet: &Fleet, allow_write: bool, input: &mut dyn BufRead, out: &mut 
         if line.trim().is_empty() {
             continue;
         }
-        let (id, answer) = answer(fleet, &line, allow_write);
+        let (id, answer) = answer(fleet, &line);
         if respond(out, &id, &answer).is_err() {
             return;
         }
@@ -61,15 +62,16 @@ pub fn run(fleet: &Fleet, allow_write: bool, input: &mut dyn BufRead, out: &mut 
 }
 
 /// The echoed `id` and the answer object for one request line.
-fn answer(fleet: &Fleet, line: &str, allow_write: bool) -> (Value, Value) {
+fn answer(fleet: &Fleet, line: &str) -> (Value, Value) {
     let request = match request(line) {
         Ok(request) => request,
         // The line did not have the request shape, so there is no `id` to echo.
         Err(failure) => return (Value::Null, encode(&failure)),
     };
-    // A write name is refused before the tool table is consulted: the name is
-    // legal and the release is not (§3.8, case 5.8).
-    if let Some(failure) = write_refusal(&request.tool, allow_write) {
+    // A write name is refused before the tool table is consulted: either the
+    // surface has no `--allow-write`, or the phase that serves it has not landed
+    // (§3.8, case 5.8).
+    if let Some(failure) = write_refusal(&request.tool, fleet.writes()) {
         return (request.id, encode(&failure));
     }
     match Tool::parse(&request.tool) {
