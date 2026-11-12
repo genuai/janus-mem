@@ -534,6 +534,8 @@ exit 3 is used for the first time.
 | M7-42 | A null value's span is empty and sits directly after the key's colon; the rendered value carries its own separator space | §2.1 says the span starts at the value's first byte, and a null has no byte. The point after the colon keeps the spacing before a trailing comment where the file put it, so `status:  # none` becomes `status: superseded  # none` and not `status: superseded# none`. Wrong if a later phase needs to put a value anywhere but directly after the colon. |
 | M7-43 | A refusal costs one key, except a line at column 0 that is not a key | A quoted key, or a name with a space, is a real key that no patch can name: it is reported `Unsupported(Nested)` and left alone, and the other keys still splice. A column-0 line with no key at all means the block is not a mapping, so no key in it can be spliced safely and the whole block is refused. Wrong if a vault reports "cannot patch this file" for a file whose only oddity is one unreachable key. |
 | M7-44 | `changed_keys` names a key only when its bytes differ after the patch; an absent key always differs | A receipt describes bytes (M7-14), so a patch that writes the value the file already had reports no change and the same `old_hash` and `new_hash`. A caller can then tell "nothing to do" from "wrote something". Wrong if a caller needs a receipt to list a key it wrote with an unchanged value. |
+| M7-45 | `CommitOptions` carries the index directory that holds the lock, not the corpus root | `LOCK_FILE` lives wherever `index_dir` resolves, and `config::resolve_index_dir` lets a corpus move it out of `.janus`. A writer that joined `.janus` to the root itself would lock a different file than the builder for such a corpus, which is the two-locks-one-corpus failure M7-9 refuses. The caller resolves the directory once and passes it, so the commit still reads no config. Wrong if `index_dir` can never differ from `.janus`, in which case the field is one line the caller already holds. |
+| M7-46 | M7-3 lands as one PR at 328 logic and 366 test lines, against the phase ceiling of 300 and 450 | The logic is 202 lines of `commit.rs` and 99 of `atomic.rs`, plus the exports; 131 of those 301 lines are doc and line comments, and the sequence they describe is what a reviewer checks. Reaching 300 means deleting the reason the checks exist, and the seam (the atomic replace alone, 118 logic) is not taken because a second review for 28 lines costs more than it saves. Both numbers stay inside `AGENTS.md`'s 600/900. Wrong if a reviewer reports that this diff is too large to hold in one reading. |
 
 ## 5. Phases
 
@@ -624,8 +626,10 @@ Three things in the plan move with the split, and none of them silently:
 
 ### M7-3 — The atomic replace and the lock
 
-**Files.** `src/write/atomic.rs`, `src/write/commit.rs` (both new), `src/index/store.rs`
-(expose the lock for the writer), `tests/write_atomic.rs` (new).
+**Files.** `src/write/atomic.rs`, `src/write/commit.rs` (both new), `src/write/mod.rs` (the
+exports), `tests/write_atomic.rs` (new). `src/index/store.rs` is untouched: `Lock::acquire`,
+`LOCK_FILE` and `LOCK_TIMEOUT` were already public, so the writer reuses them and copies nothing
+(M7-9).
 
 **Build.** Temp file, `fsync`, `rename`, parent `fsync`, mode preserve; lock, re-read, verify,
 and the two `Hooks` seams (M7-33).
@@ -636,7 +640,10 @@ and the two `Hooks` seams (M7-33).
 changed after the pre-lock check and before the lock answers `conflict`, and the test proves
 it by removing the under-lock re-read and watching case 2.4a fail.
 
-**Split seam.** The atomic replace first, then the lock and the verification.
+**Split seam.** The atomic replace first, then the lock and the verification. Not taken: the
+phase measured 328 logic and 366 test lines, and M7-46 reports both.
+
+**Decisions.** M7-45 (the lock directory is passed, not derived) and M7-46 (the size).
 
 ### M7-4 — `update_frontmatter` and `janus set`
 
