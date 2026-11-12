@@ -39,6 +39,8 @@ pub struct Document {
     pub old_hash: Option<String>,
     /// Length of the old file; zero for a create.
     pub bytes_before: usize,
+    /// True when the old file had no block, so this write inserts one.
+    pub created_block: bool,
 }
 
 impl Document {
@@ -85,9 +87,11 @@ pub fn plan(
     text.push('\n');
     text.push_str(body);
 
-    let present: Vec<String> = existing
+    let old_scan = existing
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(|text| scan::scan(text).ok())
+        .and_then(|text| scan::scan(text).ok());
+    let created_block = old_scan.as_ref().is_none_or(|scan| scan.span.is_empty());
+    let present: Vec<String> = old_scan
         .map(|scan| scan.keys.into_iter().map(|span| span.key).collect())
         .unwrap_or_default();
     let changed_keys: Vec<String> = frontmatter.keys().cloned().collect();
@@ -103,6 +107,7 @@ pub fn plan(
         appended_keys,
         old_hash: existing.map(|bytes| Blake3Hash::of_bytes(bytes).to_hex()),
         bytes_before: existing.map_or(0, <[u8]>::len),
+        created_block,
     })
 }
 

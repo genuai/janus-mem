@@ -407,6 +407,10 @@ fn schema(tool: Tool) -> Value {
                     "description": "The content_hash a read returned. Required: without \
                                     it the call changes nothing."
                 },
+                "create_frontmatter": {
+                    "type": "boolean",
+                    "description": "Insert a block when the document has none. Default false."
+                },
                 "dry_run": {
                     "type": "boolean",
                     "description": "Report what would change and write nothing. Default false."

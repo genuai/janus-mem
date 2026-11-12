@@ -192,6 +192,8 @@ pub struct UpdateParams {
     pub patch: BTreeMap<String, Option<String>>,
     /// The etag a read returned. Required for a write that is not a dry run.
     pub expected_hash: Option<String>,
+    /// Insert a block when the document has none. Default false.
+    pub create_frontmatter: Option<bool>,
     /// Report what would change and write nothing.
     pub dry_run: Option<bool>,
 }
@@ -320,6 +322,8 @@ pub struct Receipt {
     pub bytes_before: usize,
     /// The file's length after the write, in bytes.
     pub bytes_after: usize,
+    /// True when this write inserted the frontmatter block.
+    pub created_block: bool,
 }
 
 /// The receipt of one `promote_document` call (§2.3, §3.7).

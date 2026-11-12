@@ -369,6 +369,7 @@ fn case_4_5_a_json_receipt_is_the_document_a_consumer_reads() {
             "bytes_after",
             "bytes_before",
             "changed_keys",
+            "created_block",
             "dry_run",
             "new_hash",
             "ok",
@@ -483,5 +484,36 @@ fn a_request_the_writer_cannot_mean_is_refused() {
     assert_eq!(
         fs::read_to_string(root.join("notes/one.md")).expect("the document"),
         ONE
+    );
+}
+
+// ─────────────────────────── creating a block (M7b-1) ──────────────────────
+
+#[test]
+fn case_1_6_set_create_frontmatter_adds_the_block() {
+    let dir = scratch();
+    let root = dir.path();
+    let input = "# Plain\n\nBody line.\n";
+    write_document(root, "notes/plain.md", input);
+    let before = hash(root, "notes/plain.md");
+    let (stdout, _) = ok(set(
+        root,
+        &[
+            "notes/plain.md",
+            "--expect-hash",
+            &before,
+            "--key",
+            "status=active",
+            "--create-frontmatter",
+            "--json",
+        ],
+    ));
+
+    let receipt: serde_json::Value =
+        serde_json::from_str(&stdout).expect("the receipt is one JSON object");
+    assert_eq!(receipt["created_block"], json!(true), "{receipt}");
+    assert_eq!(
+        fs::read_to_string(root.join("notes/plain.md")).expect("the written document"),
+        "---\nstatus: active\n---\n# Plain\n\nBody line.\n"
     );
 }
