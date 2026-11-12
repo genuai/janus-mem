@@ -580,6 +580,7 @@ exit 3 is used for the first time.
 | M7-53 | `write_document` writes frontmatter keys sorted, not in the JSON object's order | The request reaches the engine as a JSON object, and that map is ordered by key before the writer sees it; `update_frontmatter` has the same property. Sorting makes the block deterministic on every surface instead of depending on a parser feature. Wrong if a surface later preserves insertion order and a caller relies on it. |
 | M7-54 | M7-5 ships as one PR at 790 logic and 579 test lines; the create/overwrite seam does not put either half under the phase ceiling | The phase estimated ~180 and measured 790, because a create still needs the DTO, the engine branch, the MCP descriptor, the CLI command and the whole-file renderer. That shared work leaves the create half at about 660, over the repository's 600. The PR carries the `large-pr` label and these numbers. Wrong if the create half measures 250 or less after review, which would mean this row chose the wrong seam. |
 | M7-55 | `supersede` creates the new document with `create_new` rather than staging and renaming a temp file, and the cycle check simulates the proposed edge | This supersedes M7-19's second rename. M7-35 requires an existing `new_path` to answer `path_exists`, and `create_new` is the only guard no race can turn into an overwrite; a rename would replace the file the caller did not name. The old file is still restored from `Plan::original` with its mode (M7-31). With `new_path` absent, a cycle can only exist when the chain already reaches that path, so the check adds the edge and refuses when the new path reaches the old one. The cycle reuses the `unsupported_patch` code: the patch cannot be applied, and no ninth code is added. Wrong if a create leaves a file the caller did not name, or if a cycle that the call would close is written. |
+| M7-56 | M7-6 ships as one PR at 795 logic and 485 test lines, against the phase ceiling of 400 and 600 and `AGENTS.md`'s 600 and 900 | The split seam does not put either half under the ceiling: in-place carries the on-disk chain, the two-file transaction, the DTO, the engine branch, and the MCP, rpc and CLI surfaces, so it is about 760 logic lines alone. `chain.rs` is 245 lines and `supersede.rs` 125, and both are mostly the comments the public-item gate and the safety argument need. The PR carries the `large-pr` label and these numbers. Wrong if a reviewer reports that this diff cannot be held in one reading. |
 
 ## 5. Phases
 
@@ -880,6 +881,10 @@ resolver (M7-37) and by its cases 7.6–7.8.
 
 Estimates run two to three times low in this repository. Each phase names its split seam, and
 the agent splits before the ceiling rather than shaving a comment or dropping a test.
+
+M7-6 measured **795 logic and 485 test lines** against `main` (M7-56). The in-place
+half carries the chain, the transaction and every surface, so the seam above does not
+bring it under 400; the numbers are reported and the PR carries `large-pr`.
 
 M7-5 measured **790 logic and 579 test lines** against `main` (M7-54). The create half alone
 would be about 660, because the DTO, the engine branch, the MCP descriptor, the CLI command and
