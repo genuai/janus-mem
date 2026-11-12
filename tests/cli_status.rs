@@ -84,13 +84,6 @@ fn case_9_1_before_the_first_build_every_index_fact_is_null() {
 fn case_9_2_a_built_index_reports_the_manifest_and_goes_stale() {
     let dir = fixture_vault();
     let root = dir.path();
-    // The refusal of writes belongs to this phase, whatever the config says.
-    let config = fs::read_to_string(root.join("janus.toml")).expect("the config");
-    fs::write(
-        root.join("janus.toml"),
-        format!("{config}\n[mcp]\nallow_write = true\n"),
-    )
-    .expect("enable writes in the config");
     common::index(root);
 
     let built = manifest(root);
@@ -102,7 +95,9 @@ fn case_9_2_a_built_index_reports_the_manifest_and_goes_stale() {
     assert_eq!(fresh["index"]["built_at"], built["built_at"]);
     assert_eq!(fresh["index"]["format_version"], built["format_version"]);
     assert_eq!(fresh["index"]["index_sha"], built["index_sha"]);
-    assert_eq!(fresh["writes_enabled"], json!(false), "M6 serves no write");
+    // A status command writes nothing, so it reports no write capability. The
+    // server surfaces report the flag's value (case 4.3 of the M7 plan).
+    assert_eq!(fresh["writes_enabled"], json!(false));
 
     // One edit makes the generation stale, and status still builds nothing.
     let payload = fs::read(root.join(".janus/index.bin")).expect("the built index");

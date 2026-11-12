@@ -134,7 +134,7 @@ fn case_9_2_initialize_ships_the_instructions_verbatim() {
         "When a note turns out to matter, it is time to promote it. Ask the user to restate it as a principle, a spec or a decision, with its own date. A promoted note keeps answering questions after the note itself would have faded.\n\n",
         "Tags say what a file is about. The type says how much it counts.\n\n",
         "search gives you spans and scores. read_document gives you the words.\n\n",
-        "This release reads. It does not write."
+        "update_frontmatter changes frontmatter keys and returns a receipt. It needs expected_hash: the content_hash of a read of that document. Without it the call changes nothing and answers precondition_required; with a stale one it answers conflict. A server started without --allow-write refuses every write."
     );
     assert_eq!(INSTRUCTIONS, EXPECTED);
     let dir = fixture_vault();
@@ -717,18 +717,32 @@ fn case_7_10_a_retired_node_carries_no_hash() {
 // ──────────────────────────────── refusal ──────────────────────────────────
 
 #[test]
-fn case_8_1_no_write_tool_is_listed_in_either_mode() {
+fn case_8_1_the_write_tool_is_listed_only_when_the_server_serves_writes() {
     let dir = scratch("list", "notes/one.md", DECISION);
-    for allow_write in [false, true] {
-        let tools = listed(dir.path(), allow_write);
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|tool| tool["name"].as_str().expect("a name"))
-            .collect();
-        assert_eq!(names, WIRE_ORDER, "allow_write = {allow_write}");
-        for write in WRITE_NAMES {
-            assert!(!names.contains(&write), "{write} must not be listed");
-        }
+
+    // Without the flag the five read tools are the whole list: a client cannot
+    // discover a write it would be refused (M7-4).
+    let plain = listed(dir.path(), false);
+    let names: Vec<&str> = plain
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names, WIRE_ORDER);
+
+    // With the flag the one served write tool joins them, last.
+    let served = listed(dir.path(), true);
+    let names: Vec<&str> = served
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("a name"))
+        .collect();
+    let mut expected = WIRE_ORDER.to_vec();
+    expected.push("update_frontmatter");
+    assert_eq!(names, expected);
+
+    // The three whose phases have not landed are listed in neither mode.
+    let unlanded = ["write_document", "supersede_document", "promote_document"];
+    for write in unlanded {
+        assert!(!names.contains(&write), "{write} must not be listed");
     }
 }
 
@@ -737,33 +751,55 @@ fn case_8_2_a_write_name_is_refused_by_the_shared_helper() {
     let dir = fixture_vault();
     let root = dir.path();
     index(root);
-    // This surface serves no write yet, so every name answers `write_disabled`
-    // in both modes, and the object is the shared helper's own: MCP did not
-    // re-implement the gate. The flag reaches this surface in the next PR of
-    // the phase, which serves it.
-    for allow_write in [false, true] {
-        let answers = mcp(root, allow_write, &write_script()).answers;
-        assert_eq!(answers.len(), 5, "{answers:?}");
-        for (index, name) in WRITE_NAMES.iter().enumerate() {
-            let answer = &answers[index + 1];
-            assert!(answer.get("error").is_none(), "{answer}");
-            assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
-            let envelope = mcp_envelope(answer);
-            assert_eq!(envelope["ok"], json!(false), "{envelope}");
-            assert_eq!(envelope["code"], json!("write_disabled"), "{envelope}");
-            let message = envelope["message"].as_str().expect("a message");
-            assert!(message.contains("--allow-write"), "{message}");
-            // The same object comes from the shared helper, so MCP did not
-            // re-implement the gate.
-            let shared =
-                write_refusal(name, Writes::off("janus mcp")).expect("a write name is gated");
-            assert_eq!(
-                envelope,
-                &serde_json::to_value(shared).expect("a failure is JSON")
-            );
-        }
+    let writes = |allowed| Writes::new("janus mcp", allowed, false);
+    // The three names whose phases have not landed.
+    const UNLANDED: [&str; 3] = ["write_document", "supersede_document", "promote_document"];
+
+    // Without the flag every write name answers `write_disabled`.
+    let answers = mcp(root, false, &write_script()).answers;
+    assert_eq!(answers.len(), 5, "{answers:?}");
+    for (index, name) in WRITE_NAMES.iter().enumerate() {
+        let envelope = mcp_envelope(&answers[index + 1]);
+        assert_eq!(envelope["ok"], json!(false), "{envelope}");
+        assert_eq!(envelope["code"], json!("write_disabled"), "{envelope}");
+        // The same object comes from the shared helper, so MCP did not
+        // re-implement the gate.
+        let shared = write_refusal(name, writes(false)).expect("a write name is refused");
+        assert_eq!(
+            envelope,
+            &serde_json::to_value(shared).expect("a failure is JSON")
+        );
     }
-    assert!(write_refusal("search", Writes::off("janus mcp")).is_none());
+
+    // With the flag the unlanded three are still refused, and the served one
+    // reaches the engine: an empty request is a usage failure, not a refusal.
+    let script: String = UNLANDED
+        .iter()
+        .enumerate()
+        .map(|(index, name)| mcp_call(index as u64 + 2, name, json!({})))
+        .collect();
+    let answers = mcp(root, true, &format!("{}{script}", mcp_opening())).answers;
+    for (name, answer) in UNLANDED.iter().zip(&answers[1..]) {
+        let envelope = mcp_envelope(answer);
+        assert_eq!(envelope["code"], json!("refused"), "{name}: {envelope}");
+        let shared = write_refusal(name, writes(true)).expect("an unlanded write is refused");
+        assert_eq!(
+            envelope,
+            &serde_json::to_value(shared).expect("a failure is JSON")
+        );
+    }
+    // `update_frontmatter` left that list in M7-4: with the flag it reaches the
+    // tool schema, so a request with no `path` is a parameter error and not a
+    // refusal.
+    let script = format!(
+        "{}{}",
+        mcp_opening(),
+        mcp_call(2, "update_frontmatter", json!({}))
+    );
+    let answer = mcp(root, true, &script).answers[1].clone();
+    assert_eq!(answer["error"]["code"], json!(-32602), "{answer}");
+    assert!(write_refusal("update_frontmatter", writes(true)).is_none());
+    assert!(write_refusal("search", writes(true)).is_none());
 }
 
 /// The handshake and one call per write name.

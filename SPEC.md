@@ -1163,7 +1163,7 @@ A process may cache one loaded generation, and only one: the payload of `index.b
 
 ### 9.2 MCP read tools
 
-The `initialize` result carries an `instructions` string that describes the type ladder and the rule for promoting a note.
+The `initialize` result carries an `instructions` string that describes the type ladder and the rule for promoting a note. It also names the write tool and the etag rule, because an agent that reads a false capability line will not call the tool that exists (M7-29).
 
 | Tool | Params | Returns |
 |---|---|---|
@@ -1196,7 +1196,7 @@ MCP reads inherit the index refresh and the refusal. They expose no `--no-rebuil
   "cache": { "hits": 2, "misses": 1 } }
 ```
 
-Before the first build, `index.present` is `false` and every other `index` field is `null`. While the index is stale because the config changed, the report also carries `index.stale_reason`: `"config"` when the config is the only cause, `"corpus,config"` when both moved. The field is absent when the index is fresh, and absent when only the corpus changed, so those answers keep the shape they had before M7-1. A process keeps the config it started with, so a long-lived server reports the config mismatch until it restarts; its reads adopt a generation the file agrees with and publish nothing (M7-41). `embeddings.available` answers "can this process embed a query now", so it comes from the resolved embedder. `embeddings.model` answers "what produced the stored vectors", so it comes from the manifest. The two may disagree: a binary with embeddings compiled out can read stored vectors and cannot embed a query. `writes_enabled` is `false` until M7 adds a writer. A status call never builds and never takes the writer lock, so an agent can ask "is this fresh?" while another process holds the index.
+Before the first build, `index.present` is `false` and every other `index` field is `null`. While the index is stale because the config changed, the report also carries `index.stale_reason`: `"config"` when the config is the only cause, `"corpus,config"` when both moved. The field is absent when the index is fresh, and absent when only the corpus changed, so those answers keep the shape they had before M7-1. A process keeps the config it started with, so a long-lived server reports the config mismatch until it restarts; its reads adopt a generation the file agrees with and publish nothing (M7-41). `embeddings.available` answers "can this process embed a query now", so it comes from the resolved embedder. `embeddings.model` answers "what produced the stored vectors", so it comes from the manifest. The two may disagree: a binary with embeddings compiled out can read stored vectors and cannot embed a query. `writes_enabled` is true only when this surface was started with `--allow-write` **and** the corpus is not `read_only` (M7-16). A config key cannot set it (M7-36). A status call never builds and never takes the writer lock, so an agent can ask "is this fresh?" while another process holds the index.
 
 In a workspace the answer gains `workspace` and `corpora`: the workspace file's path, and one row per corpus with its `id`, `role`, `root`, `read_only`, `index_dir`, `config_present`, `index_present` and `index_stale`. The rows are the ones `janus corpora` prints, read the same way: one manifest per corpus and one walk only for the digest. Nothing is built and no lock is taken. Both fields are absent in single-corpus mode, so that answer keeps its shape. The head fields describe the primary corpus, which is the corpus an unqualified read names. A workspace's `id` and a corpus's declared `corpus_id` are two names for the same corpus; the head reports `corpus_id` and the rows report `id`, so a reader sees both when they differ.
 
@@ -1683,7 +1683,7 @@ batch_size = 32
 alpha = 0.5                    # semantic weight; clamped to [0, 1], 0.0 = lexical only
 
 [mcp]
-allow_write = false
+# `allow_write` is ignored: only `--allow-write` gates a server surface (M7-36).
 max_chars = 4000
 ```
 

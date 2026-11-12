@@ -554,6 +554,11 @@ impl Config {
             });
         }
 
+        // `[mcp] allow_write` is read so an existing config still parses, and it
+        // decides nothing (M7-36). One warning says so.
+        if raw.mcp.allow_write == Some(true) {
+            warnings.push(ConfigWarning::WriteSettingIgnored);
+        }
         Self {
             corpus_id,
             index_dir,
@@ -580,7 +585,6 @@ impl Config {
                 alpha,
             },
             mcp: McpConfig {
-                allow_write: raw.mcp.allow_write.unwrap_or(false),
                 max_chars: raw.mcp.max_chars.unwrap_or(4000),
             },
             links: LinksConfig {
@@ -764,11 +768,13 @@ pub struct LinksConfig {
 }
 
 /// MCP-server parameters (§9.3). Consumed in M6.
+///
+/// There is deliberately no write switch here. `--allow-write` is the one
+/// switch, it is read at the edge, and it arrives in [`crate::api::Writes`], so
+/// no field of a config can look like it grants a write (M7-36, D4). The raw
+/// key is still read, to warn about it and nothing else.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McpConfig {
-    /// Whether write tools are exposed at all. Off unless explicitly enabled
-    /// (D4).
-    pub allow_write: bool,
     /// Response size cap protecting the agent's context window.
     pub max_chars: usize,
 }
@@ -996,6 +1002,10 @@ pub enum ConfigWarning {
         /// The configured value.
         value: String,
     },
+    /// `[mcp] allow_write` cannot enable a write. The flag alone gates a server
+    /// surface, because one decision with two switches is one switch too many
+    /// (M7-36, D4).
+    WriteSettingIgnored,
     /// `[decay] undated` was neither `median` nor `none`; the resolved config
     /// uses `median`.
     UnknownUndatedDecay {
@@ -1045,6 +1055,11 @@ impl fmt::Display for ConfigWarning {
             Self::UnknownUndatedDecay { value } => write!(
                 f,
                 "`decay.undated` is `{value}`; expected `median` or `none`, so `median` is used"
+            ),
+            Self::WriteSettingIgnored => write!(
+                f,
+                "`[mcp] allow_write` is ignored; a server serves writes only when it is started \
+                 with --allow-write, so remove the key"
             ),
         }
     }
@@ -1822,7 +1837,31 @@ mod tests {
             "#,
         );
 
-        assert!(!config.mcp.allow_write);
+        // `allow_write = false` is the only value the release obeys, so it earns
+        // no line; the key is tolerated like every unknown key (§16.1).
+        assert_eq!(config.mcp.max_chars, 4000);
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
+    }
+
+    #[test]
+    fn case_4_6_the_ignored_write_key_warns_once_and_decides_nothing() {
+        let ignored = parse("[mcp]\nallow_write = true\n");
+        assert_eq!(
+            ignored
+                .warnings
+                .iter()
+                .filter(|warning| matches!(warning, ConfigWarning::WriteSettingIgnored))
+                .count(),
+            1,
+            "{:?}",
+            ignored.warnings
+        );
+        // The value leaves no trace in the resolved config, because there is no
+        // field to carry it: a later phase cannot read a setting that decides
+        // nothing (M7-36).
+        assert_eq!(ignored.mcp.max_chars, 4000);
+        // `false` is not worth a line: it is the only value the release obeys.
+        assert!(parse("[mcp]\nallow_write = false\n").warnings.is_empty());
     }
 
     #[test]

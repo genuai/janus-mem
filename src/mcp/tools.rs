@@ -35,10 +35,19 @@ const LISTED: [Tool; 5] = [
 
 /// The answer to one `tools/list` request.
 ///
-/// The write tool joins the five read tools only when the surface serves writes.
+/// The write tool joins the five read tools only when the surface serves writes
+/// **to the primary corpus**, which is the corpus an unqualified write names
+/// (M7-49). `enabled` is the rule, not the flag: a read-only primary would make
+/// every call to an advertised tool answer `read_only_corpus`. A client that
+/// discovers no write tool cannot call one it was not offered, and a list that
+/// advertises a refused name teaches a model to ignore the list.
 #[must_use]
-pub fn descriptors() -> Value {
-    let tools: Vec<Value> = LISTED.iter().map(|tool| descriptor(*tool)).collect();
+pub fn descriptors(writes: Writes) -> Value {
+    let mut listed: Vec<Tool> = LISTED.to_vec();
+    if writes.enabled() {
+        listed.push(Tool::UpdateFrontmatter);
+    }
+    let tools: Vec<Value> = listed.iter().map(|tool| descriptor(*tool)).collect();
     json!({ "tools": tools })
 }
 
