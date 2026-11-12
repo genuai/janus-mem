@@ -47,7 +47,7 @@ before the first line of write code.
 4. Optimistic concurrency on `expected_hash`, on every surface.
 5. `update_frontmatter`, `write_document`, `supersede_document`, `promote_document` over
    MCP and `janus rpc`, and `janus set`, `janus write`, `janus supersede`, `janus promote`.
-6. Receipts, and eight new public error codes.
+6. Receipts, and nine new public error codes.
 7. `--allow-write` as a real gate, and `writes_enabled` as a real capability flag.
 8. The config hash in the manifest, because the writer resolves type from config and the
    index caches it (gate defect, 2026-11-10).
@@ -168,6 +168,7 @@ order they were written.
 | `Conflict { path, expected, current }` | `conflict` | 3 | the etag does not match the bytes on disk |
 | `PreconditionRequired { path, preview }` | `precondition_required` | 3 | a write on an existing file carried no etag |
 | `UnsupportedPatch { path, key, reason }` | `unsupported_patch` | 4 | the key's shape is outside the closed list |
+| `SupersessionCycle { cycle }` | `cycle` | 4 | the proposed supersession would close a cycle |
 | `NoFrontmatter { path }` | `no_frontmatter` | 4 | no block, and `create_frontmatter` is false |
 | `ReadOnlyCorpus { corpus }` | `read_only_corpus` | 4 | the corpus is archived or `read_only` |
 | `WriteDisabled { surface }` | `write_disabled` | 4 | the surface was started without `--allow-write` |
@@ -177,7 +178,8 @@ order they were written.
 Exit 3 is used for the first time. Both new exit-3 codes mean one thing: re-read, then retry.
 A write that fails a shape check is a refusal (exit 4), because a retry without a change of
 request cannot succeed. `path_exists` is a refusal for the same reason: a retry with the same
-request cannot succeed.
+request cannot succeed. `cycle` is a refusal because the target must change, not the shape of
+a key.
 
 ### 2.5 The manifest (`src/index/store.rs`)
 
@@ -514,7 +516,7 @@ working.
 ### 3.9 What must not change
 
 1. Every read golden stays byte-identical, except the MCP `instructions` golden (case 4.4).
-2. `format_version` stays 6. `api` stays 1. No exit code moves; eight codes are added, and
+2. `format_version` stays 6. `api` stays 1. No exit code moves; nine codes are added, and
 exit 3 is used for the first time.
 3. No new dependency.
 4. A read never takes the writer lock.
@@ -579,7 +581,7 @@ exit 3 is used for the first time.
 | M7-52 | A write needs a `.md` or `.markdown` target; a Markdown file that `[index] exclude` keeps out of search stays writable | An etag is not a secret: a caller can hash any file, so `expected_hash` cannot be what keeps a write on a document. The extension is the corpus's own admission rule (`vault::is_markdown`), and a write uses it, so a copied document under `.txt` is refused with `usage`. The exclude rule shapes the index, not the corpus's documents: a draft kept out of search is still a file the user may edit, and refusing it would make an index setting decide a write. Wrong if a user needs to write a document whose extension the walk does not admit. |
 | M7-53 | `write_document` writes frontmatter keys sorted, not in the JSON object's order | The request reaches the engine as a JSON object, and that map is ordered by key before the writer sees it; `update_frontmatter` has the same property. Sorting makes the block deterministic on every surface instead of depending on a parser feature. Wrong if a surface later preserves insertion order and a caller relies on it. |
 | M7-54 | M7-5 ships as one PR at 790 logic and 579 test lines; the create/overwrite seam does not put either half under the phase ceiling | The phase estimated ~180 and measured 790, because a create still needs the DTO, the engine branch, the MCP descriptor, the CLI command and the whole-file renderer. That shared work leaves the create half at about 660, over the repository's 600. The PR carries the `large-pr` label and these numbers. Wrong if the create half measures 250 or less after review, which would mean this row chose the wrong seam. |
-| M7-55 | `supersede` creates the new document with `create_new` rather than staging and renaming a temp file, and the cycle check simulates the proposed edge | This supersedes M7-19's second rename. M7-35 requires an existing `new_path` to answer `path_exists`, and `create_new` is the only guard no race can turn into an overwrite; a rename would replace the file the caller did not name. The old file is still restored from `Plan::original` with its mode (M7-31). With `new_path` absent, a cycle can only exist when the chain already reaches that path, so the check adds the edge and refuses when the new path reaches the old one. The cycle reuses the `unsupported_patch` code: the patch cannot be applied, and no ninth code is added. Wrong if a create leaves a file the caller did not name, or if a cycle that the call would close is written. |
+| M7-55 | `supersede` creates the new document with `create_new` rather than staging and renaming a temp file, and the cycle check simulates the proposed edge | This supersedes M7-19's second rename. M7-35 requires an existing `new_path` to answer `path_exists`, and `create_new` is the only guard no race can turn into an overwrite; a rename would replace the file the caller did not name. The old file is still restored from `Plan::original` with its mode (M7-31). With `new_path` absent, a cycle can only exist when the chain already reaches that path, so the check adds the edge and refuses when the new path reaches the old one. The cycle has its own `cycle` code, because the caller must change the target, not the shape of a key. Wrong if a create leaves a file the caller did not name, or if a cycle that the call would close is written. |
 | M7-56 | M7-6 ships as one PR at 795 logic and 485 test lines, against the phase ceiling of 400 and 600 and `AGENTS.md`'s 600 and 900 | The split seam does not put either half under the ceiling: in-place carries the on-disk chain, the two-file transaction, the DTO, the engine branch, and the MCP, rpc and CLI surfaces, so it is about 760 logic lines alone. `chain.rs` is 245 lines and `supersede.rs` 125, and both are mostly the comments the public-item gate and the safety argument need. The PR carries the `large-pr` label and these numbers. Wrong if a reviewer reports that this diff cannot be held in one reading. |
 
 ## 5. Phases
@@ -758,7 +760,7 @@ the cycle check), `src/engine.rs`, `src/api/dto.rs`, `src/mcp/tools.rs`, `src/rp
 `src/cli.rs`, `src/main.rs`, `tests/cli_supersede.rs` (new).
 
 **Build.** Plan two, keep both originals, stage two, rename old then new, roll back from the
-original bytes on a failed second rename. The cycle check reads frontmatter on disk and follows
+original bytes on a failed second write, the create. The cycle check reads frontmatter on disk and follows
 paths, bounded to 64 nodes, so it needs no index (M7-34). `--append-only` creates the new
 document and leaves the old one untouched.
 
@@ -848,7 +850,7 @@ The one measured product claim M7 makes is W4: **0 of 1** paths today, **1 of 1*
    **1 of 1** case; after one read, the new type answers and `status` is fresh, in **1 of 1**.
 7. Cross-corpus resolution: a promoted link is readable through `get_lineage` in **1 of 1**
    case, and `doctor` reports **0** `other_corpus` rows for it.
-8. `format_version` **6**, `api` **1**, **0** exit codes moved, **8** codes added and documented,
+8. `format_version` **6**, `api` **1**, **0** exit codes moved, **9** codes added and documented,
    of which **2** carry the newly used exit 3.
 9. `cargo doc --no-deps`: **0** warnings.
 10. Retrieval: **0** claims. A writer cannot move a ranking number, so no row of this plan asks

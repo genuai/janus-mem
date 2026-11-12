@@ -244,7 +244,7 @@ fn case_6_4_a_cycle_is_refused_before_staging() {
         ),
         4,
     );
-    assert_eq!(failure["code"], json!("unsupported_patch"), "{failure}");
+    assert_eq!(failure["code"], json!("cycle"), "{failure}");
     let message = failure["message"].as_str().expect("a message");
     for path in ["notes/old.md", "tools/bridge.md", "tools/new.md"] {
         assert!(message.contains(path), "{message} must name {path}");

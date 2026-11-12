@@ -71,10 +71,14 @@ impl ApiCode {
                 exit: 3,
             },
             // Refusals: a retry without a change of request cannot succeed.
-            // A cycle makes the proposed patch unsupported, so it carries the
-            // same code and exit as any other refused patch shape.
-            JanusError::UnsupportedPatch { .. } | JanusError::SupersessionCycle { .. } => Self {
+            JanusError::UnsupportedPatch { .. } => Self {
                 code: "unsupported_patch",
+                exit: 4,
+            },
+            // A cycle is its own refusal: the caller must change the target,
+            // not the shape of a key.
+            JanusError::SupersessionCycle { .. } => Self {
+                code: "cycle",
                 exit: 4,
             },
             JanusError::KeyShape { .. } => Self {
