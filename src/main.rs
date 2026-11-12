@@ -267,6 +267,9 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // In a workspace it also lists every corpus the workspace names.
         Command::Status { json } => {
             let fleet = status_fleet(workspace, cli.vault, Writes::off("janus status"))?;
+            // `status` is the command a person runs to ask "can this write?", so
+            // a config warning belongs here too, once, on stderr (case 4.6).
+            print_config_warnings(&fleet);
             call_tool(
                 &fleet,
                 Tool::Status,
@@ -314,11 +317,15 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         // failure exits before the loop starts; every failure after that is an
         // answer, so a client never loses its session (§3.6).
         Command::Mcp { allow_write } => {
-            // The MCP surface serves its writes in the next PR of this phase, so
-            // this arm hands the fleet no write yet. The flag is read and named
-            // here so the switch has one place to change.
-            let _ = allow_write;
-            let fleet = resolve_fleet(workspace, cli.vault, false, Writes::off("janus mcp"))?;
+            let fleet = resolve_fleet(
+                workspace,
+                cli.vault,
+                false,
+                Writes::new("janus mcp", allow_write, false),
+            )?;
+            // A server states its config warnings when a read builds a
+            // generation, which is where `search::prepare` prints them. Printing
+            // them here too would say the same line twice in one session.
             mcp::run(
                 &fleet,
                 &mut std::io::stdin().lock(),
@@ -766,6 +773,24 @@ fn command_name(command: &Command) -> &'static str {
         Command::Lineage { .. } => "lineage",
         Command::Chunks { .. } => "chunks",
         _ => "command",
+    }
+}
+
+/// Writes every config warning of this fleet to stderr, once each.
+///
+/// A command calls this at most once, so no warning is printed twice in one run,
+/// and two corpora that carry the same warning do not repeat it. The lines are
+/// diagnostics: stdout stays the report or the protocol (§3.10).
+fn print_config_warnings(fleet: &Fleet) {
+    let mut lines: Vec<String> = fleet
+        .config_warnings()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    lines.sort();
+    lines.dedup();
+    for line in lines {
+        eprintln!("warning: {line}");
     }
 }
 

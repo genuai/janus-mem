@@ -453,11 +453,13 @@ fn case_3_5_a_write_tool_is_refused_whatever_the_corpus_says() {
         &["status", "--workspace", &workspace(dir.path()), "--json"],
     );
     assert_eq!(report["corpora"][1]["read_only"], json!(false));
-    assert_eq!(report["writes_enabled"], json!(false), "M6 serves no write");
+    // The status command writes nothing, so it reports no write capability.
+    assert_eq!(report["writes_enabled"], json!(false));
 
-    // This surface serves no write yet, so the name is gated rather than
-    // refused for its phase.
-    for allow_write in [false, true] {
+    // A server without the flag refuses the name; with the flag the name is
+    // legal and its phase has not landed, so it is refused on its own account
+    // (M6-7, M7-4).
+    for (allow_write, expected) in [(false, "write_disabled"), (true, "refused")] {
         let answer = mcp(
             dir.path(),
             allow_write,
@@ -465,7 +467,7 @@ fn case_3_5_a_write_tool_is_refused_whatever_the_corpus_says() {
             json!({ "path": SHARED, "body": "rewritten" }),
         );
         assert_eq!(answer["ok"], json!(false), "{answer}");
-        assert_eq!(answer["code"], json!("write_disabled"), "{answer}");
+        assert_eq!(answer["code"], json!(expected), "{answer}");
     }
     // The archived document is still the bytes the fixture holds.
     let read = json(

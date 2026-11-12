@@ -99,7 +99,7 @@ impl Session<'_> {
             "ping" => Ok(json!({})),
             "tools/list" => {
                 self.ready()?;
-                Ok(tools::descriptors())
+                Ok(tools::descriptors(self.fleet.writes()))
             }
             "tools/call" => {
                 self.ready()?;

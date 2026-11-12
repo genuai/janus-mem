@@ -37,7 +37,7 @@ use crate::api::dto::{
 };
 use crate::api::{ApiCode, Call, Failure, Receipt, Tool, Writes};
 use crate::clock::Clock;
-use crate::config::{self, Config};
+use crate::config::{self, Config, ConfigWarning};
 use crate::error::JanusError;
 use crate::index::embed::Embedder;
 use crate::index::refresh::Signature;
@@ -49,7 +49,7 @@ use crate::search;
 use crate::search::federate::{self, Choice, Target};
 use crate::status;
 use crate::vault::{self, WalkOptions};
-use crate::workspace::Workspace;
+use crate::workspace::{Role, Workspace};
 use crate::write::{self, CommitError, CommitOptions, NoHooks, Patch, PatchError, Plan};
 
 /// What one call returned: the envelope, and the code when it failed (M6 §2.3).
@@ -524,6 +524,18 @@ impl Fleet {
                 engine: OnceLock::new(),
             });
         }
+        // The fleet's own value describes the primary, because that is the
+        // corpus an unqualified write names and the one `tools/list` describes.
+        // A capability the list advertises must be one that corpus accepts, or
+        // every call to the advertised tool answers `read_only_corpus` (M7-16,
+        // M7-49).
+        let writes = found
+            .corpora
+            .iter()
+            .find(|corpus| corpus.role == Role::Primary)
+            .map_or(writes, |corpus| {
+                Writes::new(writes.surface, writes.allowed, corpus.read_only)
+            });
         Ok(Self {
             members,
             workspace: Some(found.clone()),
@@ -536,6 +548,18 @@ impl Fleet {
     #[must_use]
     pub const fn writes(&self) -> Writes {
         self.writes
+    }
+
+    /// Every config warning the corpora of this fleet carry, in corpus order.
+    ///
+    /// `janus mcp` prints these once at startup, because a server has no other
+    /// moment to tell a client about its own config (case 4.6).
+    #[must_use]
+    pub fn config_warnings(&self) -> Vec<&ConfigWarning> {
+        self.members
+            .iter()
+            .flat_map(|member| member.config.warnings.iter())
+            .collect()
     }
 
     /// The corpora one selection reads, and the note about the ones it left out.
