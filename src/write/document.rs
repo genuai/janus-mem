@@ -23,7 +23,7 @@ use crate::vault;
 use super::PatchError;
 use super::atomic::{self, Mode};
 use super::commit::{self, CommitError, CommitOptions, Committed};
-use super::scan::{self, is_patch_key};
+use super::scan::{self, Scan, ValueShape, is_patch_key};
 use super::value::render_value;
 
 /// The whole file a request asks for, and the facts a receipt reports.
@@ -31,7 +31,7 @@ use super::value::render_value;
 pub struct Document {
     /// The bytes to write, as text.
     pub text: String,
-    /// Every key the request wrote, sorted.
+    /// Keys whose bytes differ after the write, sorted.
     pub changed_keys: Vec<String>,
     /// Keys the old file did not have, sorted. Every key for a create.
     pub appended_keys: Vec<String>,
@@ -39,7 +39,8 @@ pub struct Document {
     pub old_hash: Option<String>,
     /// Length of the old file; zero for a create.
     pub bytes_before: usize,
-    /// True when the old file had no block, so this write inserts one.
+    /// True when the old file had no block, so this write inserts one. A block
+    /// that cannot be read is not one that was absent.
     pub created_block: bool,
 }
 
@@ -54,9 +55,11 @@ impl Document {
 /// Builds the whole file, or refuses a key that cannot be a line.
 ///
 /// `existing` is the old bytes, when the file exists. It decides
-/// `appended_keys` and the old hash: a whole-file write replaces everything
-/// else. Bytes that are not UTF-8 have no readable keys, so every key counts as
-/// appended and the hash still describes the bytes the caller saw.
+/// `changed_keys`, `appended_keys` and the old hash: a whole-file write
+/// replaces everything else. The old keys are read with the scanner, so a key's
+/// bytes are the bytes the file has, quoting included (M7b-11). Bytes that are
+/// not UTF-8 have no readable keys, so every key counts as changed and
+/// appended, and the hash still describes the bytes the caller saw.
 ///
 /// # Errors
 ///
@@ -74,32 +77,39 @@ pub fn plan(
         }
     }
 
+    let old_text = existing.and_then(|bytes| std::str::from_utf8(bytes).ok());
+    let old_scan = old_text.and_then(|text| scan::scan(text).ok());
+    // A block that cannot be read is not a block that was absent (M7b-20).
+    let created_block = match &old_scan {
+        Some(scan) => scan.span.is_empty(),
+        None => existing.is_none(),
+    };
+
     let mut text = String::with_capacity(body.len() + 32);
     text.push_str(scan::FENCE);
     text.push('\n');
+    // A `BTreeMap` iterates in key order, so both lists come out sorted.
+    let mut changed_keys = Vec::with_capacity(frontmatter.len());
+    let mut appended_keys = Vec::new();
     for (key, value) in frontmatter {
+        let rendered = render_value(value.as_deref());
         text.push_str(key);
         text.push_str(": ");
-        text.push_str(&render_value(value.as_deref()));
+        text.push_str(&rendered);
         text.push('\n');
+        match old_value(old_scan.as_ref(), old_text, key) {
+            // The key's bytes are already the bytes the write renders.
+            OldValue::Bytes(old) if old == rendered => {}
+            OldValue::Bytes(_) | OldValue::Unreadable => changed_keys.push(key.clone()),
+            OldValue::Missing => {
+                changed_keys.push(key.clone());
+                appended_keys.push(key.clone());
+            }
+        }
     }
     text.push_str(scan::FENCE);
     text.push('\n');
     text.push_str(body);
-
-    let old_scan = existing
-        .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .and_then(|text| scan::scan(text).ok());
-    let created_block = old_scan.as_ref().is_none_or(|scan| scan.span.is_empty());
-    let present: Vec<String> = old_scan
-        .map(|scan| scan.keys.into_iter().map(|span| span.key).collect())
-        .unwrap_or_default();
-    let changed_keys: Vec<String> = frontmatter.keys().cloned().collect();
-    let appended_keys: Vec<String> = changed_keys
-        .iter()
-        .filter(|key| !present.iter().any(|name| name == *key))
-        .cloned()
-        .collect();
 
     Ok(Document {
         text,
@@ -109,6 +119,39 @@ pub fn plan(
         bytes_before: existing.map_or(0, <[u8]>::len),
         created_block,
     })
+}
+
+/// What the old block holds for one key.
+enum OldValue<'a> {
+    /// The value bytes the scanner found, for a byte comparison.
+    Bytes(&'a str),
+    /// The key is in the block, but its bytes cannot be called unchanged: the
+    /// scanner refused the shape, or a trailing comment would be dropped.
+    Unreadable,
+    /// The block holds no such key, or holds no readable key at all.
+    Missing,
+}
+
+/// Reads one key from the old block.
+///
+/// A block the scanner refuses holds no readable key, so every key answers
+/// [`OldValue::Missing`]. A key the scanner refuses answers
+/// [`OldValue::Unreadable`], as does a line whose trailing comment the
+/// re-render would drop. Both report a change: a receipt that under-reports a
+/// change is worse than one that over-reports (M7b-20).
+fn old_value<'a>(scan: Option<&Scan>, text: Option<&'a str>, key: &str) -> OldValue<'a> {
+    let (Some(scan), Some(text)) = (scan, text) else {
+        return OldValue::Missing;
+    };
+    match scan.keys.iter().find(|span| span.key == key) {
+        None => OldValue::Missing,
+        Some(span)
+            if matches!(span.shape, ValueShape::Unsupported(_)) || span.value.comment.is_some() =>
+        {
+            OldValue::Unreadable
+        }
+        Some(span) => OldValue::Bytes(&text[span.value.start..span.value.end]),
+    }
 }
 
 /// The file a create would write, resolved inside the corpus.

@@ -499,3 +499,240 @@ fn m7_5_a_create_keeps_the_stdout_free_of_diagnostics() {
     assert_eq!(lines[2], "appended    title", "{stdout}");
     assert!(!stdout.contains("warning"), "{stdout}");
 }
+
+// ──────────────────────────── receipt accuracy ─────────────────────────────
+
+/// The value bytes one key holds, as this test reads them.
+///
+/// The test's own reader, not the writer's: it compares two files, so the
+/// receipt is checked against the bytes and not against the code that made them.
+fn value_of(text: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}: ");
+    text.lines()
+        .find(|line| line.starts_with(&prefix))
+        .map(|line| line[prefix.len()..].to_owned())
+}
+
+/// The requested keys whose value bytes differ between two files, sorted.
+fn differing(before: &str, after: &str, keys: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = keys
+        .iter()
+        .filter(|key| value_of(before, key) != value_of(after, key))
+        .map(|key| (*key).to_owned())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The requested keys `before` does not hold, sorted because `keys` is.
+fn appended(before: &str, keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .filter(|key| value_of(before, key).is_none())
+        .map(|key| (*key).to_owned())
+        .collect()
+}
+
+#[test]
+fn case_3_1_write_document_reports_only_the_keys_whose_bytes_differ() {
+    let dir = scratch();
+    let root = dir.path();
+    let before = "---\ntitle: Old\nowner: \"Ann\"\nstatus: active\n---\n\n# Old\n";
+    write_document(root, "notes/old.md", before);
+    let answer = rpc(
+        root,
+        json!({
+            "path": "notes/old.md",
+            "frontmatter": {
+                "title": "Old",
+                "owner": "Ann",
+                "status": "superseded",
+                "tag": "new",
+            },
+            "body": "\n# Old\n",
+            "mode": "overwrite",
+            "expected_hash": hash(root, "notes/old.md"),
+        }),
+    );
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    let after = fs::read_to_string(root.join("notes/old.md")).expect("the written document");
+    // `title` keeps its bytes; `owner` loses its quotes; `status` changes value;
+    // `tag` was absent. The test decides that, not the receipt.
+    let requested = ["owner", "status", "tag", "title"];
+    assert_eq!(
+        differing(before, &after, &requested),
+        ["owner", "status", "tag"]
+    );
+    assert_eq!(
+        answer["changed_keys"],
+        json!(differing(before, &after, &requested)),
+        "{answer}"
+    );
+    assert_eq!(
+        answer["appended_keys"],
+        json!(appended(before, &requested)),
+        "{answer}"
+    );
+    assert_eq!(answer["appended_keys"], json!(["tag"]), "{answer}");
+}
+
+#[test]
+fn case_3_2_a_key_rewritten_with_the_same_bytes_is_in_neither_list() {
+    let dir = scratch();
+    let root = dir.path();
+    let text = "---\nstatus: active\ntitle: Old\n---\n# Old\n";
+    write_document(root, "notes/old.md", text);
+    let before = hash(root, "notes/old.md");
+    let answer = rpc(
+        root,
+        json!({
+            "path": "notes/old.md",
+            "frontmatter": { "status": "active", "title": "Old" },
+            "body": "# Old\n",
+            "mode": "overwrite",
+            "expected_hash": before,
+        }),
+    );
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    assert_eq!(answer["changed_keys"], json!([]), "{answer}");
+    assert_eq!(answer["appended_keys"], json!([]), "{answer}");
+    // The whole file kept its bytes, so the two hashes agree.
+    assert_eq!(answer["old_hash"], json!(before), "{answer}");
+    assert_eq!(answer["new_hash"], json!(before), "{answer}");
+    assert_eq!(
+        fs::read_to_string(root.join("notes/old.md")).expect("the document"),
+        text
+    );
+}
+
+#[test]
+fn case_3_3_a_created_block_reports_every_key_as_appended() {
+    let dir = scratch();
+    let root = dir.path();
+    let before = "no frontmatter here\n";
+    write_document(root, "notes/plain.md", before);
+    let answer = rpc(
+        root,
+        json!({
+            "path": "notes/plain.md",
+            "frontmatter": { "title": "New", "status": "active" },
+            "body": before,
+            "mode": "overwrite",
+            "expected_hash": hash(root, "notes/plain.md"),
+        }),
+    );
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    assert_eq!(answer["created_block"], json!(true), "{answer}");
+    assert_eq!(
+        answer["changed_keys"],
+        json!(["status", "title"]),
+        "{answer}"
+    );
+    assert_eq!(
+        answer["appended_keys"],
+        json!(["status", "title"]),
+        "{answer}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("notes/plain.md")).expect("the document"),
+        "---\nstatus: active\ntitle: New\n---\nno frontmatter here\n"
+    );
+}
+
+#[test]
+fn case_3_4_the_receipt_lists_are_sorted_and_deduplicated() {
+    let dir = scratch();
+    let root = dir.path();
+    write_document(root, "notes/old.md", "---\ntitle: Old\n---\n# Old\n");
+    // The request names its keys out of order on purpose.
+    let fm = frontmatter(
+        root,
+        "frontmatter.yaml",
+        "zeta: last\nmu: middle\nalpha: first\n",
+    );
+    let stdout = ok(write_command(
+        root,
+        &[
+            "notes/old.md",
+            "--frontmatter",
+            fm.to_str().expect("a UTF-8 path"),
+            "--body",
+            "-",
+            "--overwrite",
+            "--expect-hash",
+            &hash(root, "notes/old.md"),
+            "--json",
+        ],
+        Some(b"# Old\n"),
+    ));
+    let receipt: Value = serde_json::from_str(&stdout).expect("the receipt is one JSON object");
+    assert_eq!(
+        receipt["changed_keys"],
+        json!(["alpha", "mu", "zeta"]),
+        "{receipt}"
+    );
+    assert_eq!(
+        receipt["appended_keys"],
+        json!(["alpha", "mu", "zeta"]),
+        "{receipt}"
+    );
+}
+
+#[test]
+fn m7b_20_a_block_the_scanner_refuses_reports_every_key_as_changed() {
+    let dir = scratch();
+    let root = dir.path();
+    // A key defined twice, and a line with no key. Neither block can be read as
+    // keys, so the writer must not claim that `title` kept its bytes. The first
+    // still holds `title`, so it appends nothing; the second holds no readable
+    // key. Neither file is reported as having had no block.
+    let cases: [(&str, &[String]); 2] = [
+        ("---\ntitle: Old\ntitle: Older\n---\n# Old\n", &[]),
+        (
+            "---\ntitle: Old\nstray value\n---\n# Old\n",
+            &["title".to_owned()],
+        ),
+    ];
+    for (before, appended) in cases {
+        write_document(root, "notes/old.md", before);
+        let answer = rpc(
+            root,
+            json!({
+                "path": "notes/old.md",
+                "frontmatter": { "title": "Old" },
+                "body": "# Old\n",
+                "mode": "overwrite",
+                "expected_hash": hash(root, "notes/old.md"),
+            }),
+        );
+        assert_eq!(answer["ok"], json!(true), "{answer}");
+        assert_eq!(answer["changed_keys"], json!(["title"]), "{answer}");
+        assert_eq!(answer["appended_keys"], json!(appended), "{answer}");
+        assert_eq!(answer["created_block"], json!(false), "{answer}");
+    }
+}
+
+#[test]
+fn m7b_20_a_dropped_trailing_comment_reports_a_change() {
+    let dir = scratch();
+    let root = dir.path();
+    let before = "---\nstatus: active  # current\n---\n# Old\n";
+    write_document(root, "notes/old.md", before);
+    let answer = rpc(
+        root,
+        json!({
+            "path": "notes/old.md",
+            "frontmatter": { "status": "active" },
+            "body": "# Old\n",
+            "mode": "overwrite",
+            "expected_hash": hash(root, "notes/old.md"),
+        }),
+    );
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    // The value bytes are the same, but the line loses its comment.
+    assert_eq!(answer["changed_keys"], json!(["status"]), "{answer}");
+    assert_eq!(
+        fs::read_to_string(root.join("notes/old.md")).expect("the document"),
+        "---\nstatus: active\n---\n# Old\n"
+    );
+}
