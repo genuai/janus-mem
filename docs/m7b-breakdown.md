@@ -209,8 +209,9 @@ existing keys are patched, and `created_block` is `false`.
 bytes, and `changed_keys` is empty.
 
 **Case 2.2.** The same bare value (`status: active`) written again changes **0** bytes and reports
-`changed_keys: []`. A request is a value, not a rendering: `"active"` with the quote characters in
-it is a different string, and it writes.
+`changed_keys: []`. A request is a value, not a rendering: the quote characters are part of it, so
+it writes. The case uses `title`, because a checked key refuses a string the reader cannot
+interpret (case 4.2, M7b-21).
 
 **Case 2.3.** A value with a trailing comment (`status: active  # current`) patched to `active`
 keeps the comment and changes **0** bytes.
@@ -265,7 +266,11 @@ it. The registry stays open.
 **Case 4.6.** A key the config does not interpret (`owner=café`) is stored unchanged.
 
 **Case 4.7.** Validation applies to every write path: `update_frontmatter`, `write_document`,
-`supersede` (both documents) and `promote` (the adopted copy and the created block).
+`supersede` (both documents) and `promote` (the adopted copy and the created block). Only the first
+two take a key from the caller, so the refused value is proved end to end there. `supersede` writes
+`status` and `superseded_by`, and `promote` writes `supersedes`, so those four paths cannot be
+handed a refused value. They are proved to still write a document that already holds one, because a
+write validates the request and not the bytes (M7b-21).
 
 ### 3.5 What must not change
 
@@ -288,7 +293,7 @@ it. The registry stays open.
 | M7b-6 | `created_block` is a new receipt field, additive, `api` stays 1 | A caller that cannot tell "patched" from "created the block" cannot report the change to a user. |
 | M7b-7 | Validation covers `status` and the three date keys, and nothing else | Those four are the keys the config interprets and a caller can get wrong. Every other key is the user's. |
 | M7b-8 | `type` is not validated; an unknown type keeps its name and `doctor` reports it | Types are an open registry (D34, §6.3). Closing it on write is a product decision, and this milestone is a bug fix. |
-| M7b-9 | The accepted date set is derived from `parse_date`; `null` is accepted on `status` and on the three date keys | A write must not be stricter than a read of the same file. `status: null` reads as the default today, so refusing it on write would be the asymmetry this row forbids. |
+| M7b-9 | The accepted date set is derived from `parse_date`; `null` is accepted on `status` and on the three date keys; `status` is the one key where a write is stricter than a read | A write must not be stricter than a read of a date: the accepted date forms are the parser's, so they cannot drift. `status` is the exception, because the ladder is closed: an unrecognised status reads as `unknown`, and a write refuses it rather than storing a name the reader cannot name. `status: null` reads as the default today, so refusing it on write would be the asymmetry this row forbids. |
 | M7b-10 | A refused value is `invalid_value`, exit 4 | The request is well formed and the value is not storable. A bad key name is already exit 4; a bad value cannot be exit 2. |
 | M7b-11 | `changed_keys` means "bytes differ" in every writer, `write_document` included | A whole-file write re-renders the block, so a key it re-quotes does differ in bytes and does appear. The receipt reports what changed, not what was written. |
 | M7b-12 | `plan` and `plan_document` gain a `&Config` | Resolving an alias and reading a value back needs the registry and the aliases. They stay pure: no file is read. |
@@ -300,6 +305,7 @@ it. The registry stays open.
 | M7b-18 | The `&Config` threading ships in the comparison's commit, not its own | An unused parameter fails `clippy -D warnings`, so a threading-only commit cannot pass the gate. This amends the Phase 2 split seam. |
 | M7b-19 | A request for `null` over an empty span is a no-op (case 2.10), which supersedes the second half of case 1.11 | An empty span already reads as null, so the request changes no value. |
 | M7b-20 | `write_document` reports a key as changed when the scanner refuses the block or the key, and when the line carries a trailing comment the re-render would drop. A block that cannot be read is not a block that was absent, so `created_block` is `false` for a file that has bytes | The writer cannot compare bytes it cannot read, so it does not claim they are unchanged. A whole-file write drops the comment, so the line does change. A receipt that says the file had no block when it did is the same defect as one that says a key changed when it did not. |
+| M7b-21 | Case 4.7 is proved at two call sites, not six, and cases 2.2 and the two-rejected-dates half of the value-equality cases move to a free key | Only `update_frontmatter` and `write_document` accept a key from the caller; `supersede` and `promote` write keys they build. Both planners carry the check, so all six paths inherit it. The tests refuse the value end to end through the two free-key paths, and prove the other four still write a document that already holds a refused value. A checked key can no longer store an arbitrary string, so those two equality cases use `title`. Proof that the check is load-bearing: delete it from `plan` and case 4.1 fails; delete it from `plan_document` and the `write` half of case 4.7 fails. Reviewable at M8. |
 
 ## 5. Phases
 
@@ -452,4 +458,12 @@ its split seam and splits before its ceiling.
 
 ## 12. Implementation logs
 
-Empty. One entry per phase, appended when the phase merges.
+The last three entries were written after their phases merged, from the numbers each pull request
+reported. The M7b-4 entry was written as it merged.
+
+| Phase | Logic | Tests | What it changed |
+|---|---|---|---|
+| M7b-1 `create_frontmatter` | 40 | 300 | A write can create a block; the rehearsal drops from 46 refusals to 43. |
+| M7b-2 value equality | 167 | 376 | 64 of 200 same-value writes changed a byte before value equality, 0 after. |
+| M7b-3 receipt accuracy | 80 | 227 | `changed_keys` comes from the old block, and `created_block` stops claiming a block was created when the old one could not be read. |
+| M7b-4 validation | 176 | 398 | The four interpreted keys refuse a value the reader cannot interpret, on every write path. The rehearsal's status-keyed shapes ask for a real status, because the check now runs before the scanner. |

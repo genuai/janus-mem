@@ -258,6 +258,23 @@ A retired tree does not belong in this file. It is one entry in a
 `workspace.toml`, as rule 1 states, and `janus corpora` reports it beside the
 corpus this file configures.
 
+## Write only values a reader can interpret
+
+A write checks four keys: `status`, `date`, `effective_from` and `effective_to`. It
+refuses a value the reader cannot interpret, answers `invalid_value`, exits 4, and
+leaves the file as it was.
+
+| key | a write takes |
+|---|---|
+| `status` | `active`, `draft`, `superseded`, `deprecated`, `unknown`, in any case, or `null` |
+| `date`, `effective_from`, `effective_to` | any date the reader parses: `YYYY-MM-DD`, or the date part of an ISO-8601 timestamp; or `null` |
+
+A month such as `2026-11` is not a date here, because the reader would drop it and
+fall through to the file name. Every other key is yours. `type` is never checked:
+an unknown type keeps its name, ranks at the fallback weight, and `doctor` reports
+it, so a corpus of `runbook` or `retro` documents needs no config change to be
+writable.
+
 ## What this document does not decide
 
 - **No default moves.** The guide names the levers; the built-in defaults stay as

@@ -52,6 +52,7 @@ mod patch;
 mod promote;
 mod scan;
 mod supersede;
+mod validate;
 mod value;
 
 pub use atomic::{Mode, replace, sync_parent_dir};
@@ -66,6 +67,7 @@ pub use promote::{PromoteError, Source, adopted, check_link};
 pub use scan::reason;
 pub use scan::{KeySpan, Scan, ValueShape, ValueSpan, is_patch_key, scan};
 pub use supersede::commit_pair;
+pub use validate::{ACCEPTED_DATE, ACCEPTED_STATUS, validate};
 pub use value::render_value;
 
 use thiserror::Error;
@@ -107,4 +109,19 @@ pub enum PatchError {
     /// The document has no frontmatter block and the request did not ask for one.
     #[error("the document has no frontmatter; create it first or ask for one")]
     NoFrontmatter,
+    /// The request writes a value the reader cannot interpret for a key the
+    /// config interprets (§2.4, M7b-10).
+    ///
+    /// A retry with the same request cannot succeed, so this is a refusal. The
+    /// message names the key, the value and the accepted set, because the
+    /// caller must choose a different value.
+    #[error("`{key}` = {value:?} is not a value a read accepts: use {accepted}")]
+    InvalidValue {
+        /// The key the request names.
+        key: String,
+        /// The value the request asks for, or `null`.
+        value: String,
+        /// The values the key accepts, in a reader's words.
+        accepted: &'static str,
+    },
 }

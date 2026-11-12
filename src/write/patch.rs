@@ -17,6 +17,7 @@ use crate::id::Blake3Hash;
 use crate::vault::frontmatter::parse_date;
 
 use super::scan::{self, Scan, ValueShape};
+use super::validate;
 use super::value::render_value;
 
 /// One request to change frontmatter keys.
@@ -65,7 +66,8 @@ pub struct Plan {
 /// Plans the new bytes for `patch` against `text`, or refuses.
 ///
 /// `config` resolves a key to the field whose reader decides whether the value a
-/// request asks for is the value the file already holds. No file is read.
+/// request asks for is the value the file already holds, and which values the
+/// writer may store. No file is read.
 ///
 /// A refusal returns no bytes at all, so a caller that treats `Err` as "do not
 /// write" cannot write a half-patched file (I3).
@@ -83,10 +85,14 @@ pub fn plan(text: &str, config: &Config, patch: &Patch) -> Result<Plan, PatchErr
             });
         }
     }
-    for (key, _) in &keys {
+    for (key, value) in &keys {
         if !scan::is_patch_key(key) {
             return Err(PatchError::KeyShape { key: key.clone() });
         }
+        // The request's own shape first, then the document's. A value the reader
+        // cannot interpret is refused before any byte is planned, so no writer
+        // can store one (M7b-7).
+        validate::validate(config, key, value.as_deref())?;
     }
 
     let scan = scan::scan(text)?;

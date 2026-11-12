@@ -532,7 +532,7 @@ impl Engine {
     ) -> Result<Receipt, JanusError> {
         let found = write::document_target(&self.root, named)
             .map_err(|error| commit_refusal(named, error))?;
-        let document = write::plan_document(&params.frontmatter, &params.body, None)
+        let document = write::plan_document(&self.config, &params.frontmatter, &params.body, None)
             .map_err(|error| patch_refusal(named, error))?;
         let receipt = document_receipt(&self.root, &found, &document, dry_run);
         // A preview of a request that cannot succeed is misleading, so an
@@ -570,8 +570,13 @@ impl Engine {
             path: named.to_path_buf(),
             source,
         })?;
-        let document = write::plan_document(&params.frontmatter, &params.body, Some(&bytes))
-            .map_err(|error| patch_refusal(named, error))?;
+        let document = write::plan_document(
+            &self.config,
+            &params.frontmatter,
+            &params.body,
+            Some(&bytes),
+        )
+        .map_err(|error| patch_refusal(named, error))?;
         check_etag(
             named,
             params.expected_hash.as_deref(),
@@ -663,7 +668,7 @@ impl Engine {
             frontmatter.insert("title".to_owned(), Some(title.clone()));
         }
         frontmatter.insert("supersedes".to_owned(), Some(old_rel.clone()));
-        let new_document = write::plan_document(&frontmatter, "", None)
+        let new_document = write::plan_document(&self.config, &frontmatter, "", None)
             .map_err(|error| patch_refusal(&new_named, error))?;
 
         let old_hash = old_plan.as_ref().map_or_else(
@@ -1469,6 +1474,18 @@ fn patch_refusal(path: &Path, error: PatchError) -> JanusError {
         },
         PatchError::NoFrontmatter => JanusError::NoFrontmatter {
             path: path.to_path_buf(),
+        },
+        // The value is refused, not the request: the caller must choose another
+        // value, and a retry with the same one cannot succeed (M7b-10).
+        PatchError::InvalidValue {
+            key,
+            value,
+            accepted,
+        } => JanusError::InvalidValue {
+            path: path.to_path_buf(),
+            key,
+            value,
+            accepted,
         },
     }
 }
