@@ -73,8 +73,9 @@ the corpus by walking up from the current directory.
 ## Connect an agent over MCP
 
 janus-mem speaks the Model Context Protocol on stdio. The server offers five read tools:
-`search`, `get_lineage`, `get_authoritative_facts`, `read_document` and `janus_status`.
-Register it once in your controller:
+`search`, `get_lineage`, `get_authoritative_facts`, `read_document` and `janus_status`, and
+the four write tools when you start it with `--allow-write`. Register it once in your
+controller:
 
 ```json
 { "mcpServers": { "janus-mem": {
@@ -118,10 +119,39 @@ Most vaults have far fewer dates than their owners expect. A vault with no dates
 searches well. Its answers are flat, and `--as-of` has little to say. Dates and links are
 the difference between a search engine and a knowledge engine.
 
+## Write one key safely
+
+janus can change frontmatter keys and leave every other byte alone.
+
+```bash
+ETAG=$("$JANUS" --vault "$VAULT" read notes/adr-0007.md --json | jq -r .content_hash)
+"$JANUS" --vault "$VAULT" set notes/adr-0007.md --expect-hash "$ETAG" --key status=superseded
+```
+
+**A write needs the etag.** `read` returns a `content_hash`. Pass it as `--expect-hash`. If
+the file changed after your read, the write answers `conflict` and writes nothing. Add
+`--dry-run` to see the receipt without touching the file.
+
+**A server needs a flag.** `janus mcp` and `janus rpc` serve the four write tools only when
+you start them with `--allow-write`. A typed command is the consent, so `set`, `write`,
+`supersede` and `promote` need no flag.
+
+**What it refuses.** A value it cannot replace without guessing: a block sequence, a flow
+mapping, a multi-line scalar, an anchor, an alias, or a key that appears twice. Also a key
+outside `[A-Za-z0-9][A-Za-z0-9._-]*`, and a document with no frontmatter block. A refusal
+names the key and the reason, and the file keeps its bytes.
+
+**What a receipt tells you.** The keys that changed, the keys it added, the hash before and
+after, and the byte count. The `new_hash` is the `--expect-hash` of your next write.
+`--json` prints the same receipt as one object.
+
+`write` replaces a whole file. `supersede` retires one document and records its successor in
+one call. `promote` links a document that lives in another corpus.
+
 ## What it does not do yet
 
-- **No writes.** janus never edits your Markdown. Writes arrive in M7, behind an explicit
-  flag and a hash check. `--allow-write` is accepted and has no effect until then.
+- **No deletes, no version bumps.** A write changes a value. Removing a key, and changing a
+  document's `doc_version`, are not in this release.
 - **macOS and Linux.** Windows builds, but is not tested.
 - **Speed is not the selling point.** Expect about a second per query on a few thousand
   documents. This is a known gap, and it is on the M8 list.
