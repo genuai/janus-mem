@@ -17,7 +17,7 @@ use janus_mem::config::{Config, Field};
 use janus_mem::document::{DocNote, FrontmatterSpan};
 use janus_mem::id::Blake3Hash;
 use janus_mem::vault::frontmatter;
-use janus_mem::write::{self, Patch, PatchError, ValueShape};
+use janus_mem::write::{self, Patch, PatchError, Plan, ValueShape};
 use proptest::prelude::*;
 
 /// The committed fixture vault, relative to the crate root.
@@ -587,7 +587,8 @@ proptest! {
 #[test]
 fn case_1_1_patch_replaces_one_span_and_nothing_else() {
     let input = fixture("notes/block-sequence.md");
-    let plan = write::plan(&input, &patch(&[("status", Some("superseded"))])).expect("in budget");
+    let plan = write::plan(&input, &config(), &patch(&[("status", Some("superseded"))]))
+        .expect("in budget");
 
     assert_eq!(
         plan.text,
@@ -637,7 +638,12 @@ fn case_1_2_crlf_is_kept_and_the_appended_line_is_crlf() {
     assert!(input.contains("\r\n"), "the fixture must be CRLF");
 
     // One existing value: the byte delta is the value delta, CRLF count equal.
-    let plan = write::plan(&input, &patch(&[("written_by", Some("rehearsal"))])).expect("scalar");
+    let plan = write::plan(
+        &input,
+        &config(),
+        &patch(&[("written_by", Some("rehearsal"))]),
+    )
+    .expect("scalar");
     assert_eq!(
         plan.bytes_after as i64 - plan.bytes_before as i64,
         "rehearsal".len() as i64 - "fixture-generator".len() as i64
@@ -656,6 +662,7 @@ fn case_1_2_crlf_is_kept_and_the_appended_line_is_crlf() {
     // One appended key: exactly one more CRLF, and the line ends with CRLF.
     let plan = write::plan(
         &input,
+        &config(),
         &patch(&[("superseded_by", Some("specs/2026-01-01-new.md"))]),
     )
     .expect("append");
@@ -681,7 +688,8 @@ fn case_1_3_bom_stays_at_byte_zero() {
     let input = fixture("notes/bom-note.md");
     assert!(input.starts_with('\u{feff}'));
 
-    let plan = write::plan(&input, &patch(&[("status", Some("superseded"))])).expect("append");
+    let plan =
+        write::plan(&input, &config(), &patch(&[("status", Some("superseded"))])).expect("append");
     assert_eq!(
         plan.text,
         "\u{feff}---
@@ -702,7 +710,8 @@ This file starts with a UTF-8 BOM, which must not be part of the YAML block.
 #[test]
 fn case_1_4_trailing_comment_and_its_spaces_survive() {
     let input = fixture("notes/quoted-scalars.md");
-    let plan = write::plan(&input, &patch(&[("status", Some("superseded"))])).expect("scalar");
+    let plan =
+        write::plan(&input, &config(), &patch(&[("status", Some("superseded"))])).expect("scalar");
 
     assert_eq!(
         plan.text,
@@ -727,7 +736,8 @@ re-emitted `motto` would have to re-escape it perfectly or change its value.
 #[test]
 fn case_1_5_block_sequence_is_refused_and_the_input_is_unchanged() {
     let input = fixture("notes/block-sequence.md");
-    let error = write::plan(&input, &patch(&[("tags", Some("splice"))])).expect_err("refused");
+    let error =
+        write::plan(&input, &config(), &patch(&[("tags", Some("splice"))])).expect_err("refused");
 
     assert_eq!(
         error,
@@ -768,7 +778,7 @@ fn case_1_6_multiline_flow_mapping_anchor_and_alias_are_refused_with_their_own_r
 
     for (rel, key, reason) in cases {
         let input = fixture(rel);
-        match write::plan(&input, &patch(&[(key, Some("replacement"))])) {
+        match write::plan(&input, &config(), &patch(&[(key, Some("replacement"))])) {
             Ok(plan) => panic!(
                 "{rel} {key} was accepted, expected {reason}:\n{}",
                 plan.text
@@ -788,8 +798,12 @@ fn case_1_6_multiline_flow_mapping_anchor_and_alias_are_refused_with_their_own_r
 #[test]
 fn case_1_7_duplicate_top_level_key_is_refused() {
     let duplicated = "---\nstatus: active\nstatus: superseded\n---\nbody\n";
-    let error =
-        write::plan(duplicated, &patch(&[("status", Some("retired"))])).expect_err("refused");
+    let error = write::plan(
+        duplicated,
+        &config(),
+        &patch(&[("status", Some("retired"))]),
+    )
+    .expect_err("refused");
     assert_eq!(
         error,
         PatchError::UnsupportedShape {
@@ -800,7 +814,8 @@ fn case_1_7_duplicate_top_level_key_is_refused() {
 
     // A duplicate elsewhere costs its own key, not the whole file.
     let elsewhere = "---\ntitle: Duplicate tag\ntags: [a]\ntags: [b]\nstatus: active\n---\nbody\n";
-    let plan = write::plan(elsewhere, &patch(&[("status", Some("retired"))])).expect("other keys");
+    let plan = write::plan(elsewhere, &config(), &patch(&[("status", Some("retired"))]))
+        .expect("other keys");
     assert_eq!(
         plan.text,
         "---\ntitle: Duplicate tag\ntags: [a]\ntags: [b]\nstatus: retired\n---\nbody\n"
@@ -811,12 +826,14 @@ fn case_1_7_duplicate_top_level_key_is_refused() {
 fn case_1_8_flow_sequence_of_scalars_is_replaceable() {
     // The flow mapping next to it keeps its bytes.
     let input = fixture("notes/flow-mapping.md");
-    let plan = write::plan(&input, &patch(&[("status", Some("superseded"))])).expect("scalar");
+    let plan =
+        write::plan(&input, &config(), &patch(&[("status", Some("superseded"))])).expect("scalar");
     assert!(plan.text.contains("owner: {name: me, team: infra}\n"));
 
     // A flow sequence is a scalar list on one line, so one splice replaces it.
     let input = fixture("specs/crlf-spec.md");
-    let plan = write::plan(&input, &patch(&[("labels", Some("crlf"))])).expect("flow sequence");
+    let plan =
+        write::plan(&input, &config(), &patch(&[("labels", Some("crlf"))])).expect("flow sequence");
     assert!(plan.text.contains("labels: crlf\r\n"));
     assert!(!plan.text.contains("line-endings"));
     assert_eq!(typed(&plan.text).tags, ["crlf"]);
@@ -826,7 +843,8 @@ fn case_1_8_flow_sequence_of_scalars_is_replaceable() {
 #[test]
 fn case_1_9_absent_key_is_appended_before_the_fence() {
     let input = fixture("notes/undated.md");
-    let plan = write::plan(&input, &patch(&[("status", Some("active"))])).expect("append");
+    let plan =
+        write::plan(&input, &config(), &patch(&[("status", Some("active"))])).expect("append");
 
     assert_eq!(
         plan.text,
@@ -849,6 +867,7 @@ identity stable across checkouts.
     // Two absent keys land in sorted order, not request order.
     let plan = write::plan(
         &input,
+        &config(),
         &patch(&[("status", Some("active")), ("superseded_by", None)]),
     )
     .expect("append");
@@ -862,12 +881,13 @@ identity stable across checkouts.
 #[test]
 fn case_1_10_no_frontmatter_is_refused_unless_creation_is_asked_for() {
     let input = fixture("notes/2025-03-07-no-frontmatter.md");
-    let error = write::plan(&input, &patch(&[("status", Some("active"))])).expect_err("refused");
+    let error =
+        write::plan(&input, &config(), &patch(&[("status", Some("active"))])).expect_err("refused");
     assert_eq!(error, PatchError::NoFrontmatter);
 
     let mut creating = patch(&[("status", Some("active"))]);
     creating.create_frontmatter = true;
-    let plan = write::plan(&input, &creating).expect("created");
+    let plan = write::plan(&input, &config(), &creating).expect("created");
     assert_eq!(
         plan.text,
         "\
@@ -882,7 +902,7 @@ This file has no YAML block at all. Its date comes from the filename prefix.
 
     // A BOM stays before the new block, and the body is untouched.
     let with_bom = "\u{feff}# Title\n\nBody line.\n";
-    let plan = write::plan(with_bom, &creating).expect("created");
+    let plan = write::plan(with_bom, &config(), &creating).expect("created");
     assert_eq!(
         plan.text,
         "\u{feff}---\nstatus: active\n---\n# Title\n\nBody line.\n"
@@ -898,7 +918,7 @@ fn case_1_10_an_unclosed_fence_is_body_and_a_created_block_goes_before_it() {
     let mut creating = patch(&[("type", Some("note"))]);
     creating.create_frontmatter = true;
 
-    let plan = write::plan(input, &creating).expect("created");
+    let plan = write::plan(input, &config(), &creating).expect("created");
     assert_eq!(plan.text, "---\ntype: note\n---\n---\njust a body line\n");
     assert_reads_as_frontmatter(&plan.text);
     assert_eq!(typed(&plan.text).r#type.as_deref(), Some("note"));
@@ -907,7 +927,8 @@ fn case_1_10_an_unclosed_fence_is_body_and_a_created_block_goes_before_it() {
 #[test]
 fn case_1_11_empty_value_is_a_null_and_is_replaceable() {
     let input = "---\ntitle: Empty value\nstatus:\n---\nbody\n";
-    let plan = write::plan(input, &patch(&[("status", Some("active"))])).expect("null value");
+    let plan =
+        write::plan(input, &config(), &patch(&[("status", Some("active"))])).expect("null value");
     assert_eq!(
         plan.text,
         "---\ntitle: Empty value\nstatus: active\n---\nbody\n"
@@ -916,9 +937,15 @@ fn case_1_11_empty_value_is_a_null_and_is_replaceable() {
     // With a trailing comment, the value goes before the spacing and the
     // comment keeps its place.
     let input = "---\nstatus:  # none yet\n---\nbody\n";
-    let plan = write::plan(input, &patch(&[("status", None)])).expect("null value");
-    assert_eq!(plan.text, "---\nstatus: null  # none yet\n---\nbody\n");
+    let plan = write::plan(input, &config(), &patch(&[("status", Some("active"))])).expect("value");
+    assert_eq!(plan.text, "---\nstatus: active  # none yet\n---\nbody\n");
     assert_reads_as_frontmatter(&plan.text);
+
+    // An empty span already reads as null, so a request for null changes
+    // nothing (case 2.10).
+    let plan = write::plan(input, &config(), &patch(&[("status", None)])).expect("null value");
+    assert_eq!(plan.text, input);
+    assert!(plan.changed_keys.is_empty());
 }
 
 #[test]
@@ -980,7 +1007,7 @@ fn case_1_12_written_values_read_back_through_the_typed_reader() {
 /// Plans one value into a document and reads it back through the typed reader.
 fn assert_value_round_trips(value: &str) {
     let input = "---\ntitle: Round trip\nstatus: active\n---\nbody\n";
-    let plan = write::plan(input, &patch(&[("status", Some(value))]))
+    let plan = write::plan(input, &config(), &patch(&[("status", Some(value))]))
         .unwrap_or_else(|err| panic!("value {value:?} was refused: {err}"));
     assert_eq!(
         typed(&plan.text).status.as_deref(),
@@ -1065,7 +1092,7 @@ fn case_1_12c_key_outside_the_pattern_is_refused() {
         "a b",
         "ü",
     ] {
-        let error = write::plan(&input, &patch_with_key(key)).expect_err("refused");
+        let error = write::plan(&input, &config(), &patch_with_key(key)).expect_err("refused");
         assert_eq!(
             error,
             PatchError::KeyShape {
@@ -1112,8 +1139,12 @@ fn case_1_13_every_accepted_patch_rereads_as_frontmatter_and_body() {
             .iter()
             .find(|key| matches!(key.shape, ValueShape::Scalar | ValueShape::FlowSequence))
             .unwrap_or_else(|| panic!("{rel} has no patchable key"));
-        let plan = write::plan(&input, &patch(&[(&patchable.key, Some("value"))]))
-            .unwrap_or_else(|err| panic!("{rel} {}: {err}", patchable.key));
+        let plan = write::plan(
+            &input,
+            &config(),
+            &patch(&[(&patchable.key, Some("value"))]),
+        )
+        .unwrap_or_else(|err| panic!("{rel} {}: {err}", patchable.key));
         assert_reads_as_frontmatter(&plan.text);
         assert!(
             plan.text.ends_with(&input[scan.span.end..]),
@@ -1137,7 +1168,7 @@ fn case_1_14_other_keys_comments_anchors_and_multiline_strings_are_untouched() {
         "notes/quoted-scalars.md",
     ] {
         let input = fixture(rel);
-        let plan = write::plan(&input, &patch(&[("status", Some("superseded"))]))
+        let plan = write::plan(&input, &config(), &patch(&[("status", Some("superseded"))]))
             .unwrap_or_else(|err| panic!("{rel}: {err}"));
         assert_other_keys_untouched(&input, &plan.text, &["status"]);
         assert!(plan.text.contains("# "), "{rel}: a comment was lost");
@@ -1146,7 +1177,8 @@ fn case_1_14_other_keys_comments_anchors_and_multiline_strings_are_untouched() {
     // The block sequence, the anchor line and the folded scalar are still the
     // same bytes after a patch of a different key.
     let input = fixture("notes/anchor-alias.md");
-    let plan = write::plan(&input, &patch(&[("title", Some("Renamed"))])).expect("title");
+    let plan =
+        write::plan(&input, &config(), &patch(&[("title", Some("Renamed"))])).expect("title");
     assert!(
         plan.text
             .contains("team: &platform infra\nreviewer: *platform\n")
@@ -1158,6 +1190,7 @@ fn case_1_15_two_keys_touch_two_spans_and_nothing_between() {
     let input = fixture("notes/block-sequence.md");
     let plan = write::plan(
         &input,
+        &config(),
         &patch(&[
             ("status", Some("superseded")),
             ("title", Some("Block list")),
@@ -1182,13 +1215,13 @@ fn case_1_15_two_keys_touch_two_spans_and_nothing_between() {
 fn case_1_16_duplicate_and_empty_requests_are_usage_errors() {
     let input = fixture("notes/undated.md");
     assert_eq!(
-        write::plan(&input, &patch(&[])).expect_err("empty"),
+        write::plan(&input, &config(), &patch(&[])).expect_err("empty"),
         PatchError::EmptyRequest
     );
 
     let twice = patch(&[("status", Some("active")), ("status", Some("retired"))]);
     assert_eq!(
-        write::plan(&input, &twice).expect_err("twice"),
+        write::plan(&input, &config(), &twice).expect_err("twice"),
         PatchError::DuplicateRequestKey {
             key: "status".to_owned()
         }
@@ -1199,13 +1232,184 @@ fn case_1_16_duplicate_and_empty_requests_are_usage_errors() {
 fn a_patch_that_writes_what_the_file_already_says_changes_no_byte() {
     // Decision M7-44: a key counts as changed when its bytes differ.
     let input = fixture("notes/undated.md");
-    let plan = write::plan(&input, &patch(&[("title", Some("Undated note"))])).expect("same value");
+    let plan = write::plan(
+        &input,
+        &config(),
+        &patch(&[("title", Some("Undated note"))]),
+    )
+    .expect("same value");
 
     assert!(plan.changed_keys.is_empty(), "{:?}", plan.changed_keys);
     assert!(plan.appended_keys.is_empty());
     assert_eq!(plan.text, input);
     assert_eq!(plan.bytes_before, plan.bytes_after);
     assert_eq!(plan.old_hash, plan.new_hash);
+}
+
+// ───────────────────────────── value equality (P2) ───────────────────────────
+
+/// Plans one patch against a document written inline, with the fixture config.
+///
+/// `plan` reads no file, so a case can state the whole document it compares
+/// before and after.
+fn planned(text: &str, keys: &[(&str, Option<&str>)]) -> Plan {
+    write::plan(text, &config(), &patch(keys)).expect("the patch plans")
+}
+
+/// Case 2.1 — a quoted value, patched to the value it holds.
+#[test]
+fn case_2_1_a_quoted_value_patched_to_the_same_value_changes_no_byte() {
+    let input = "---\nstatus: \"active\"\ntitle: Quoted\n---\n\nbody\n";
+    let plan = planned(input, &[("status", Some("active"))]);
+
+    assert_eq!(plan.text, input, "the file must keep every byte");
+    assert!(plan.changed_keys.is_empty(), "{:?}", plan.changed_keys);
+    assert!(plan.appended_keys.is_empty());
+    assert_eq!(plan.old_hash, plan.new_hash);
+}
+
+/// Case 2.2 — the bare spelling, written again, and the quote characters as a
+/// value.
+#[test]
+fn case_2_2_a_bare_value_written_again_changes_no_byte() {
+    let input = "---\nstatus: active\ntitle: Bare\n---\n\nbody\n";
+    let plan = planned(input, &[("status", Some("active"))]);
+    assert_eq!(plan.text, input);
+    assert!(plan.changed_keys.is_empty(), "{:?}", plan.changed_keys);
+
+    // A request is a value, not a rendering: `"active"` with the quote
+    // characters in it is another value, so it writes.
+    let plan = planned(input, &[("status", Some("\"active\""))]);
+    assert_eq!(plan.changed_keys, ["status"]);
+    assert_eq!(typed(&plan.text).status.as_deref(), Some("\"active\""));
+    assert_ne!(plan.text, input);
+}
+
+/// Case 2.3 — a trailing comment belongs to the line, not to the value.
+#[test]
+fn case_2_3_a_trailing_comment_survives_a_same_value_write() {
+    let input = "---\nstatus: active  # current\n---\n\nbody\n";
+    let plan = planned(input, &[("status", Some("active"))]);
+    assert_eq!(plan.text, input);
+    assert!(plan.changed_keys.is_empty(), "{:?}", plan.changed_keys);
+}
+
+/// Case 2.4 — the status reader canonicalises the case.
+#[test]
+fn case_2_4_a_status_in_another_case_changes_no_byte() {
+    let input = "---\nstatus: Active\n---\n\nbody\n";
+    let plan = planned(input, &[("status", Some("active"))]);
+    assert_eq!(plan.text, input);
+    assert!(plan.changed_keys.is_empty(), "{:?}", plan.changed_keys);
+}
+
+/// Case 2.5 — a free-text key has no reader, so the case is a value.
+///
+/// Case 2.4 and this one are the pair that proves the rule is per key.
+#[test]
+fn case_2_5_a_free_text_value_in_another_case_writes() {
+    let input = "---\nowner: Active\n---\n\nbody\n";
+    let plan = planned(input, &[("owner", Some("active"))]);
+
+    assert_eq!(plan.text, "---\nowner: active\n---\n\nbody\n");
+    assert_eq!(plan.changed_keys, ["owner"]);
+    assert!(plan.appended_keys.is_empty());
+    assert_eq!(
+        plan.old_hash,
+        Blake3Hash::of_bytes(input.as_bytes()).to_hex()
+    );
+    assert_ne!(plan.old_hash, plan.new_hash);
+}
+
+/// Case 2.6 — a value that differs is replaced, and nothing else moves.
+#[test]
+fn case_2_6_a_value_that_differs_writes_the_span() {
+    let input = "---\ntitle: One\nstatus: active\n---\n\nbody\n";
+    let plan = planned(input, &[("status", Some("superseded"))]);
+
+    assert_eq!(
+        plan.text,
+        "---\ntitle: One\nstatus: superseded\n---\n\nbody\n"
+    );
+    assert_eq!(plan.changed_keys, ["status"]);
+    assert_other_keys_untouched(input, &plan.text, &["status"]);
+}
+
+/// Case 2.9 — an alias and its canonical name are one type.
+#[test]
+fn case_2_9_an_alias_and_its_canonical_type_are_one_value() {
+    let input = "---\ntype: adr\n---\n\nbody\n";
+    let plan = planned(input, &[("type", Some("decision"))]);
+    assert_eq!(plan.text, input);
+    assert!(plan.changed_keys.is_empty(), "{:?}", plan.changed_keys);
+
+    // A different type is a different value, so it writes.
+    let plan = planned(input, &[("type", Some("spec"))]);
+    assert_eq!(plan.changed_keys, ["type"]);
+}
+
+/// Case 2.10 — an empty span is a null, and a null is one value.
+#[test]
+fn case_2_10_an_empty_value_is_a_null() {
+    let input = "---\nstatus:\n---\n\nbody\n";
+
+    let plan = planned(input, &[("status", Some("active"))]);
+    assert_eq!(plan.text, "---\nstatus: active\n---\n\nbody\n");
+    assert_eq!(plan.changed_keys, ["status"]);
+
+    let plan = planned(input, &[("status", None)]);
+    assert_eq!(plan.text, input);
+    assert!(plan.changed_keys.is_empty(), "{:?}", plan.changed_keys);
+    assert_eq!(plan.old_hash, plan.new_hash);
+}
+
+/// A timestamp and its date part are one date (§2.2).
+#[test]
+fn a_timestamp_and_its_date_are_one_value() {
+    let input = "---\ndate: 2026-10-29T10:00:00Z\neffective_to: null\n---\n\nbody\n";
+
+    let plan = planned(input, &[("date", Some("2026-10-29"))]);
+    assert_eq!(plan.text, input);
+    assert!(plan.changed_keys.is_empty(), "{:?}", plan.changed_keys);
+
+    // A different date writes, and so does a value the parser rejects in place
+    // of one it accepts.
+    let plan = planned(input, &[("date", Some("2026-10-30"))]);
+    assert_eq!(plan.changed_keys, ["date"]);
+}
+
+/// A value the date parser rejects is not a date, so two are two values.
+#[test]
+fn two_values_the_date_parser_rejects_are_two_values() {
+    let input = "---\ndate: 2026-10\n---\n\nbody\n";
+
+    let plan = planned(input, &[("date", Some("2026-11"))]);
+    assert_eq!(plan.changed_keys, ["date"], "a rejected date is its bytes");
+    assert_eq!(plan.text, "---\ndate: 2026-11\n---\n\nbody\n");
+}
+
+/// The empty string is a value, and a request for it is not a request for null.
+///
+/// A read-back taken over the request text would parse `""` as a null and make
+/// this write a no-op (M7b-16).
+#[test]
+fn the_empty_string_is_not_a_null() {
+    let input = "---\ntitle:\n---\n\nbody\n";
+    let plan = planned(input, &[("title", Some(""))]);
+
+    assert_eq!(plan.changed_keys, ["title"]);
+    assert_eq!(plan.text, "---\ntitle: \"\"\n---\n\nbody\n");
+    assert_eq!(typed(&plan.text).title.as_deref(), Some(""));
+}
+
+/// A list and a null are two values: a reader that drops the list must not make
+/// a request for null a no-op.
+#[test]
+fn a_flow_sequence_and_a_null_are_two_values() {
+    let input = "---\ntags: [db, rust]\n---\n\nbody\n";
+    let plan = planned(input, &[("tags", None)]);
+    assert_eq!(plan.changed_keys, ["tags"]);
+    assert_eq!(plan.text, "---\ntags: null\n---\n\nbody\n");
 }
 
 // ───────────────────────── the plan's invariants ──────────────────────────────
@@ -1249,7 +1453,7 @@ proptest! {
         input.push_str("Body line two.");
         input.push_str(newline);
 
-        let plan = write::plan(&input, &patch(&[("status", Some(value.as_str()))]))
+        let plan = write::plan(&input, &config(), &patch(&[("status", Some(value.as_str()))]))
             .map_err(|err| TestCaseError::fail(err.to_string()))?;
 
         // I2: newline style and BOM. The value is escaped, so no line is added.
@@ -1298,7 +1502,7 @@ proptest! {
         }
         input.push_str("---\nbody\n");
 
-        let refused = write::plan(&input, &patch(&[("tags", Some("x"))]));
+        let refused = write::plan(&input, &config(), &patch(&[("tags", Some("x"))]));
         prop_assert_eq!(
             refused,
             Err(PatchError::UnsupportedShape {
@@ -1307,7 +1511,7 @@ proptest! {
             })
         );
 
-        let accepted = write::plan(&input, &patch(&[("status", Some("retired"))]))
+        let accepted = write::plan(&input, &config(), &patch(&[("status", Some("retired"))]))
             .map_err(|err| TestCaseError::fail(err.to_string()))?;
         prop_assert!(accepted.text.contains("---\nbody\n"));
         prop_assert!(accepted.text.starts_with("---\nstatus: retired\ntags:\n"));
@@ -1318,7 +1522,7 @@ proptest! {
     #[test]
     fn any_value_round_trips_through_the_typed_reader(value in any_value()) {
         let input = "---\nstatus: active\n---\nbody\n";
-        let plan = write::plan(input, &patch(&[("status", Some(value.as_str()))]))
+        let plan = write::plan(input, &config(), &patch(&[("status", Some(value.as_str()))]))
             .map_err(|err| TestCaseError::fail(err.to_string()))?;
         let read = frontmatter::read(&plan.text, &config());
         prop_assert!(read.raw.is_some());

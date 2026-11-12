@@ -100,13 +100,20 @@ equal    = read_back(rendered) == read_back(old)
 changed  = !equal && rendered != old_bytes
 ```
 
-`changed` decides the edit. Two tests, because either alone is wrong:
+`changed` decides the edit. Two tests:
 
 - `read_back` compares what the config's typed reader would report, so `status: Active` and a
   request for `active` are equal (the reader canonicalises status), and a free-text key
   `owner: Active` and a request for `active` are not.
 - `rendered != old_bytes` is the belt: a value that renders to the bytes already there changes
-  nothing, whatever the reader says. Without it a write reports a change it did not make.
+  nothing.
+
+**The belt is a guard, not a second reader.** The read-back is taken over the bytes the write
+would put on the line, so `rendered == old_bytes` already implies `read_back(rendered) ==
+read_back(old)`: no case can distinguish the belt's removal. It stays because it costs one
+comparison and states the rule without the reader, and it decides nothing on its own (M7b-17).
+The read-back takes the rendered bytes, not the request text, because a request for the empty
+string would otherwise parse as a null (M7b-16).
 
 When `changed` is false, no edit is planned, `changed_keys` omits the key, and the file keeps its
 bytes, its quoting and its trailing comment.
@@ -121,13 +128,19 @@ the bytes normalised asks for a different value, or edits the file.
 `read_back("")` is `null`. A request for a string is therefore a change; a request for `null` is a
 no-op.
 
+**A structure is not a null.** A list or a mapping reads back as `None` through
+`scalar_to_string`, and so does a null. The read-back therefore keeps a structure as its own
+bytes, so `tags: [db, rust]` patched to `null` writes. Two different rejected dates are two
+values for the same reason: only two parsed dates that agree are equal (M7b-16).
+
 **Scope.** This rule is every writer's, `write_document` included: it renders the block from the
 request, and a key it re-renders differently does differ in bytes, so it appears in
 `changed_keys`. A key it renders identically does not.
 
-`plan` and `plan_document` gain a `&Config`, because resolving an alias and reading a value back
-needs the type registry and the field aliases. They stay pure: no file is read. Every call site
-moves with them, and §5 names the files.
+`plan` gains a `&Config`, because resolving an alias and reading a value back needs the type
+registry and the field aliases. `plan_document` gains it in Phase 4, where validation needs it
+(M7b-15 amends M7b-12). Both stay pure: no file is read. Every call site moves with them, and §5
+names the files.
 
 ### 2.3 The receipt
 
@@ -270,7 +283,7 @@ it. The registry stays open.
 | M7b-1 | `create_frontmatter` is an explicit parameter, default `false` | A write that invents structure must be asked for. A promotion asks for it, because a promotion without it is the defect this milestone exists for. |
 | M7b-2 | The created block is `---\n<key: value>\n---\n`, after any BOM, before the body, in the file's newline | It is the shape `write_document` already writes, so two paths cannot disagree. |
 | M7b-3 | A patch write compares the **parsed** value of the rendered request with the parsed value of the span, and skips the edit when they are equal | A value that is already right must not change the file. Quoting is a rendering choice, not a value. |
-| M7b-4 | The byte test is a belt beside the parsed test: a value that renders to the bytes already there never changes | The parsed test alone reports a change it did not make when the reader canonicalises a value (`status: Active`). |
+| M7b-4 | The byte test is a belt beside the parsed test: a value that renders to the bytes already there never changes | Bytes that are already there are one value, whatever the reader says. It is a guard and decides nothing alone: the read-back reads the same bytes, so no case distinguishes it (M7b-17). |
 | M7b-5 | A no-op write reports `changed_keys: []` and equal hashes, and writes nothing | A receipt describes bytes (M7-14), so a no-op must be visible as one. |
 | M7b-6 | `created_block` is a new receipt field, additive, `api` stays 1 | A caller that cannot tell "patched" from "created the block" cannot report the change to a user. |
 | M7b-7 | Validation covers `status` and the three date keys, and nothing else | Those four are the keys the config interprets and a caller can get wrong. Every other key is the user's. |
@@ -281,6 +294,11 @@ it. The registry stays open.
 | M7b-12 | `plan` and `plan_document` gain a `&Config` | Resolving an alias and reading a value back needs the registry and the aliases. They stay pure: no file is read. |
 | M7b-13 | `promote_document --link-from` sets `create_frontmatter` | The promotion instruction in the MCP `instructions` string must be executable on a note that has no block. |
 | M7b-14 | The rehearsal fixture gains documents with no block, and a real-write pass | A measurement that cannot reach the create path measures nothing about it. |
+| M7b-15 | `plan` gains a `&Config` in Phase 2; `plan_document` gains it in Phase 4 | Nothing in Phase 2 needs it on `plan_document`, and an unused parameter needs an allow. This amends M7b-12. |
+| M7b-16 | The read-back reads the bytes the write would put on the line, and a structure keeps its own bytes | A request for the empty string must not read as a null, and a list must not read as one either. Proof: `title:` patched to the empty string, and `tags: [db, rust]` patched to `null`, both write. Reviewable at the next milestone. |
+| M7b-17 | The byte belt stays as a guard, and no case proves its removal | The read-back is taken over the rendered bytes, so identical bytes are always one value. The belt costs one comparison and states the rule without the reader. Proof: deleting the belt changes no test result. Reviewable if a future read-back takes anything but the bytes. |
+| M7b-18 | The `&Config` threading ships in the comparison's commit, not its own | An unused parameter fails `clippy -D warnings`, so a threading-only commit cannot pass the gate. This amends the Phase 2 split seam. |
+| M7b-19 | A request for `null` over an empty span is a no-op (case 2.10), which supersedes the second half of case 1.11 | An empty span already reads as null, so the request changes no value. |
 
 ## 5. Phases
 
@@ -305,21 +323,25 @@ rehearsal passes with the create path exercised.
 
 ### Phase 2 — Value equality
 
-**Files.** `src/write/patch.rs` (the comparison), `src/write/document.rs` (the definition site of
-`plan_document`, whose signature gains the config), `src/write/value.rs` (the parse-back, reused),
-`src/write/supersede.rs`, `src/write/promote.rs`, `src/engine.rs` (passing the config),
-`src/write/mod.rs`, `tests/write_atomic.rs`, `tests/write_patch.rs`, `tests/cli_set.rs`,
-`tests/cli_supersede.rs`, `tests/write_rehearsal.rs` (the real-write pass).
+**Files.** `src/write/patch.rs` (the comparison), `src/config.rs` (`field_of`, the reverse of the
+alias lists), `src/engine.rs` (two call sites), `tests/write_patch.rs` (cases 2.1 to 2.10),
+`tests/cli_set.rs` (case 2.7, a real write twice), `tests/write_atomic.rs` and
+`tests/cli_supersede.rs` (the two other `plan` call sites), `scripts/write-rehearsal.sh` and
+`tests/write_rehearsal.rs` (the real-write pass).
+
+`src/write/supersede.rs`, `src/write/promote.rs`, `src/write/document.rs` and `src/write/mod.rs`
+need no change: the first two call no planner, and the last two re-export or define
+`plan_document`, whose signature moves in Phase 4.
 
 **Build.** The two tests of §2.2, the `&Config` threading, and the real-write idempotency pass.
 
-**Tests.** Cases 2.1 to 2.8.
+**Tests.** Cases 2.1 to 2.10.
 
 **Accept.** A second identical write changes 0 bytes, on a temporary copy, and the rehearsal
 reports 0 same-value changes.
 
-**Split seam.** The comparison first; the `&Config` threading second, as its own commit in the
-same PR.
+**Split seam.** Part 1 is the comparison and the threading, in one commit because an unused
+parameter fails the lint gate (M7b-18). Part 2 is the rehearsal's real-write pass.
 
 ### Phase 3 — Receipt accuracy
 
@@ -373,7 +395,8 @@ completes on a no-block document, and 0 same-value writes change a byte.
    no-block documents all admit a patch afterwards: **N of N**, where N is the count the fixture
    builds.
 2. A second identical write changes **0** bytes, proved by a real write on a temporary copy (case
-   2.7), and the rehearsal reports **0** same-value changes, down from 39 of 200.
+   2.7), and the rehearsal reports **0** same-value changes. Its fixture gives 64 documents a
+   same-value write, and all 64 changed a byte before value equality.
 3. `write --overwrite` reports only keys whose bytes differ: **0** extra keys in case 3.2.
 4. A nonsense `date` and a nonsense `status` are refused on every write path: **2 of 2**, and
    **6 of 6** paths for case 4.7.

@@ -120,7 +120,7 @@ impl Fixture {
 }
 
 /// A plan for one `status` value against `text`.
-fn plan_from(text: &str, value: &str) -> Plan {
+fn plan_from(text: &str, config: &Config, value: &str) -> Plan {
     let patch = Patch {
         path: PathBuf::from(DOC),
         keys: vec![("status".to_owned(), Some(value.to_owned()))],
@@ -128,12 +128,12 @@ fn plan_from(text: &str, value: &str) -> Plan {
         create_frontmatter: false,
         dry_run: false,
     };
-    write::plan(text, &patch).expect("the status patch plans")
+    write::plan(text, config, &patch).expect("the status patch plans")
 }
 
 /// A plan that sets `status` to `value` against the document's bytes now.
 fn planned(fixture: &Fixture, value: &str) -> Plan {
-    plan_from(&fixture.text(), value)
+    plan_from(&fixture.text(), &fixture.config, value)
 }
 
 /// A hook that writes another writer's bytes after the pre-lock check passed.
@@ -253,7 +253,7 @@ fn case_2_4c_a_symlink_is_written_through_and_one_outside_the_corpus_is_refused(
     fs::write(&outside, ORIGINAL).expect("write the outside document");
     let escape = root.join("notes/escape.md");
     symlink(&outside, &escape).expect("link out of the corpus");
-    let escape_plan = plan_from(ORIGINAL, "superseded");
+    let escape_plan = plan_from(ORIGINAL, &fixture.config, "superseded");
     match commit(&escape_plan, &fixture.options_at(escape, &NoHooks)) {
         Err(CommitError::OutsideCorpus { .. }) => {}
         other => panic!("a link out of the corpus must be refused, got {other:?}"),

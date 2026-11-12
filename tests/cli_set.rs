@@ -517,3 +517,47 @@ fn case_1_6_set_create_frontmatter_adds_the_block() {
         "---\nstatus: active\n---\n# Plain\n\nBody line.\n"
     );
 }
+
+// ───────────────────────── value equality (M7b-2) ──────────────────────────
+
+/// A document whose status is quoted: the bytes are not the value.
+const QUOTED: &str = "---\ntitle: One\nstatus: \"active\"\n---\n\n# One\n\nfirst prose\n";
+
+#[test]
+fn case_2_7_a_second_identical_write_changes_no_byte() {
+    let dir = scratch();
+    let root = dir.path();
+    write_document(root, "notes/quoted.md", QUOTED);
+    let before = fs::read(root.join("notes/quoted.md")).expect("read the document");
+
+    // Two real writes, each asking for the value the document holds. Neither
+    // may change a byte, and each receipt must say so.
+    for run in 1..=2 {
+        let hash = hash(root, "notes/quoted.md");
+        let (stdout, _) = ok(set(
+            root,
+            &[
+                "notes/quoted.md",
+                "--expect-hash",
+                &hash,
+                "--key",
+                "status=active",
+                "--json",
+            ],
+        ));
+        let receipt: serde_json::Value =
+            serde_json::from_str(&stdout).expect("the receipt is one JSON object");
+        assert_eq!(receipt["changed_keys"], json!([]), "run {run}: {receipt}");
+        assert_eq!(receipt["old_hash"], receipt["new_hash"], "run {run}");
+        assert_eq!(
+            receipt["old_hash"],
+            json!(hash_of(&before)),
+            "run {run}: the file kept the bytes it had"
+        );
+        assert_eq!(
+            fs::read(root.join("notes/quoted.md")).expect("read the document"),
+            before,
+            "run {run}: the file changed"
+        );
+    }
+}

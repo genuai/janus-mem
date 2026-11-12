@@ -8,8 +8,13 @@
 
 use std::path::PathBuf;
 
+use oneyaml::Value;
+
 use super::PatchError;
+use crate::config::{Config, Field};
+use crate::document::Status;
 use crate::id::Blake3Hash;
+use crate::vault::frontmatter::parse_date;
 
 use super::scan::{self, Scan, ValueShape};
 use super::value::render_value;
@@ -59,9 +64,12 @@ pub struct Plan {
 
 /// Plans the new bytes for `patch` against `text`, or refuses.
 ///
+/// `config` resolves a key to the field whose reader decides whether the value a
+/// request asks for is the value the file already holds. No file is read.
+///
 /// A refusal returns no bytes at all, so a caller that treats `Err` as "do not
 /// write" cannot write a half-patched file (I3).
-pub fn plan(text: &str, patch: &Patch) -> Result<Plan, PatchError> {
+pub fn plan(text: &str, config: &Config, patch: &Patch) -> Result<Plan, PatchError> {
     if patch.keys.is_empty() {
         return Err(PatchError::EmptyRequest);
     }
@@ -104,12 +112,13 @@ pub fn plan(text: &str, patch: &Patch) -> Result<Plan, PatchError> {
                 }
                 // An empty value has no bytes to replace, so the rendered value
                 // brings its own separator space.
-                let insert = if span.value.start == span.value.end {
+                let old = &text[span.value.start..span.value.end];
+                let insert = if old.is_empty() {
                     format!(" {rendered}")
                 } else {
                     rendered
                 };
-                if text[span.value.start..span.value.end] != insert {
+                if !same_value(config, key, old, &insert) {
                     edits.push((span.value.start, span.value.end, insert));
                     changed_keys.push(key.clone());
                 }
@@ -140,6 +149,59 @@ pub fn plan(text: &str, patch: &Patch) -> Result<Plan, PatchError> {
         appended_keys,
         created_block,
     })
+}
+
+/// Whether the bytes in the file and the bytes a request writes are one value.
+///
+/// Two tests, because either alone is wrong. Bytes that are already there never
+/// change (the belt). Past the belt the reader decides, and the reader is per
+/// field: `status: Active` and `active` are one status, `owner: Active` and
+/// `active` are two owners.
+fn same_value(config: &Config, key: &str, old: &str, insert: &str) -> bool {
+    insert == old || same_typed_value(config, key, old, insert)
+}
+
+/// Whether two stored byte strings read back as one value.
+///
+/// Both sides are stored bytes, not requests: the file's span and the bytes the
+/// render would put there. A null compares equal to a null and to nothing else.
+fn same_typed_value(config: &Config, key: &str, old: &str, new: &str) -> bool {
+    match (coerced(old), coerced(new)) {
+        (None, None) => true,
+        (Some(old), Some(new)) => same_field(config, config.field_of(key), &old, &new),
+        _ => false,
+    }
+}
+
+/// Whether two stored texts are one value, through the field's own reader.
+///
+/// A date the parser rejects is not a date, so two rejected values are two
+/// values: only two parsed dates that agree are equal.
+fn same_field(config: &Config, field: Option<Field>, old: &str, new: &str) -> bool {
+    match field {
+        Some(Field::Status) => Status::parse(old) == Status::parse(new),
+        Some(Field::Type) => config.resolve_type(old).name == config.resolve_type(new).name,
+        Some(Field::Date | Field::EffectiveFrom | Field::EffectiveTo) => {
+            matches!((parse_date(old), parse_date(new)), (Some(old), Some(new)) if old == new)
+        }
+        _ => old == new,
+    }
+}
+
+/// The text a stored scalar reads back as, or `None` for a null.
+///
+/// The same rule [`crate::vault::frontmatter`] applies: a string is itself, a
+/// number and a boolean coerce to their text, and a null is absent. Anything
+/// else keeps its own bytes, because a null must never compare equal to a list
+/// or to a value the parser could not read.
+fn coerced(raw: &str) -> Option<String> {
+    match oneyaml::from_str::<Value>(raw) {
+        Ok(Value::Null) => None,
+        Ok(Value::String(text)) => Some(text),
+        Ok(Value::Number(number)) => Some(number.to_string()),
+        Ok(Value::Bool(flag)) => Some(flag.to_string()),
+        _ => Some(raw.trim().to_owned()),
+    }
 }
 
 /// Replaces every planned span, and inserts the appended lines before the fence.

@@ -467,7 +467,8 @@ impl Engine {
         dry_run: bool,
     ) -> Result<Receipt, JanusError> {
         let expected_hash = patch.expected_hash.clone();
-        let plan = write::plan(text, &patch).map_err(|error| patch_refusal(named, error))?;
+        let plan =
+            write::plan(text, &self.config, &patch).map_err(|error| patch_refusal(named, error))?;
         check_etag(
             named,
             expected_hash.as_deref(),
@@ -651,7 +652,8 @@ impl Engine {
                     create_frontmatter: false,
                     dry_run,
                 };
-                write::plan(&old_text, &patch).map_err(|error| patch_refusal(&old_named, error))
+                write::plan(&old_text, &self.config, &patch)
+                    .map_err(|error| patch_refusal(&old_named, error))
             })
             .transpose()?;
 
