@@ -298,6 +298,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             path,
             expect_hash,
             key,
+            create_frontmatter,
             dry_run,
             json,
         } => {
@@ -311,6 +312,7 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                 "path": path.to_string_lossy(),
                 "patch": patch(&key)?,
                 "expected_hash": expect_hash,
+                "create_frontmatter": create_frontmatter,
                 "dry_run": dry_run,
             });
             let answer = fleet.answer(&Call::new(Tool::UpdateFrontmatter, params))?;

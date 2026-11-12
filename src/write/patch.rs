@@ -27,7 +27,7 @@ pub struct Patch {
     pub keys: Vec<(String, Option<String>)>,
     /// The hash the caller saw on a read. Not checked in this phase.
     pub expected_hash: Option<String>,
-    /// Create a block when the document has none.
+    /// Insert a block when the document has none. The body is untouched.
     pub create_frontmatter: bool,
     /// Report what would change without changing a file. Not used in this phase.
     pub dry_run: bool,
@@ -53,6 +53,8 @@ pub struct Plan {
     pub changed_keys: Vec<String>,
     /// Keys that were absent and are now written, sorted.
     pub appended_keys: Vec<String>,
+    /// True when this plan inserts a block the document did not have.
+    pub created_block: bool,
 }
 
 /// Plans the new bytes for `patch` against `text`, or refuses.
@@ -83,6 +85,7 @@ pub fn plan(text: &str, patch: &Patch) -> Result<Plan, PatchError> {
     if scan.span.is_empty() && !patch.create_frontmatter {
         return Err(PatchError::NoFrontmatter);
     }
+    let created_block = scan.span.is_empty();
 
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     let mut appended: Vec<String> = Vec::new();
@@ -135,6 +138,7 @@ pub fn plan(text: &str, patch: &Patch) -> Result<Plan, PatchError> {
         text: new_text,
         changed_keys,
         appended_keys,
+        created_block,
     })
 }
 

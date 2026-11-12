@@ -374,7 +374,7 @@ impl Engine {
             path: named.clone(),
             keys: vec![("supersedes".to_owned(), Some(qualified))],
             expected_hash: params.expected_hash.clone(),
-            create_frontmatter: false,
+            create_frontmatter: true,
             dry_run,
         };
         self.apply(&named, &found, &text, patch, dry_run)
@@ -448,7 +448,7 @@ impl Engine {
             path: named.clone(),
             keys: params.keys(),
             expected_hash: params.expected_hash.clone(),
-            create_frontmatter: false,
+            create_frontmatter: params.create_frontmatter.unwrap_or(false),
             dry_run,
         };
         self.apply(&named, &found, &text, patch, dry_run)
@@ -484,6 +484,7 @@ impl Engine {
             dry_run,
             bytes_before: plan.bytes_before,
             bytes_after: plan.bytes_after,
+            created_block: plan.created_block,
         };
         if dry_run {
             return Ok(receipt);
@@ -688,6 +689,7 @@ impl Engine {
             dry_run,
             bytes_before: plan.bytes_before,
             bytes_after: plan.bytes_after,
+            created_block: plan.created_block,
         });
         let (primary, receipts) = match old_receipt {
             Some(receipt) => (receipt.clone(), vec![receipt, new_receipt.clone()]),
@@ -1431,6 +1433,7 @@ fn document_receipt(root: &Path, path: &Path, document: &Document, dry_run: bool
         dry_run,
         bytes_before: document.bytes_before,
         bytes_after: document.text.len(),
+        created_block: document.created_block,
     }
 }
 

@@ -344,6 +344,7 @@ fn case_4_5_a_receipt_is_not_an_envelope() {
             "bytes_after",
             "bytes_before",
             "changed_keys",
+            "created_block",
             "dry_run",
             "new_hash",
             "ok",
@@ -639,4 +640,258 @@ fn every_refusal_of_a_shape_names_its_code() {
     }
     // A refused shape leaves every file as it was.
     assert_eq!(text(root, "notes/one.md"), ONE);
+}
+
+// ─────────────────────────── creating a block (M7b-1) ──────────────────────
+
+/// A document with no frontmatter block, and the body a create must keep.
+const NO_BLOCK: &str = "# No block\n\nThe body.\n";
+
+#[test]
+fn case_1_1_a_create_inserts_the_block_and_leaves_the_body_byte_identical() {
+    let dir = scratch();
+    let root = dir.path();
+    write_document(root, "notes/none.md", NO_BLOCK);
+    let before = hash(root, "notes/none.md");
+    let answer = update(
+        root,
+        true,
+        json!({
+            "path": "notes/none.md",
+            "patch": { "status": "active" },
+            "expected_hash": before,
+            "create_frontmatter": true,
+        }),
+    );
+
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    assert_eq!(answer["created_block"], json!(true), "{answer}");
+    assert_eq!(answer["changed_keys"], json!(["status"]), "{answer}");
+    assert_eq!(answer["appended_keys"], json!(["status"]), "{answer}");
+    assert_eq!(answer["old_hash"], json!(before), "{answer}");
+    // The whole file is written out by hand, so the body is proved byte-identical.
+    assert_eq!(
+        text(root, "notes/none.md"),
+        "---\nstatus: active\n---\n# No block\n\nThe body.\n"
+    );
+    assert_eq!(answer["new_hash"], json!(hash(root, "notes/none.md")));
+}
+
+#[test]
+fn case_1_2_the_same_write_without_the_parameter_is_refused_and_keeps_every_byte() {
+    let dir = scratch();
+    let root = dir.path();
+    write_document(root, "notes/none.md", NO_BLOCK);
+    let before = hash(root, "notes/none.md");
+    let answer = update(
+        root,
+        true,
+        json!({
+            "path": "notes/none.md",
+            "patch": { "status": "active" },
+            "expected_hash": before,
+        }),
+    );
+
+    assert_eq!(code(&answer), "no_frontmatter", "{answer}");
+    assert_eq!(text(root, "notes/none.md"), NO_BLOCK);
+    assert_eq!(hash(root, "notes/none.md"), before);
+}
+
+#[test]
+fn case_1_3_a_utf8_bom_stays_at_byte_zero_before_the_created_block() {
+    let dir = scratch();
+    let root = dir.path();
+    let input = "\u{feff}# BOM\n\nBody.\n";
+    write_document(root, "notes/bom.md", input);
+    let before = hash(root, "notes/bom.md");
+    let answer = update(
+        root,
+        true,
+        json!({
+            "path": "notes/bom.md",
+            "patch": { "title": "One" },
+            "expected_hash": before,
+            "create_frontmatter": true,
+        }),
+    );
+
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    assert_eq!(answer["created_block"], json!(true), "{answer}");
+    let written = text(root, "notes/bom.md");
+    assert_eq!(&written.as_bytes()[..3], &[0xEF, 0xBB, 0xBF]);
+    assert_eq!(written, "\u{feff}---\ntitle: One\n---\n# BOM\n\nBody.\n");
+}
+
+#[test]
+fn case_1_4_a_crlf_document_gets_a_crlf_block_and_keeps_every_crlf() {
+    let dir = scratch();
+    let root = dir.path();
+    let input = "# CRLF\r\n\r\nBody.\r\n";
+    write_document(root, "notes/crlf.md", input);
+    let before = hash(root, "notes/crlf.md");
+    let answer = update(
+        root,
+        true,
+        json!({
+            "path": "notes/crlf.md",
+            "patch": { "status": "active" },
+            "expected_hash": before,
+            "create_frontmatter": true,
+        }),
+    );
+
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    assert_eq!(answer["created_block"], json!(true), "{answer}");
+    assert_eq!(
+        text(root, "notes/crlf.md"),
+        "---\r\nstatus: active\r\n---\r\n# CRLF\r\n\r\nBody.\r\n"
+    );
+}
+
+#[test]
+fn case_1_5_a_body_that_opens_with_a_fence_keeps_that_line() {
+    let dir = scratch();
+    let root = dir.path();
+    let input = "---\njust a body line\n";
+    write_document(root, "notes/fence.md", input);
+    let before = hash(root, "notes/fence.md");
+    let answer = update(
+        root,
+        true,
+        json!({
+            "path": "notes/fence.md",
+            "patch": { "type": "note" },
+            "expected_hash": before,
+            "create_frontmatter": true,
+        }),
+    );
+
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    assert_eq!(answer["created_block"], json!(true), "{answer}");
+    // The created block goes above the stray fence. No byte of the body moves.
+    assert_eq!(
+        text(root, "notes/fence.md"),
+        "---\ntype: note\n---\n---\njust a body line\n"
+    );
+    let read = call(
+        root,
+        true,
+        "read_document",
+        json!({ "path": "notes/fence.md" }),
+    );
+    assert_eq!(read["ok"], json!(true), "{read}");
+    assert_eq!(read["frontmatter"]["type"], json!("note"), "{read}");
+    assert_eq!(read["body"], json!("---\njust a body line\n"), "{read}");
+}
+
+#[test]
+fn case_1_6_a_promotion_completes_on_a_document_with_no_block() {
+    let dir = scratch();
+    let root = dir.path();
+    write_document(root, "notes/none.md", NO_BLOCK);
+    let before = hash(root, "notes/none.md");
+    let answer = update(
+        root,
+        true,
+        json!({
+            "path": "notes/none.md",
+            "patch": {
+                "type": "decision",
+                "status": "active",
+                "date": "2026-01-01",
+            },
+            "expected_hash": before,
+            "create_frontmatter": true,
+        }),
+    );
+
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    assert_eq!(answer["created_block"], json!(true), "{answer}");
+    assert_eq!(
+        answer["changed_keys"],
+        json!(["date", "status", "type"]),
+        "{answer}"
+    );
+    assert_eq!(
+        text(root, "notes/none.md"),
+        "---\ndate: 2026-01-01\nstatus: active\ntype: decision\n---\n# No block\n\nThe body.\n"
+    );
+
+    // The next read resolves the ladder rung and the status.
+    let read = call(
+        root,
+        true,
+        "read_document",
+        json!({ "path": "notes/none.md" }),
+    );
+    assert_eq!(read["frontmatter"]["type"], json!("decision"), "{read}");
+    assert_eq!(read["frontmatter"]["status"], json!("active"), "{read}");
+    assert_eq!(read["frontmatter"]["date"], json!("2026-01-01"), "{read}");
+}
+
+#[test]
+fn case_1_7_a_create_on_a_document_with_a_block_reports_created_block_false() {
+    let dir = scratch();
+    let root = dir.path();
+    let before = hash(root, "notes/one.md");
+    let answer = update(
+        root,
+        true,
+        json!({
+            "path": "notes/one.md",
+            "patch": { "status": "superseded" },
+            "expected_hash": before,
+            "create_frontmatter": true,
+        }),
+    );
+
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    assert_eq!(answer["created_block"], json!(false), "{answer}");
+    assert_eq!(answer["changed_keys"], json!(["status"]), "{answer}");
+    assert_eq!(answer["appended_keys"], json!([]), "{answer}");
+    assert_eq!(
+        text(root, "notes/one.md"),
+        "---\ntitle: One\nstatus: superseded\n---\n\n# One\n\nfirst prose\n"
+    );
+}
+
+#[test]
+fn case_1_8_promote_link_creates_supersedes_and_leaves_the_source_byte_identical() {
+    let dir = workspace(false, false);
+    let root = dir.path();
+    let primary = root.join("primary");
+    let archive = root.join("archive");
+    write_document(&primary, "notes/plain.md", NO_BLOCK);
+    let before = hash(&primary, "notes/plain.md");
+    let source_before = hash(&archive, "notes/one.md");
+    let ws = root.join("workspace.toml");
+
+    let answer = session(
+        None,
+        Some(&ws),
+        true,
+        &[request(
+            1,
+            "promote_document",
+            json!({
+                "source": "context:notes/one.md",
+                "target_path": "notes/plain.md",
+                "mode": "link",
+                "expected_hash": before,
+            }),
+        )],
+    )
+    .remove(0);
+
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    assert_eq!(answer["created_block"], json!(true), "{answer}");
+    assert_eq!(answer["appended_keys"], json!(["supersedes"]), "{answer}");
+    assert_eq!(
+        text(&primary, "notes/plain.md"),
+        "---\nsupersedes: context:notes/one.md\n---\n# No block\n\nThe body.\n"
+    );
+    // The source is read, never written.
+    assert_eq!(text(&archive, "notes/one.md"), ONE);
+    assert_eq!(hash(&archive, "notes/one.md"), source_before);
 }

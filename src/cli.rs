@@ -178,6 +178,10 @@ pub enum Command {
         #[arg(long, value_name = "K[=V]", required = true)]
         key: Vec<String>,
 
+        /// Insert a frontmatter block when the document has none
+        #[arg(long)]
+        create_frontmatter: bool,
+
         /// Report what would change and write nothing
         #[arg(long)]
         dry_run: bool,

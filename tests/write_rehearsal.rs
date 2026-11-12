@@ -22,11 +22,10 @@ const SCRIPT: &str = "scripts/write-rehearsal.sh";
 
 /// The refusals the corpus owes, by command, shape and count.
 ///
-/// Thirty-six come from `set` (the patcher sees every shape), seven from
-/// `supersede` (which patches `status`), and three from `promote` (which needs a
-/// frontmatter block). `write` replaces the whole file, so it refuses none.
-const REFUSALS: [(&str, &str, usize); 10] = [
-    ("promote", "no_frontmatter", 3),
+/// Thirty-six come from `set` (the patcher sees every shape), and seven from
+/// `supersede` (which patches `status`). `promote` creates the block it needs,
+/// and `write` replaces the whole file, so neither refuses a shape.
+const REFUSALS: [(&str, &str, usize); 9] = [
     ("set", "alias", 4),
     ("set", "anchor", 5),
     ("set", "block_sequence", 8),
@@ -117,7 +116,7 @@ fn rehearsal_visits_200_documents_changes_no_byte_and_names_every_refusal() {
     assert_eq!(rehearsal.refusals(), owed, "refusals by command and shape");
     assert_eq!(
         rehearsal.number("refusals"),
-        46,
+        43,
         "every refusal is one of the shapes the corpus was built for"
     );
 }

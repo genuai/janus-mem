@@ -81,7 +81,7 @@ build() {
     anchor) set_owed=refuse:Anchor ;;
     alias) set_owed=refuse:Alias ;;
     duplicate_key) set_owed=refuse:DuplicateKey; sup_owed=refuse:DuplicateKey ;;
-    no_frontmatter) set_owed=refuse:NoFrontmatter; sup_owed=refuse:NoFrontmatter; pro_owed=refuse:NoFrontmatter ;;
+    no_frontmatter) set_owed=refuse:NoFrontmatter; sup_owed=refuse:NoFrontmatter ;;
     *) set_owed=ok ;;
   esac
   sup_owed=${sup_owed:-ok}
