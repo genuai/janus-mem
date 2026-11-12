@@ -71,7 +71,9 @@ impl ApiCode {
                 exit: 3,
             },
             // Refusals: a retry without a change of request cannot succeed.
-            JanusError::UnsupportedPatch { .. } => Self {
+            // A cycle makes the proposed patch unsupported, so it carries the
+            // same code and exit as any other refused patch shape.
+            JanusError::UnsupportedPatch { .. } | JanusError::SupersessionCycle { .. } => Self {
                 code: "unsupported_patch",
                 exit: 4,
             },
@@ -145,7 +147,11 @@ impl ApiCode {
                 code: "unstable_corpus",
                 exit: 1,
             },
-            JanusError::Write { .. } => Self {
+            // A two-file transaction that rolled back is a write failure. The
+            // message names both files; the code stays `write`.
+            JanusError::Write { .. }
+            | JanusError::TransactionRolledBack { .. }
+            | JanusError::TransactionInconsistent { .. } => Self {
                 code: "write",
                 exit: 1,
             },

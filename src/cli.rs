@@ -225,6 +225,33 @@ pub enum Command {
         json: bool,
     },
 
+    /// Retire one document and record its successor in one call (§9.3)
+    Supersede {
+        /// The corpus path of the document to retire
+        #[arg(value_name = "OLD")]
+        old: PathBuf,
+
+        /// The corpus path of the successor; it must not exist
+        #[arg(value_name = "NEW")]
+        new: PathBuf,
+
+        /// The content_hash a read returned for the old document
+        #[arg(long, value_name = "H")]
+        expect_hash: String,
+
+        /// Create the new document and leave the old one byte-identical
+        #[arg(long)]
+        append_only: bool,
+
+        /// Report what would change and write nothing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit the receipt as one JSON object on stdout, or the failure object
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List the corpora a workspace names, with each index's freshness (§6.11)
     Corpora {
         /// Emit one JSON object on stdout instead of the table

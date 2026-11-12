@@ -353,6 +353,39 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             Ok(())
         }
 
+        // The two-file write. Like `set` and `write`, a typed command is the
+        // consent, so it needs no `--allow-write` (M7-15), and it reads a
+        // workspace (M7-38). `--expect-hash` is required (M7-51).
+        Command::Supersede {
+            old,
+            new,
+            expect_hash,
+            append_only,
+            dry_run,
+            json,
+        } => {
+            let fleet = resolve_fleet(
+                workspace,
+                cli.vault,
+                false,
+                Writes::new("janus supersede", true, false),
+            )?;
+            let params = serde_json::json!({
+                "old_path": old.to_string_lossy(),
+                "expected_hash": expect_hash,
+                "new_path": new.to_string_lossy(),
+                "append_only": append_only,
+                "dry_run": dry_run,
+            });
+            let answer = fleet.answer(&Call::new(Tool::SupersedeDocument, params))?;
+            if json {
+                emit_json(&answer);
+            } else {
+                let _ = render_receipt(&answer, &mut std::io::stdout().lock());
+            }
+            Ok(())
+        }
+
         // The first command that reads a workspace. Resolution happens here,
         // at the edge, and arrives below as a value (§5.1 of SPEC, §6.11).
         Command::Corpora { json } => {
@@ -832,6 +865,7 @@ fn reads_workspace(command: &Command) -> bool {
             | Command::Corpora { .. }
             | Command::Set { .. }
             | Command::Write { .. }
+            | Command::Supersede { .. }
             | Command::Rpc { .. }
             | Command::Mcp { .. }
     )
@@ -1051,6 +1085,7 @@ fn failure_envelope_wanted(cli: &Cli) -> bool {
             | Command::Status { json: true, .. }
             | Command::Set { json: true, .. }
             | Command::Write { json: true, .. }
+            | Command::Supersede { json: true, .. }
     )
 }
 

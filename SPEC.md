@@ -770,9 +770,9 @@ DECISION GATE: span-preserving YAML. `serde_yaml` is unmaintained and lossy by d
 
 A convenience wrapper over two `update_frontmatter` calls, executed as a **transaction**:
 
-1. Dry-run both patches; validate both docs exist, are inside the vault, and that the resulting graph has no cycle.
-2. Stage both temp files.
-3. Rename both (old first, then new). If the second rename fails, roll back the first from its staged backup and return an error naming the inconsistent state.
+1. Dry-run both patches; validate the old document exists, the new path is absent, both are inside the vault, and that the resulting graph has no cycle.
+2. Patch the old document under the corpus lock.
+3. Create the new document. If the create fails, restore the old document from the plan's original bytes and mode and return an error naming the file that failed and the file that was restored.
 
 4. Return both receipts plus the resolved canonical chain.
 

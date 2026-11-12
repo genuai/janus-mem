@@ -112,6 +112,39 @@ pub enum CommitError {
         #[source]
         source: io::Error,
     },
+    /// The second file of a two-file commit failed, and the first was put
+    /// back from the plan's original bytes.
+    ///
+    /// The error names both files: the one that failed, and the one that was
+    /// restored. The vault is consistent again.
+    #[error("{failed}: {cause}; {restored} was restored from its original bytes and mode")]
+    RolledBack {
+        /// The second file, whose write failed.
+        failed: PathBuf,
+        /// The first file, whose original bytes are back on disk.
+        restored: PathBuf,
+        /// The failure that started the rollback.
+        cause: Box<CommitError>,
+    },
+    /// The second file of a two-file commit failed, and restoring the first did
+    /// not.
+    ///
+    /// This is the one answer that names an inconsistent vault: the first file
+    /// is not the bytes it held before the call, and the caller must not read
+    /// the message as a successful rollback.
+    #[error(
+        "{failed}: {cause}; {old} could NOT be restored ({restore}), so the vault is inconsistent"
+    )]
+    Inconsistent {
+        /// The second file, whose write failed.
+        failed: PathBuf,
+        /// The first file, whose bytes could not be put back.
+        old: PathBuf,
+        /// The failure that started the rollback.
+        cause: Box<CommitError>,
+        /// The failure that stopped the restore.
+        restore: Box<CommitError>,
+    },
     /// A file or directory operation failed.
     #[error("{path}: {source}")]
     Io {
@@ -232,7 +265,7 @@ pub(super) fn commit_bytes(
 }
 
 /// The file to write: `path` with every link resolved, inside `root`.
-fn resolve(path: &Path, root: &Path) -> Result<PathBuf, CommitError> {
+pub(super) fn resolve(path: &Path, root: &Path) -> Result<PathBuf, CommitError> {
     let target = dunce::canonicalize(path).map_err(|source| CommitError::Io {
         path: path.to_path_buf(),
         source,
@@ -269,7 +302,7 @@ pub(super) fn take_lock(
 }
 
 /// Fails unless the file's bytes hash to `expected`.
-fn verify(path: &Path, expected: &str) -> Result<(), CommitError> {
+pub(super) fn verify(path: &Path, expected: &str) -> Result<(), CommitError> {
     let bytes = fs::read(path).map_err(|source| CommitError::Io {
         path: path.to_path_buf(),
         source,

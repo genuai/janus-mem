@@ -50,6 +50,10 @@ const TEMP_ATTEMPTS: u32 = 16;
 /// `create_new`, which is atomic and fails with `AlreadyExists` before a byte is
 /// written (M7-27, case 5.2).
 ///
+/// A process killed during the write leaves a partial new file, because
+/// `create_new` writes the target directly rather than a temp file. That is the
+/// price of refusing to replace an existing path.
+///
 /// # Errors
 ///
 /// [`CommitError::Exists`] when the path is already there, and
