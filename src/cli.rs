@@ -164,6 +164,29 @@ pub enum Command {
         json: bool,
     },
 
+    /// Change frontmatter keys of one document (§9.3)
+    Set {
+        /// The corpus path of the document to change
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+
+        /// The content_hash a read returned
+        #[arg(long, value_name = "H")]
+        expect_hash: String,
+
+        /// A key to write: `--key k=v`, or `--key k` to write `null`
+        #[arg(long, value_name = "K[=V]", required = true)]
+        key: Vec<String>,
+
+        /// Report what would change and write nothing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit the receipt as one JSON object on stdout, or the failure object
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List the corpora a workspace names, with each index's freshness (§6.11)
     Corpora {
         /// Emit one JSON object on stdout instead of the table
