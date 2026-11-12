@@ -592,7 +592,7 @@ exit 3 is used for the first time.
 | M7-53 | `write_document` writes frontmatter keys sorted, not in the JSON object's order | The request reaches the engine as a JSON object, and that map is ordered by key before the writer sees it; `update_frontmatter` has the same property. Sorting makes the block deterministic on every surface instead of depending on a parser feature. Wrong if a surface later preserves insertion order and a caller relies on it. |
 | M7-54 | M7-5 ships as one PR at 790 logic and 579 test lines; the create/overwrite seam does not put either half under the phase ceiling | The phase estimated ~180 and measured 790, because a create still needs the DTO, the engine branch, the MCP descriptor, the CLI command and the whole-file renderer. That shared work leaves the create half at about 660, over the repository's 600. The PR carries the `large-pr` label and these numbers. Wrong if the create half measures 250 or less after review, which would mean this row chose the wrong seam. |
 | M7-55 | `supersede` creates the new document with `create_new` rather than staging and renaming a temp file, and the cycle check simulates the proposed edge | This supersedes M7-19's second rename. M7-35 requires an existing `new_path` to answer `path_exists`, and `create_new` is the only guard no race can turn into an overwrite; a rename would replace the file the caller did not name. The old file is still restored from `Plan::original` with its mode (M7-31). With `new_path` absent, a cycle can only exist when the chain already reaches that path, so the check adds the edge and refuses when the new path reaches the old one. The cycle has its own `cycle` code, because the caller must change the target, not the shape of a key. Wrong if a create leaves a file the caller did not name, or if a cycle that the call would close is written. |
-| M7-57 | M7-7 ships as one PR at 700 logic and 807 test lines, against the phase ceiling of 550 and 750 and `AGENTS.md`'s 600 and 900 | The split seam does not put either half under the ceiling: the resolver's cases 7.6 to 7.8 need the write that makes the link, so part 2 carries the fixture, the workspace file, the index and the doctor row that part 1 alone cannot exercise. The PR carries the `large-pr` label and these numbers. Wrong if a reviewer reports that this diff cannot be held in one reading. |
+| M7-57 | M7-7 ships as one PR at **1378 logic and 868 test lines**, against the phase ceiling of 550 and 750 and `AGENTS.md`'s 600 and 900 | The measured number is 2.5× the logic ceiling because the resolver needs a surface the writer shares: `get_lineage` takes a selection, `doctor` reads a workspace, and both go through `src/engine.rs`, `src/api/*` and `src/main.rs`, so a split at the plan's seam leaves part 1 unreadable as a product (a write no reader follows, M7-37) and part 2 unable to make its own link. About 45% of the added lines are comments the public-item gate and the safety argument need, and the `apply` extraction counts ~40 lines twice as a move. The PR carries `large-pr` and these numbers. Wrong if a reviewer reports that this diff cannot be held in one reading; then the split is `link`+`get_lineage` first and `adopt`+`doctor` second, which is the next seam. |
 | M7-58 | A qualified link is resolved when the graph is built, from the generations the query already holds, and is read in the `supersedes` direction | The snapshot's dangling row keeps the link text and loses the direction, and storing a direction would be a `format_version` bump for a read-side fact; a build also cannot see another corpus, so resolving there would need a rebuild per policy flip (case 7.7). `promote` writes `supersedes` and nothing else, so the direction it reads is the direction it writes. Wrong if a hand-written qualified `superseded_by` must be followed in its own direction; then the row grows a field and `format_version` moves. |
 | M7-59 | `link` mode writes one `supersedes` value, and refuses a document that already names another document | The writer replaces a value and renders one scalar or one flow sequence; appending to a list needs a value type the patch does not have, and silently dropping the link the document holds is data loss. The refusal is `refused` at exit 4, because a retry with the same request cannot succeed. Wrong if a user must promote two archived documents into one decision; then `supersedes` needs a list value and a receipt field for what was replaced. |
 | M7-56 | M7-6 ships as one PR at 795 logic and 485 test lines, against the phase ceiling of 400 and 600 and `AGENTS.md`'s 600 and 900 | The split seam does not put either half under the ceiling: in-place carries the on-disk chain, the two-file transaction, the DTO, the engine branch, and the MCP, rpc and CLI surfaces, so it is about 760 logic lines alone. `chain.rs` is 245 lines and `supersede.rs` 125, and both are mostly the comments the public-item gate and the safety argument need. The PR carries the `large-pr` label and these numbers. Wrong if a reviewer reports that this diff cannot be held in one reading. |
@@ -805,8 +805,8 @@ than a line in a file.
 `promote` is not done: `adopt` becomes M7b (M7-30) and the resolution stays here, because a
 write whose result no reader follows is not a feature.
 
-**Amendment.** The seam is not taken: the phase ships as one PR at 700 logic and 807 test
-lines, against the phase ceiling of 550 and 750 (M7-57). The file list above is true and five
+**Amendment.** The seam is not taken: the phase ships as one PR at **1378 logic and 868 test
+lines**, against the phase ceiling of 550 and 750 (M7-57). The file list above is true and four
 more files change with it, each a consequence rather than new scope: `src/doctor.rs` reads the
 workspace's reach, because a resolved link must stop being a row there (case 7.4); `src/main.rs`
 passes that workspace to `doctor` and adds the `promote` command; `src/error.rs` and
@@ -918,11 +918,12 @@ would be about 660, because the DTO, the engine branch, the MCP descriptor, the 
 the whole-file renderer are shared by both modes. The phase therefore ships as one PR with the
 `large-pr` label and these numbers, and this table's 250 is reported as missed, not passed.
 
-M7-7 measured **700 logic and 807 test lines** against `main` (M7-57) — 150 over this table's
-logic ceiling and 57 over its test ceiling. The resolver's cases need the write that makes the
-link, so the seam above does not separate two reviewable halves: part 2 would carry the
-fixture, the workspace file and the index that part 1 writes. The PR carries `large-pr` and
-these numbers, and no comment was shaved and no case dropped to fit.
+M7-7 measured **1378 logic and 868 test lines** against `main` (M7-57) — 828 over this table's
+logic ceiling and 118 over its test ceiling. The test side fits `AGENTS.md`'s 900; the logic
+side does not fit 600, and the seam above does not bring either half under it, because the
+resolver's one new read parameter crosses `src/engine.rs`, `src/api/*` and `src/main.rs`, which
+the writer also changes. The PR carries `large-pr` and these numbers. No comment was shaved
+and no case dropped to fit.
 
 ## 10. SPEC corrections
 
