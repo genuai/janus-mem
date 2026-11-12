@@ -299,6 +299,7 @@ it. The registry stays open.
 | M7b-17 | The byte belt stays as a guard, and no case proves its removal | The read-back is taken over the rendered bytes, so identical bytes are always one value. The belt costs one comparison and states the rule without the reader. Proof: deleting the belt changes no test result. Reviewable if a future read-back takes anything but the bytes. |
 | M7b-18 | The `&Config` threading ships in the comparison's commit, not its own | An unused parameter fails `clippy -D warnings`, so a threading-only commit cannot pass the gate. This amends the Phase 2 split seam. |
 | M7b-19 | A request for `null` over an empty span is a no-op (case 2.10), which supersedes the second half of case 1.11 | An empty span already reads as null, so the request changes no value. |
+| M7b-20 | `write_document` reports a key as changed when the scanner refuses the block or the key, and when the line carries a trailing comment the re-render would drop. `created_block` keeps its rule | The writer cannot compare bytes it cannot read, so it does not claim they are unchanged. A whole-file write drops the comment, so the line does change. `created_block` asks whether the write inserted a block, which is a different question, and it keeps its own rule. |
 
 ## 5. Phases
 

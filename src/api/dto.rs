@@ -308,7 +308,7 @@ pub struct PromoteParams {
 pub struct Receipt {
     /// The corpus-relative path of the document that was written.
     pub path: String,
-    /// Keys whose bytes differ after the patch, sorted (M7-44).
+    /// Keys whose bytes differ after the write, sorted (M7b-11).
     pub changed_keys: Vec<String>,
     /// Keys that were absent and are now written, sorted.
     pub appended_keys: Vec<String>,
