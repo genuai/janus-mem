@@ -39,7 +39,8 @@ pub struct Document {
     pub old_hash: Option<String>,
     /// Length of the old file; zero for a create.
     pub bytes_before: usize,
-    /// True when the old file had no block, so this write inserts one.
+    /// True when the old file had no block, so this write inserts one. A block
+    /// that cannot be read is not one that was absent.
     pub created_block: bool,
 }
 
@@ -78,7 +79,11 @@ pub fn plan(
 
     let old_text = existing.and_then(|bytes| std::str::from_utf8(bytes).ok());
     let old_scan = old_text.and_then(|text| scan::scan(text).ok());
-    let created_block = old_scan.as_ref().is_none_or(|scan| scan.span.is_empty());
+    // A block that cannot be read is not a block that was absent (M7b-20).
+    let created_block = match &old_scan {
+        Some(scan) => scan.span.is_empty(),
+        None => existing.is_none(),
+    };
 
     let mut text = String::with_capacity(body.len() + 32);
     text.push_str(scan::FENCE);

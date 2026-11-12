@@ -682,24 +682,34 @@ fn case_3_4_the_receipt_lists_are_sorted_and_deduplicated() {
 fn m7b_20_a_block_the_scanner_refuses_reports_every_key_as_changed() {
     let dir = scratch();
     let root = dir.path();
-    // Two definitions of one key: the block cannot be read as keys, so the
-    // writer must not claim that `title` kept its bytes.
-    let before = "---\ntitle: Old\ntitle: Older\n---\n# Old\n";
-    write_document(root, "notes/old.md", before);
-    let answer = rpc(
-        root,
-        json!({
-            "path": "notes/old.md",
-            "frontmatter": { "title": "Old" },
-            "body": "# Old\n",
-            "mode": "overwrite",
-            "expected_hash": hash(root, "notes/old.md"),
-        }),
-    );
-    assert_eq!(answer["ok"], json!(true), "{answer}");
-    assert_eq!(answer["changed_keys"], json!(["title"]), "{answer}");
-    // The file did hold `title`, so the write appends nothing.
-    assert_eq!(answer["appended_keys"], json!([]), "{answer}");
+    // A key defined twice, and a line with no key. Neither block can be read as
+    // keys, so the writer must not claim that `title` kept its bytes. The first
+    // still holds `title`, so it appends nothing; the second holds no readable
+    // key. Neither file is reported as having had no block.
+    let cases: [(&str, &[String]); 2] = [
+        ("---\ntitle: Old\ntitle: Older\n---\n# Old\n", &[]),
+        (
+            "---\ntitle: Old\nstray value\n---\n# Old\n",
+            &["title".to_owned()],
+        ),
+    ];
+    for (before, appended) in cases {
+        write_document(root, "notes/old.md", before);
+        let answer = rpc(
+            root,
+            json!({
+                "path": "notes/old.md",
+                "frontmatter": { "title": "Old" },
+                "body": "# Old\n",
+                "mode": "overwrite",
+                "expected_hash": hash(root, "notes/old.md"),
+            }),
+        );
+        assert_eq!(answer["ok"], json!(true), "{answer}");
+        assert_eq!(answer["changed_keys"], json!(["title"]), "{answer}");
+        assert_eq!(answer["appended_keys"], json!(appended), "{answer}");
+        assert_eq!(answer["created_block"], json!(false), "{answer}");
+    }
 }
 
 #[test]
