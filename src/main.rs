@@ -279,6 +279,40 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
             )
         }
 
+        // The first CLI write. Typing the command is the consent, so it needs
+        // no `--allow-write`: that flag gates the two server surfaces (M7-15).
+        // A path names its corpus with a `corpus:path` qualifier, and a bare
+        // path is the primary's (M7-38).
+        Command::Set {
+            path,
+            expect_hash,
+            key,
+            dry_run,
+            json,
+        } => {
+            let fleet = resolve_fleet(
+                workspace,
+                cli.vault,
+                false,
+                Writes::new("janus set", true, false),
+            )?;
+            let params = serde_json::json!({
+                "path": path.to_string_lossy(),
+                "patch": patch(&key)?,
+                "expected_hash": expect_hash,
+                "dry_run": dry_run,
+            });
+            let answer = fleet.answer(&Call::new(Tool::UpdateFrontmatter, params))?;
+            if json {
+                // The receipt is the shape a consumer reads (§2.3, §9.4).
+                emit_json(&answer);
+            } else {
+                // A closed pipe is not a command failure (`janus set … | head`).
+                let _ = render_receipt(&answer, &mut std::io::stdout().lock());
+            }
+            Ok(())
+        }
+
         // The first command that reads a workspace. Resolution happens here,
         // at the edge, and arrives below as a value (§5.1 of SPEC, §6.11).
         Command::Corpora { json } => {
@@ -738,9 +772,10 @@ fn refuse_workspace(command: &Command, named: Option<&Path>) -> Result<(), Janus
 ///
 /// `search`, `facts`, `read`, `corpora`, `rpc` and `mcp` read its corpora.
 /// `index`, `scan` and `status` read its prune for the one corpus they name
-/// (M6b-30). The list names the commands that do read a workspace, not the ones
-/// that do not: a command added later refuses the flag until someone writes it
-/// to read one, so the default is the safe one.
+/// (M6b-30). `set` reads its corpora, because `read_only` and a corpus role live
+/// only in a workspace (M7-38). The list names the commands that do read a
+/// workspace, not the ones that do not: a command added later refuses the flag
+/// until someone writes it to read one, so the default is the safe one.
 ///
 /// Deliberately absent: `init`, `chunks`, `doctor`, `ids`, `moves`, `lineage`
 /// and `suggest-links` work on one corpus and apply no prune, so the flag must
@@ -755,6 +790,7 @@ fn reads_workspace(command: &Command) -> bool {
             | Command::Scan { .. }
             | Command::Index { .. }
             | Command::Corpora { .. }
+            | Command::Set { .. }
             | Command::Rpc { .. }
             | Command::Mcp { .. }
     )
@@ -794,6 +830,83 @@ fn print_config_warnings(fleet: &Fleet) {
     }
 }
 
+/// The `--key` pairs as the patch object one call carries.
+///
+/// `--key k=v` writes the string `v`, and `--key k` writes `null`, which is how
+/// a patch states a null value (M7-6). A key that is not a key is refused by
+/// the writer, not here, so the refusal names the document.
+///
+/// # Errors
+///
+/// [`JanusError::Usage`] when one key is named twice. A JSON object cannot hold
+/// it twice, so the writer's own duplicate check cannot see this request; the
+/// repetition is a usage error wherever it is spelled (case 1.16).
+fn patch(keys: &[String]) -> Result<serde_json::Map<String, serde_json::Value>, JanusError> {
+    let mut patch: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for pair in keys {
+        let (key, value) = match pair.split_once('=') {
+            Some((key, value)) => (key, serde_json::Value::String(value.to_owned())),
+            None => (pair.as_str(), serde_json::Value::Null),
+        };
+        if patch.contains_key(key) {
+            return Err(JanusError::Usage {
+                message: format!("the patch names `{key}` twice"),
+            });
+        }
+        patch.insert(key.to_owned(), value);
+    }
+    Ok(patch)
+}
+
+/// Writes the human form of one receipt (§2.3).
+///
+/// The two hashes share one line: the new one is the `expected_hash` of the next
+/// write, so a reader copies it from here (M7-18). A dry run says so once and
+/// changes no file.
+fn render_receipt(value: &serde_json::Value, out: &mut dyn Write) -> std::io::Result<()> {
+    let dry_run = value["dry_run"].as_bool() == Some(true);
+    let label = if dry_run { "would write" } else { "wrote" };
+    writeln!(out, "{label:<12}{}", dash(&value["path"]))?;
+    writeln!(out, "{:<12}{}", "changed", names(&value["changed_keys"]))?;
+    writeln!(out, "{:<12}{}", "appended", names(&value["appended_keys"]))?;
+    writeln!(
+        out,
+        "{:<12}{} -> {}",
+        "hash",
+        dash(&value["old_hash"]),
+        dash(&value["new_hash"])
+    )?;
+    writeln!(
+        out,
+        "{:<12}{} -> {} bytes",
+        "bytes", value["bytes_before"], value["bytes_after"]
+    )?;
+    if dry_run {
+        writeln!(out, "{:<12}nothing was written", "dry run")?;
+    }
+    Ok(())
+}
+
+/// One optional string from an answer, or a dash.
+fn dash(value: &serde_json::Value) -> &str {
+    value.as_str().unwrap_or("-")
+}
+
+/// One receipt's key list as one line, or a dash when no key changed.
+fn names(value: &serde_json::Value) -> String {
+    let keys: Vec<&str> = value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    if keys.is_empty() {
+        "-".to_owned()
+    } else {
+        keys.join(", ")
+    }
+}
+
 /// Writes one object to stdout as pretty JSON. A closed pipe is not a command
 /// failure (`… --json | head`).
 fn emit_json(value: &impl serde::Serialize) {
@@ -816,6 +929,7 @@ fn failure_envelope_wanted(cli: &Cli) -> bool {
             | Command::Lineage { json: true, .. }
             | Command::Read { json: true, .. }
             | Command::Status { json: true, .. }
+            | Command::Set { json: true, .. }
     )
 }
 

@@ -1095,7 +1095,7 @@ janus lineage <PATH|--topic QUERY> [--json]
 janus facts [--types T,..] [--tags T,..] [--query Q] [--scope S]... [--corpus primary|all|<id>] [--workspace PATH] [--no-rebuild] [--no-embeddings] [--json]   # authoritative_facts
 janus read <PATH> [--corpus primary|<id>] [--workspace PATH] [--json]
 janus status [--workspace PATH] [--json]
-janus set <PATH> --expect-hash H --key status=superseded [--key k=v ...] [--dry-run]
+janus set <PATH> --expect-hash H --key status=superseded [--key k=v ...] [--dry-run] [--json]
 janus write <PATH> --frontmatter f.yaml (--body -|f.md)
             [--create | --overwrite --expect-hash H] [--dry-run]
 janus supersede <OLD> <NEW> [--append-only] [--dry-run]
@@ -1122,7 +1122,7 @@ like it read the workspace.
 
 Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash, `4` refused (unsafe or unsupported operation). Human output is a compact table; `--json` is stable and versioned. From M7, `3` is carried by `conflict` and `precondition_required`: both mean re-read, then retry (§9.3).
 
-`--allow-write` gates the two server surfaces, `janus mcp` and `janus rpc`, and nothing else. A CLI write command needs no flag, because typing the command is the consent (M7-15).
+`--allow-write` gates the two server surfaces, `janus mcp` and `janus rpc`, and nothing else. A CLI write command needs no flag, because typing the command is the consent (M7-15). `janus set` **requires** `--expect-hash`: a person typing the command sees the requirement in `--help`, and a server answers `precondition_required` when an agent omits it (M7-51).
 
 Exit codes belong to the CLI. A command exits; a server answers. A tool failure inside `janus rpc` or `janus mcp` is a response line with `ok: false` and a stable `code`, and the process exits `0` when its input ends. Only a startup failure — no corpus, no config — exits `1`, and it exits before the loop starts. §9.4 states the failure object.
 
@@ -1286,9 +1286,11 @@ the words the error type already uses, and `hint` is optional, written for the
 agent and not for the human. A failure carries no `results`.
 
 **Failure on the CLI.** The five tool commands above print the failure object on
-stdout when `--json` is set, and then exit with the code of §9.1. A receipt
-command prints its `error:` line on stderr and nothing on stdout, so a caller can
-tell "no report" from "a report with no rows".
+stdout when `--json` is set, and then exit with the code of §9.1. `janus set
+--json` does the same with its receipt and with its failures, because a script
+that reads a receipt must be able to read the reason there is none. A receipt
+command without `--json` prints its `error:` line on stderr and nothing on
+stdout, so a caller can tell "no report" from "a report with no rows".
 
 **Receipt.** A write tool answers a receipt, not an envelope:
 
