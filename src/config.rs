@@ -707,9 +707,13 @@ impl DecayConfig {
     /// Half-life for a canonical type: the per-type override, else the global
     /// default.
     ///
-    /// A global half-life of zero or less turns decay off for every type, so a
+    /// A global half-life of zero turns decay off for every type, so a
     /// `[decay.by_type]` entry cannot keep one type decaying (§6.3). A per-type
     /// override of zero keeps its own meaning: that type never decays.
+    ///
+    /// A negative global value is warned about and falls back to the default
+    /// before it reaches here. The `<= 0.0` guard is a belt for a
+    /// `DecayConfig` built directly in a test.
     #[must_use]
     pub fn half_life_for(&self, type_name: &str) -> f64 {
         if self.half_life_days <= 0.0 {
