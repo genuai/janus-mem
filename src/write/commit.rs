@@ -1,20 +1,22 @@
 //! The commit: plan bytes, checked under the corpus lock, then replaced on disk
 //! (§7.3 steps 2 and 7).
 //!
-//! [`commit`] does the four things the pure side cannot: it compares the hash
-//! the caller saw with the bytes on disk, takes the corpus lock, compares again
-//! under that lock, and replaces the file. The first comparison is a fast path;
-//! the second is the one the lock buys (I6, M7-10).
+//! [`commit`] does the four things the pure side cannot: it resolves the path it
+//! may write, compares the hash the caller saw with the bytes on disk, takes the
+//! corpus lock, compares again under that lock, and replaces the file. The first
+//! comparison is a fast path; the second is the one the lock buys (I6, M7-10).
 //!
 //! # Order
 //!
 //! ```text
+//! resolve the link ── outside ──▶ OutsideCorpus
 //! read + hash ── mismatch ──▶ Conflict          (the fast path, no lock)
 //!   │ match
 //!   ├─ after_pre_lock seam                      (test only, M7-33)
 //! lock ── busy ─────────────▶ Busy
 //!   ├─ read + hash ── mismatch ──▶ Conflict     (the authoritative check)
 //!   ├─ rename the new bytes in                  (super::atomic)
+//!   └─ sync the directory ── failure ──▶ Unsynced
 //! drop the lock
 //! ```
 //!
@@ -32,11 +34,12 @@ use std::time::Duration;
 
 use thiserror::Error;
 
+use crate::config::{self, Config};
 use crate::error::JanusError;
 use crate::id::Blake3Hash;
 use crate::index::store::{self, Lock};
 
-use super::atomic;
+use super::atomic::{self, Mode};
 use super::patch::Plan;
 
 /// What a successful commit changed, as the receipt reports it (§2.3).
@@ -55,8 +58,12 @@ pub struct Committed {
     pub bytes_after: usize,
 }
 
-/// A failure to commit. Every variant is documented, and none is a partial
-/// write: a refusal leaves the file byte-identical.
+/// A failure to commit.
+///
+/// Every variant but [`CommitError::Unsynced`] is a refusal: the file keeps its
+/// bytes and no temp file is left. `Unsynced` is the one answer that says the
+/// bytes **were** written, so a caller cannot report "not written" when the
+/// document already changed.
 #[derive(Debug, Error)]
 pub enum CommitError {
     /// The bytes on disk are not the bytes the plan was made from.
@@ -78,6 +85,27 @@ pub enum CommitError {
         /// The lock file that could not be acquired in time.
         path: PathBuf,
     },
+    /// The path resolves outside the corpus, so no write may touch it.
+    ///
+    /// An in-corpus symlink to another corpus is the reachable case: writing
+    /// through it would change a file this corpus does not own (case 2.4c).
+    #[error("{path} resolves outside the corpus")]
+    OutsideCorpus {
+        /// The path the caller gave.
+        path: PathBuf,
+    },
+    /// The write landed and the directory sync did not.
+    ///
+    /// The bytes are on disk and visible to every reader. Only their survival
+    /// across a crash is in doubt, so this is not a refusal.
+    #[error("the bytes in {path} are written; syncing its directory failed: {source}")]
+    Unsynced {
+        /// The directory whose entry could not be synced.
+        path: PathBuf,
+        /// The underlying IO failure.
+        #[source]
+        source: io::Error,
+    },
     /// A file or directory operation failed.
     #[error("{path}: {source}")]
     Io {
@@ -92,7 +120,8 @@ pub enum CommitError {
 /// The two points a test needs to reach, and production does not (§2.4a, M7-33).
 ///
 /// A seam is a parameter, like [`crate::clock::Clock`]: nothing reads ambient
-/// state, and a caller that wants no seam passes [`NoHooks`].
+/// state, and a caller that wants no seam passes [`NoHooks`]. Both methods name
+/// the path the caller gave, not the file a link resolves to.
 pub trait Hooks {
     /// Runs after the pre-lock check passed and before the lock is taken.
     ///
@@ -104,7 +133,7 @@ pub trait Hooks {
     ///
     /// **Not called in this phase.** A commit writes one file, so there is no
     /// second rename; the seam exists for the two-file transaction (M7-6), and
-    /// case 2.4a's hook asserts that it stays uncalled here.
+    /// case 2.4b proves it stays uncalled here.
     fn before_second_rename(&self, path: &Path);
 }
 
@@ -120,15 +149,17 @@ impl Hooks for NoHooks {
 
 /// Everything a commit needs, passed explicitly.
 ///
-/// `index_dir` is the directory that holds `.janus/lock`. It is a separate field
-/// rather than `root.join(".janus")` because a corpus can move its index
-/// directory (`config::resolve_index_dir`), and a writer that locked a different
-/// directory would race the index builder instead of waiting for it (M7-9).
+/// The lock directory is not a field. It is resolved inside [`commit`] from
+/// `root` and `config` with [`config::resolve_index_dir`], the same function the
+/// index builder uses, so two callers cannot lock two different files for one
+/// corpus (M7-45).
 pub struct CommitOptions<'a> {
-    /// The document to replace.
+    /// The document to replace, as the caller named it.
     pub path: PathBuf,
-    /// The directory holding [`store::LOCK_FILE`], as the builder resolves it.
-    pub index_dir: PathBuf,
+    /// The corpus root: the boundary a path must resolve inside.
+    pub root: PathBuf,
+    /// The corpus config, for the index directory that holds the lock.
+    pub config: &'a Config,
     /// How long to wait for the lock before answering [`CommitError::Busy`].
     pub timeout: Duration,
     /// The test seams. Production passes [`NoHooks`].
@@ -140,25 +171,33 @@ pub struct CommitOptions<'a> {
 ///
 /// The caller passes the hash it saw; this function compares it twice. Nothing
 /// here reads `expected_hash` from a request, writes a receipt, or touches the
-/// index (M7-4, M7-17).
+/// index (M7-4, M7-17). The target must be an existing file: a commit proves the
+/// bytes it replaces, and creating one is M7-5's `Mode::New`.
 ///
 /// # Errors
 ///
 /// [`CommitError::Conflict`] when the bytes on disk are not the plan's,
-/// [`CommitError::Busy`] when the lock is held past `timeout`, and
-/// [`CommitError::Io`] naming the path for anything else.
+/// [`CommitError::OutsideCorpus`] when the path resolves outside the root,
+/// [`CommitError::Busy`] when the lock is held past `timeout`,
+/// [`CommitError::Unsynced`] when the write landed and the directory sync did
+/// not, and [`CommitError::Io`] naming the path for anything else.
 pub fn commit(plan: &Plan, options: &CommitOptions<'_>) -> Result<Committed, CommitError> {
+    // A link inside the corpus is a document under its own path, so the bytes
+    // live at its target. Replacing the link itself would leave the target stale
+    // and the corpus with two documents (case 2.4c).
+    let target = resolve(&options.path, &options.root)?;
+
     // The fast path: the common conflict never pays for a lock (M7-10).
-    verify(&options.path, &plan.old_hash)?;
+    verify(&target, &plan.old_hash)?;
     options.hooks.after_pre_lock(&options.path);
 
     let _lock = take_lock(options)?;
 
     // The authoritative check. Without it, two writers that both pass the fast
     // path would both write, and the second would erase the first (I6).
-    verify(&options.path, &plan.old_hash)?;
+    verify(&target, &plan.old_hash)?;
 
-    atomic::replace(&options.path, plan.text.as_bytes())?;
+    atomic::replace(&target, plan.text.as_bytes(), Mode::Preserve)?;
 
     Ok(Committed {
         old_hash: plan.old_hash.clone(),
@@ -168,9 +207,26 @@ pub fn commit(plan: &Plan, options: &CommitOptions<'_>) -> Result<Committed, Com
     })
 }
 
+/// The file to write: `path` with every link resolved, inside `root`.
+fn resolve(path: &Path, root: &Path) -> Result<PathBuf, CommitError> {
+    let target = dunce::canonicalize(path).map_err(|source| CommitError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if target.starts_with(&root) {
+        Ok(target)
+    } else {
+        Err(CommitError::OutsideCorpus {
+            path: path.to_path_buf(),
+        })
+    }
+}
+
 /// Takes the corpus lock, or says why not.
 fn take_lock(options: &CommitOptions<'_>) -> Result<Lock, CommitError> {
-    Lock::acquire(&options.index_dir, options.timeout).map_err(|error| match error {
+    let dir = config::resolve_index_dir(&options.root, &options.config.index_dir);
+    Lock::acquire(&dir, options.timeout).map_err(|error| match error {
         JanusError::LockTimeout { path } => CommitError::Busy { path },
         JanusError::Write { path, source } | JanusError::CreateDir { path, source } => {
             CommitError::Io { path, source }
@@ -178,7 +234,7 @@ fn take_lock(options: &CommitOptions<'_>) -> Result<Lock, CommitError> {
         // The lock read fails in no other way this writer can name, so the
         // message keeps the cause and the path keeps the directory.
         other => CommitError::Io {
-            path: options.index_dir.join(store::LOCK_FILE),
+            path: dir.join(store::LOCK_FILE),
             source: io::Error::other(other.to_string()),
         },
     })

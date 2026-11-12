@@ -12,10 +12,12 @@
 //!
 //! The IO half, in two:
 //!
-//! 4. [`commit`] compares the hash the caller saw with the bytes on disk, takes
-//!    the corpus lock, compares again under it, and replaces the file.
+//! 4. [`commit`] resolves the path it may write, compares the hash the caller saw
+//!    with the bytes on disk, takes the corpus lock, compares again under it, and
+//!    replaces the file.
 //! 5. [`replace`] makes that replacement durable: temp file, `fsync`, `rename`,
-//!    parent `fsync`.
+//!    parent `fsync`. An existing document keeps its mode and owner; a new one
+//!    takes the umask's mode ([`Mode`]).
 //!
 //! # What this module refuses to do
 //!
@@ -23,7 +25,8 @@
 //! writes are enabled, builds no receipt, and maps no error to a code or an exit
 //! code: the surface does that (M7-4). It never refreshes the index (M7-17). A
 //! refusal returns an error and no bytes, so a caller cannot write a half-patched
-//! file.
+//! file. The one answer that is not a refusal is [`CommitError::Unsynced`]: the
+//! bytes are written and only their survival across a crash is in doubt.
 //!
 //! # Creating a block
 //!
@@ -47,7 +50,7 @@ mod patch;
 mod scan;
 mod value;
 
-pub use atomic::{replace, sync_parent_dir};
+pub use atomic::{Mode, replace, sync_parent_dir};
 pub use commit::{CommitError, CommitOptions, Committed, Hooks, NoHooks, commit};
 pub use patch::{Patch, Plan, plan};
 pub use scan::reason;
