@@ -6,6 +6,11 @@
 # write command with `--dry-run` over them, and reports three numbers: visited,
 # changed on disk, and refusals grouped by shape.
 #
+# A dry run never writes, so it cannot show that a write is idempotent. A second
+# pass writes each document with the value it already holds, on a copy, twice,
+# and reports how many documents changed. A value that is already right must
+# change none.
+#
 # A refusal counts only when it names the shape its document was built for: a
 # refusal nobody expected is a failure, not a number. The corpus is generated,
 # never committed.
@@ -73,7 +78,10 @@ printf '# Rehearsal\n\nbody\n' > "$ROOT/body.md"
 # write command owes. `ok` is a receipt; `refuse:REASON` is a refusal that must
 # name REASON, the reason the scanner returns for that shape.
 build() {
-  local shape=$1 count=$2 n path key set_owed sup_owed pro_owed
+  local shape=$1 count=$2 n path key set_owed sup_owed pro_owed same
+  # `same` is the request that asks for the value the document already holds.
+  # Empty means the shape has no such request, and the second pass skips it.
+  same=""
   case $shape in
     block_sequence) set_owed=refuse:BlockSequence ;;
     flow_mapping) set_owed=refuse:FlowMapping ;;
@@ -90,14 +98,14 @@ build() {
   for ((n = 1; n <= count; n++)); do
     path="notes/$shape-$n.md"
     case $shape in
-      scalar) key=title; printf -- '---\ntitle: Plain %s\nstatus: active\n---\n\n# Note %s\n\nbody\n' "$n" "$n" > "$CORPUS/$path" ;;
+      scalar) key=title; same="status=Active"; printf -- '---\ntitle: Plain %s\nstatus: active\n---\n\n# Note %s\n\nbody\n' "$n" "$n" > "$CORPUS/$path" ;;
       quoted) key=title; printf -- '---\ntitle: "Line %s\\nwith \\"quotes\\""\n---\n\nbody\n' "$n" > "$CORPUS/$path" ;;
       flow_sequence) key=tags; printf -- '---\ntags: [db, rust, note%s]\n---\n\nbody\n' "$n" > "$CORPUS/$path" ;;
-      comment) key=status; printf -- '---\nstatus: active  # keep me, note %s\n---\n\nbody\n' "$n" > "$CORPUS/$path" ;;
+      comment) key=status; same="status=Active"; printf -- '---\nstatus: active  # keep me, note %s\n---\n\nbody\n' "$n" > "$CORPUS/$path" ;;
       empty) key=title; printf -- '---\ntitle:\n---\n\nbody\n' > "$CORPUS/$path" ;;
       crlf) key=title; printf -- '---\r\ntitle: Plain %s\r\n---\r\n\r\nbody\r\n' "$n" > "$CORPUS/$path" ;;
       bom) key=title; { printf '\xef\xbb\xbf'; printf -- '---\ntitle: Plain %s\n---\n\nbody\n' "$n"; } > "$CORPUS/$path" ;;
-      nonascii) key=title; path="notes/ünïcode/naïve-$n.md"; printf -- '---\ntitle: È stato deciso — 日本語 %s\n---\n\nbody\n' "$n" > "$CORPUS/$path" ;;
+      nonascii) key=title; same="title=È stato deciso — 日本語 $n"; path="notes/ünïcode/naïve-$n.md"; printf -- '---\ntitle: È stato deciso — 日本語 %s\n---\n\nbody\n' "$n" > "$CORPUS/$path" ;;
       block_sequence) key=steps; printf -- '---\nsteps:\n  - one\n  - two\n---\n\nbody\n' > "$CORPUS/$path" ;;
       flow_mapping) key=owner; printf -- '---\nowner: {name: me}\n---\n\nbody\n' > "$CORPUS/$path" ;;
       multiline) key=summary; printf -- '---\nsummary: |\n  one\n  two\n---\n\nbody\n' > "$CORPUS/$path" ;;
@@ -106,7 +114,8 @@ build() {
       duplicate_key) key=status; printf -- '---\nstatus: active\nstatus: draft\n---\n\nbody\n' > "$CORPUS/$path" ;;
       no_frontmatter) key=title; printf -- '# no frontmatter %s\n\nbody\n' "$n" > "$CORPUS/$path" ;;
     esac
-    printf '%s|%s|%s|%s|%s|%s\n' "$path" "$shape" "$key" "$set_owed" "$sup_owed" "$pro_owed" >> "$MANIFEST"
+    printf '%s|%s|%s|%s|%s|%s|%s\n' "$path" "$shape" "$key" "$set_owed" "$sup_owed" \
+      "$pro_owed" "$same" >> "$MANIFEST"
   done
 }
 
@@ -121,10 +130,16 @@ VISITED=$(wc -l < "$MANIFEST" | tr -d ' ')
 
 cp -R "$CORPUS" "$ROOT/snapshot"
 
-# The etag a read reports for one document, which is what a write must present.
-etag() {
-  "$JANUS" --workspace "$WS" read "$1" --json 2>/dev/null \
+# The etag a read reports for one document in one workspace, which is what a
+# write must present.
+etag_in() {
+  "$JANUS" --workspace "$1" read "$2" --json 2>/dev/null \
     | sed -n 's/^ *"content_hash": "\([0-9a-f]*\)",*$/\1/p'
+}
+
+# The etag of a document in the corpus under rehearsal.
+etag() {
+  etag_in "$WS" "$1"
 }
 
 # One command's answer as `ok`, `refuse:REASON`, or `other:CODE`. Anything else
@@ -153,7 +168,7 @@ check() {
   [[ $got != refuse:* ]] || printf '%s %s %s\n' "$command" "$shape" "${got#refuse:}" >> "$REFUSALS"
 }
 
-while IFS='|' read -r path shape key set_owed sup_owed pro_owed; do
+while IFS='|' read -r path shape key set_owed sup_owed pro_owed same; do
   hash=$(etag "$path")
   [[ -n $hash ]] || { echo "error: no etag for $path" >&2; exit 2; }
   check set "$path" "$shape" "$set_owed" \
@@ -179,6 +194,49 @@ diff -r -q "$ROOT/snapshot" "$CORPUS" > "$DIFF" 2>&1 || true
 CHANGED=$(grep -c '^Files ' "$DIFF" || true)
 ALIEN=$(grep -c '^Only in' "$DIFF" || true)
 
+# ── the real-write pass ──
+#
+# The dry runs above never write, so they cannot show that a write is stable.
+# This pass copies the corpus, writes each document with the value it already
+# holds, and counts the documents whose bytes changed. It runs twice: the second
+# run is the one that proves the first was not a rewrite (cases 2.7 and 2.8).
+
+REAL="$ROOT/real"
+cp -R "$CORPUS" "$REAL"
+{
+  printf '[[corpora]]\nid = "main"\nroot = "real"\nrole = "primary"\n\n'
+  printf '[[corpora]]\nid = "context"\nroot = "archive"\nrole = "archived"\n\n'
+  printf '[search]\nallow_cross_corpus_links = true\n'
+} > "$ROOT/real-workspace.toml"
+
+# The identity of one file: its length and its checksum, in one word.
+file_sum() {
+  cksum < "$1"
+}
+
+# Writes every document with the value it already holds, and prints
+# "<changed> <total> <failed>".
+same_value_pass() {
+  local changed=0 total=0 failed=0 before after hash
+  while IFS='|' read -r path shape key set_owed sup_owed pro_owed same; do
+    [[ -n $same ]] || continue
+    total=$((total + 1))
+    hash=$(etag_in "$ROOT/real-workspace.toml" "$path")
+    before=$(file_sum "$REAL/$path")
+    "$JANUS" --workspace "$ROOT/real-workspace.toml" set "$path" \
+      --expect-hash "$hash" --key "$same" --json > /dev/null 2>&1 \
+      || failed=$((failed + 1))
+    after=$(file_sum "$REAL/$path")
+    [[ $before == "$after" ]] || changed=$((changed + 1))
+  done < "$MANIFEST"
+  echo "$changed $total $failed"
+}
+
+read -r SAME_1_CHANGED SAME_TOTAL SAME_1_FAILED <<< "$(same_value_pass)"
+read -r SAME_2_CHANGED _ SAME_2_FAILED <<< "$(same_value_pass)"
+SAME_CHANGED=$((SAME_1_CHANGED + SAME_2_CHANGED))
+SAME_FAILED=$((SAME_1_FAILED + SAME_2_FAILED))
+
 echo "rehearsal: $ROOT"
 echo "  visited        $VISITED documents"
 echo "  write paths    set, write, supersede, promote (every one with --dry-run)"
@@ -186,8 +244,12 @@ echo "  changed        $CHANGED documents"
 echo "  added/removed  $ALIEN"
 echo "  refusals       $(wc -l < "$REFUSALS" | tr -d ' '):"
 [[ -s $REFUSALS ]] && sort "$REFUSALS" | uniq -c | sed 's/^ */    /'
+echo "  same-value     $SAME_1_CHANGED of $SAME_TOTAL documents changed, run 1 of 2"
+echo "  same-value     $SAME_2_CHANGED of $SAME_TOTAL documents changed, run 2 of 2"
 
 STATUS=0
 [[ $CHANGED -eq 0 && $ALIEN -eq 0 ]] || { cat "$DIFF" >&2; echo "FAIL: a dry run touched the corpus" >&2; STATUS=1; }
 [[ ! -s $MISMATCH ]] || { sed 's/^/  /' "$MISMATCH" >&2; echo "FAIL: a command did not answer what its shape owed" >&2; STATUS=1; }
+[[ $SAME_CHANGED -eq 0 ]] || { echo "FAIL: $SAME_CHANGED same-value writes changed bytes" >&2; STATUS=1; }
+[[ $SAME_FAILED -eq 0 ]] || { echo "FAIL: $SAME_FAILED same-value writes were refused" >&2; STATUS=1; }
 exit $STATUS

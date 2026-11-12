@@ -3,10 +3,12 @@
 //!
 //! The script builds 200 documents, one per shape the scanner knows, runs the
 //! four write commands with `--dry-run` over them, and compares every file byte
-//! for byte. This test runs that same measurement, so the numbers a person reads
-//! from the script are the numbers CI asserts. The script exits non-zero on a
-//! changed byte, a refusal that misses its shape, or a corpus that is not 200
-//! documents; this test names which of those broke.
+//! for byte. It then writes a copy for real, twice, with the value each document
+//! already holds, and counts the documents whose bytes changed. This test runs
+//! that same measurement, so the numbers a person reads from the script are the
+//! numbers CI asserts. The script exits non-zero on a changed byte, a refusal
+//! that misses its shape, a same-value write that changed a byte, or a corpus
+//! that is not 200 documents; this test names which of those broke.
 //!
 //! The rehearsal needs a shell and a POSIX `diff`, so it runs where the suite
 //! runs (Linux and macOS). It sleeps nowhere, reads no clock, opens no port and
@@ -75,6 +77,20 @@ impl Rehearsal {
             .unwrap_or_else(|| panic!("`{label}` is not a number: {line}"))
     }
 
+    /// Every number on a labelled line, in report order.
+    fn numbers(&self, label: &str) -> Vec<usize> {
+        self.stdout
+            .lines()
+            .filter(|line| line.trim_start().starts_with(label))
+            .map(|line| {
+                line.split_whitespace()
+                    .nth(1)
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_else(|| panic!("`{label}` is not a number: {line}"))
+            })
+            .collect()
+    }
+
     /// The refusals, as `(command, shape, count)`.
     fn refusals(&self) -> BTreeMap<(String, String), usize> {
         self.stdout
@@ -118,6 +134,17 @@ fn rehearsal_visits_200_documents_changes_no_byte_and_names_every_refusal() {
         rehearsal.number("refusals"),
         43,
         "every refusal is one of the shapes the corpus was built for"
+    );
+
+    // Cases 2.7 and 2.8: a write of the value a document already holds changes
+    // no byte, on the first run and on the second. 64 documents have such a
+    // request: `status=Active` where the file says `status: active`, and a title
+    // that only differs from its rendering by its quoting.
+    assert_eq!(
+        rehearsal.numbers("same-value"),
+        [0, 0],
+        "a same-value write changed a byte:\n{}",
+        rehearsal.stdout
     );
 }
 
