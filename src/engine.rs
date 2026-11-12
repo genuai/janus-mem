@@ -33,7 +33,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::api::dto::{
-    FactsParams, LineageParams, ReadParams, SearchParams, StatusParams, UpdateParams,
+    FactsParams, LineageParams, ReadParams, SearchParams, StatusParams, UpdateParams, WriteMode,
+    WriteParams,
 };
 use crate::api::{ApiCode, Call, Failure, Receipt, Tool, Writes};
 use crate::clock::Clock;
@@ -50,7 +51,7 @@ use crate::search::federate::{self, Choice, Target};
 use crate::status;
 use crate::vault::{self, WalkOptions};
 use crate::workspace::{Role, Workspace};
-use crate::write::{self, CommitError, CommitOptions, NoHooks, Patch, PatchError, Plan};
+use crate::write::{self, CommitError, CommitOptions, Document, NoHooks, Patch, PatchError, Plan};
 
 /// What one call returned: the envelope, and the code when it failed (M6 §2.3).
 #[derive(Debug, Clone)]
@@ -270,6 +271,10 @@ impl Engine {
                 let params: UpdateParams = params(call)?;
                 encode(self.update(&params)?)
             }
+            Tool::WriteDocument => {
+                let params: WriteParams = params(call)?;
+                encode(self.write_document(&params)?)
+            }
         }
     }
 
@@ -317,8 +322,23 @@ impl Engine {
             dry_run,
         };
         let plan = write::plan(&text, &patch).map_err(|error| patch_refusal(&named, error))?;
-        check_etag(&named, params.expected_hash.as_deref(), &plan, dry_run)?;
-        let receipt = receipt(&self.root, &found, &plan, dry_run);
+        check_etag(
+            &named,
+            params.expected_hash.as_deref(),
+            Some(&plan.old_hash),
+            &plan.changed_keys,
+            dry_run,
+        )?;
+        let receipt = Receipt {
+            path: relative(&self.root, &found),
+            changed_keys: plan.changed_keys.clone(),
+            appended_keys: plan.appended_keys.clone(),
+            old_hash: Some(plan.old_hash.clone()),
+            new_hash: plan.new_hash.clone(),
+            dry_run,
+            bytes_before: plan.bytes_before,
+            bytes_after: plan.bytes_after,
+        };
         if dry_run {
             return Ok(receipt);
         }
@@ -326,20 +346,117 @@ impl Engine {
         Ok(receipt)
     }
 
+    /// One `write_document` call: the gate, then the whole file, then a receipt
+    /// (§9.3, M7-5).
+    ///
+    /// A create never renames: [`write::create_document`] opens the target with
+    /// `create_new`, so an existing file answers `path_exists` and keeps its
+    /// bytes (M7-27). An overwrite shares the checked commit the patch uses, so
+    /// it verifies the etag twice and holds the corpus lock.
+    fn write_document(&self, params: &WriteParams) -> Result<Receipt, JanusError> {
+        let named = self.name.as_deref().unwrap_or(&self.config.corpus_id);
+        if let Some(refusal) = self.writes.refusal(named, &self.config.corpus_id) {
+            return Err(refusal);
+        }
+        let named = PathBuf::from(&params.path);
+        // The extension is the corpus's own admission rule, and a create has no
+        // file to resolve yet, so it is checked before either mode resolves one
+        // (M7-52).
+        if !named.file_name().is_some_and(vault::is_markdown) {
+            return Err(usage(format!(
+                "{} is not Markdown; a write needs a .md or .markdown document",
+                named.display()
+            )));
+        }
+        let dry_run = params.dry_run.unwrap_or(false);
+        match params.mode {
+            WriteMode::Create => self.create_document(&named, params, dry_run),
+            WriteMode::Overwrite => self.overwrite_document(&named, params, dry_run),
+        }
+    }
+
+    /// The create half: a resolved new path, the whole file, and a receipt.
+    fn create_document(
+        &self,
+        named: &Path,
+        params: &WriteParams,
+        dry_run: bool,
+    ) -> Result<Receipt, JanusError> {
+        let found = write::document_target(&self.root, named)
+            .map_err(|error| commit_refusal(named, error))?;
+        let document = write::plan_document(&params.frontmatter, &params.body, None)
+            .map_err(|error| patch_refusal(named, error))?;
+        let receipt = document_receipt(&self.root, &found, &document, dry_run);
+        // A preview of a request that cannot succeed is misleading, so an
+        // existing path is refused in both modes (case 5.2).
+        if dry_run {
+            if fs::symlink_metadata(&found).is_ok() {
+                return Err(JanusError::PathExists {
+                    path: named.to_path_buf(),
+                });
+            }
+            return Ok(receipt);
+        }
+        let options = self.options(&found);
+        write::create_document(&found, &document, &options).map_err(|error| {
+            if let CommitError::Exists { .. } = error {
+                JanusError::PathExists {
+                    path: named.to_path_buf(),
+                }
+            } else {
+                commit_refusal(named, error)
+            }
+        })?;
+        Ok(receipt)
+    }
+
+    /// The overwrite half: the old bytes, the whole file, and a receipt.
+    fn overwrite_document(
+        &self,
+        named: &Path,
+        params: &WriteParams,
+        dry_run: bool,
+    ) -> Result<Receipt, JanusError> {
+        let found = target(&self.root, &params.path)?;
+        let bytes = fs::read(&found).map_err(|source| JanusError::Write {
+            path: named.to_path_buf(),
+            source,
+        })?;
+        let document = write::plan_document(&params.frontmatter, &params.body, Some(&bytes))
+            .map_err(|error| patch_refusal(named, error))?;
+        check_etag(
+            named,
+            params.expected_hash.as_deref(),
+            document.old_hash.as_deref(),
+            &document.changed_keys,
+            dry_run,
+        )?;
+        let receipt = document_receipt(&self.root, &found, &document, dry_run);
+        if dry_run {
+            return Ok(receipt);
+        }
+        let options = self.options(&found);
+        write::overwrite_document(&document, &options)
+            .map_err(|error| commit_refusal(named, error))?;
+        Ok(receipt)
+    }
+
+    /// The options every write of this corpus shares.
+    fn options<'a>(&'a self, found: &Path) -> CommitOptions<'a> {
+        CommitOptions {
+            path: found.to_path_buf(),
+            root: self.root.clone(),
+            config: &self.config,
+            timeout: store::LOCK_TIMEOUT,
+            hooks: &NoHooks,
+        }
+    }
+
     /// Replaces the document under the corpus lock, or refuses (M7-3, M7-9).
     fn commit(&self, path: &Path, named: &Path, plan: &Plan) -> Result<(), JanusError> {
-        write::commit(
-            plan,
-            &CommitOptions {
-                path: path.to_path_buf(),
-                root: self.root.clone(),
-                config: &self.config,
-                timeout: store::LOCK_TIMEOUT,
-                hooks: &NoHooks,
-            },
-        )
-        .map(|_| ())
-        .map_err(|error| commit_refusal(named, error))
+        write::commit(plan, &self.options(path))
+            .map(|_| ())
+            .map_err(|error| commit_refusal(named, error))
     }
 
     /// One status answer, unrendered: the same value the `status` arm encodes.
@@ -648,7 +765,7 @@ impl Fleet {
             }
             // A write names one corpus's file, so it answers for one corpus,
             // and the qualifier or `corpus` parameter decides which (M7-38).
-            Tool::UpdateFrontmatter => {
+            Tool::UpdateFrontmatter | Tool::WriteDocument => {
                 let member = self.one(found, &choice)?;
                 member.engine().answer(&Call::new(call.tool, fields))
             }
@@ -856,27 +973,28 @@ fn target(root: &Path, given: &str) -> Result<PathBuf, JanusError> {
 fn check_etag(
     path: &Path,
     expected: Option<&str>,
-    plan: &Plan,
+    old_hash: Option<&str>,
+    changed_keys: &[String],
     dry_run: bool,
 ) -> Result<(), JanusError> {
     match expected {
-        Some(expected) if expected != plan.old_hash.as_str() => Err(JanusError::Conflict {
+        Some(expected) if Some(expected) != old_hash => Err(JanusError::Conflict {
             path: path.to_path_buf(),
             expected: expected.to_owned(),
-            current: plan.old_hash.clone(),
+            current: old_hash.unwrap_or_default().to_owned(),
         }),
         Some(_) => Ok(()),
         None if dry_run => Ok(()),
         None => Err(JanusError::PreconditionRequired {
             path: path.to_path_buf(),
-            preview: preview(plan),
+            preview: preview(changed_keys),
         }),
     }
 }
 
 /// The one line a write with no etag offers instead of a preview (M7-13).
-fn preview(plan: &Plan) -> String {
-    let keys = match plan.changed_keys.as_slice() {
+fn preview(changed_keys: &[String]) -> String {
+    let keys = match changed_keys {
         [] => "no key would change".to_owned(),
         keys => format!("would change: {}", keys.join(", ")),
     };
@@ -886,17 +1004,17 @@ fn preview(plan: &Plan) -> String {
     )
 }
 
-/// The receipt for one planned write (§2.3, M7-14).
-fn receipt(root: &Path, path: &Path, plan: &Plan, dry_run: bool) -> Receipt {
+/// The receipt for one whole-file write (§2.3, M7-14).
+fn document_receipt(root: &Path, path: &Path, document: &Document, dry_run: bool) -> Receipt {
     Receipt {
         path: relative(root, path),
-        changed_keys: plan.changed_keys.clone(),
-        appended_keys: plan.appended_keys.clone(),
-        old_hash: plan.old_hash.clone(),
-        new_hash: plan.new_hash.clone(),
+        changed_keys: document.changed_keys.clone(),
+        appended_keys: document.appended_keys.clone(),
+        old_hash: document.old_hash.clone(),
+        new_hash: document.new_hash(),
         dry_run,
-        bytes_before: plan.bytes_before,
-        bytes_after: plan.bytes_after,
+        bytes_before: document.bytes_before,
+        bytes_after: document.text.len(),
     }
 }
 
@@ -949,6 +1067,7 @@ fn commit_refusal(path: &Path, error: CommitError) -> JanusError {
         },
         CommitError::Busy { path } => JanusError::LockTimeout { path },
         CommitError::OutsideCorpus { path } => JanusError::PathEscape { path },
+        CommitError::Exists { path } => JanusError::PathExists { path },
         CommitError::Unsynced { path, source } | CommitError::Io { path, source } => {
             JanusError::Write { path, source }
         }

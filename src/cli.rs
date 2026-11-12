@@ -187,6 +187,44 @@ pub enum Command {
         json: bool,
     },
 
+    /// Write one whole document: a frontmatter block, then the body (§9.3)
+    #[command(group(
+        clap::ArgGroup::new("mode").required(true).args(["create", "overwrite"])
+    ))]
+    Write {
+        /// The corpus path of the document to write
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+
+        /// A YAML file holding the frontmatter keys and their values
+        #[arg(long, value_name = "FILE")]
+        frontmatter: PathBuf,
+
+        /// The body text: a file path, or `-` to read stdin
+        #[arg(long, value_name = "FILE")]
+        body: String,
+
+        /// Write a path that does not exist; an existing path is refused
+        #[arg(long)]
+        create: bool,
+
+        /// Replace a file the caller has read; needs --expect-hash
+        #[arg(long, requires = "expect_hash")]
+        overwrite: bool,
+
+        /// The content_hash a read returned; required with --overwrite
+        #[arg(long, value_name = "H")]
+        expect_hash: Option<String>,
+
+        /// Report what would change and write nothing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit the receipt as one JSON object on stdout, or the failure object
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List the corpora a workspace names, with each index's freshness (§6.11)
     Corpora {
         /// Emit one JSON object on stdout instead of the table

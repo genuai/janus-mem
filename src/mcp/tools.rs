@@ -1,4 +1,5 @@
-//! The five read tool descriptors and the `tools/call` dispatch (M6 §3.7).
+//! The read tool descriptors, the write descriptors, and the `tools/call`
+//! dispatch (M6 §3.7, M7-4, M7-5).
 //!
 //! A schema is written by hand, here, and nothing is generated at run time. The
 //! schema and the parameter struct of [`crate::api::dto`] must describe the same
@@ -11,9 +12,10 @@
 //! result with `ok: false`, because the caller must read `code`, not the
 //! transport error.
 //!
-//! `update_frontmatter` is listed only when the server was started with
-//! `--allow-write` (M7-4). A client that discovers no write tool cannot call one
-//! it was not offered, and a server without the flag refuses the name anyway.
+//! The write tools are listed only when the server was started with
+//! `--allow-write` (M7-4, M7-49). A client that discovers no write tool cannot
+//! call one it was not offered, and a server without the flag refuses the name
+//! anyway.
 
 use serde_json::{Map, Value, json};
 
@@ -35,7 +37,7 @@ const LISTED: [Tool; 5] = [
 
 /// The answer to one `tools/list` request.
 ///
-/// The write tool joins the five read tools only when the surface serves writes
+/// The write tools join the five read tools only when the surface serves writes
 /// **to the primary corpus**, which is the corpus an unqualified write names
 /// (M7-49). `enabled` is the rule, not the flag: a read-only primary would make
 /// every call to an advertised tool answer `read_only_corpus`. A client that
@@ -46,6 +48,7 @@ pub fn descriptors(writes: Writes) -> Value {
     let mut listed: Vec<Tool> = LISTED.to_vec();
     if writes.enabled() {
         listed.push(Tool::UpdateFrontmatter);
+        listed.push(Tool::WriteDocument);
     }
     let tools: Vec<Value> = listed.iter().map(|tool| descriptor(*tool)).collect();
     json!({ "tools": tools })
@@ -215,6 +218,11 @@ fn describe(tool: Tool) -> &'static str {
         Tool::UpdateFrontmatter => {
             "Write frontmatter keys and return a receipt. Needs expected_hash: the \
              content_hash a read returned. A shape the writer cannot splice is refused."
+        }
+        Tool::WriteDocument => {
+            "Write one whole file and return a receipt: a frontmatter block, then \
+             the body. mode create refuses an existing path; mode overwrite needs \
+             expected_hash, the content_hash a read returned."
         }
     }
 }
@@ -386,6 +394,41 @@ fn schema(tool: Tool) -> Value {
                 }
             },
             "required": ["path", "patch"],
+            "additionalProperties": false
+        }),
+        Tool::WriteDocument => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "The corpus path of the document to write. It must \
+                                    end in .md or .markdown."
+                },
+                "frontmatter": {
+                    "type": "object",
+                    "description": "Keys to write, mapped to a string or null. The block \
+                                    is written one key per line."
+                },
+                "body": {
+                    "type": "string",
+                    "description": "The text written after the closing fence, byte for byte."
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "create refuses an existing path; overwrite replaces a \
+                                    file the caller has read."
+                },
+                "expected_hash": {
+                    "type": "string",
+                    "description": "The content_hash a read returned. Required for mode \
+                                    overwrite without dry_run."
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Report what would change and write nothing. Default false."
+                }
+            },
+            "required": ["path", "frontmatter", "body", "mode"],
             "additionalProperties": false
         }),
     }

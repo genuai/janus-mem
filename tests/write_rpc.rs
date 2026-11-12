@@ -391,11 +391,11 @@ fn case_4_2_rpc_answers_the_gate_from_the_shared_helper() {
         assert!(message.contains("--allow-write"), "{message}");
     }
 
-    // With the flag the three unlanded names are still refused, and the served
-    // one reaches the engine: an empty patch is a usage failure, not a refusal.
+    // With the flag the two unlanded names are still refused, and the served
+    // two reach the engine: an empty request is a usage failure, not a refusal.
     let answers = session(Some(root), None, true, &requests);
     for (name, answer) in WRITE_NAMES.iter().zip(&answers) {
-        if *name == "update_frontmatter" {
+        if matches!(*name, "update_frontmatter" | "write_document") {
             assert_eq!(code(answer), "usage", "{name}: {answer}");
         } else {
             assert_eq!(code(answer), "refused", "{name}: {answer}");
@@ -404,6 +404,7 @@ fn case_4_2_rpc_answers_the_gate_from_the_shared_helper() {
         }
     }
     assert!(write_refusal("update_frontmatter", writes(true)).is_none());
+    assert!(write_refusal("write_document", writes(true)).is_none());
     assert!(write_refusal("search", writes(true)).is_none());
 
     // Not one byte moved through any of it.

@@ -85,6 +85,12 @@ pub enum CommitError {
         /// The lock file that could not be acquired in time.
         path: PathBuf,
     },
+    /// The target already exists, so a create writes nothing (M7-27).
+    #[error("{path} already exists")]
+    Exists {
+        /// The path the caller named.
+        path: PathBuf,
+    },
     /// The path resolves outside the corpus, so no write may touch it.
     ///
     /// An in-corpus symlink to another corpus is the reachable case: writing
@@ -182,28 +188,46 @@ pub struct CommitOptions<'a> {
 /// [`CommitError::Unsynced`] when the write landed and the directory sync did
 /// not, and [`CommitError::Io`] naming the path for anything else.
 pub fn commit(plan: &Plan, options: &CommitOptions<'_>) -> Result<Committed, CommitError> {
+    commit_bytes(
+        &plan.old_hash,
+        plan.text.as_bytes(),
+        plan.bytes_before,
+        options,
+    )
+}
+
+/// Replaces one file with bytes whose old hash the caller already knows.
+///
+/// [`commit`] and the whole-file overwrite of M7-5 share this sequence, so the
+/// two names cannot check a different number of times or lock a different file.
+pub(super) fn commit_bytes(
+    expected_old: &str,
+    bytes: &[u8],
+    bytes_before: usize,
+    options: &CommitOptions<'_>,
+) -> Result<Committed, CommitError> {
     // A link inside the corpus is a document under its own path, so the bytes
     // live at its target. Replacing the link itself would leave the target stale
     // and the corpus with two documents (case 2.4c).
     let target = resolve(&options.path, &options.root)?;
 
     // The fast path: the common conflict never pays for a lock (M7-10).
-    verify(&target, &plan.old_hash)?;
+    verify(&target, expected_old)?;
     options.hooks.after_pre_lock(&options.path);
 
-    let _lock = take_lock(options)?;
+    let _lock = take_lock(&options.root, options.config, options.timeout)?;
 
     // The authoritative check. Without it, two writers that both pass the fast
     // path would both write, and the second would erase the first (I6).
-    verify(&target, &plan.old_hash)?;
+    verify(&target, expected_old)?;
 
-    atomic::replace(&target, plan.text.as_bytes(), Mode::Preserve)?;
+    atomic::replace(&target, bytes, Mode::Preserve)?;
 
     Ok(Committed {
-        old_hash: plan.old_hash.clone(),
-        new_hash: plan.new_hash.clone(),
-        bytes_before: plan.bytes_before,
-        bytes_after: plan.bytes_after,
+        old_hash: expected_old.to_owned(),
+        new_hash: Blake3Hash::of_bytes(bytes).to_hex(),
+        bytes_before,
+        bytes_after: bytes.len(),
     })
 }
 
@@ -224,9 +248,13 @@ fn resolve(path: &Path, root: &Path) -> Result<PathBuf, CommitError> {
 }
 
 /// Takes the corpus lock, or says why not.
-fn take_lock(options: &CommitOptions<'_>) -> Result<Lock, CommitError> {
-    let dir = config::resolve_index_dir(&options.root, &options.config.index_dir);
-    Lock::acquire(&dir, options.timeout).map_err(|error| match error {
+pub(super) fn take_lock(
+    root: &Path,
+    config: &Config,
+    timeout: Duration,
+) -> Result<Lock, CommitError> {
+    let dir = config::resolve_index_dir(root, &config.index_dir);
+    Lock::acquire(&dir, timeout).map_err(|error| match error {
         JanusError::LockTimeout { path } => CommitError::Busy { path },
         JanusError::Write { path, source } | JanusError::CreateDir { path, source } => {
             CommitError::Io { path, source }
