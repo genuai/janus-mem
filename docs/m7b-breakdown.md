@@ -405,8 +405,10 @@ completes on a no-block document, and 0 same-value writes change a byte.
    2.7), and the rehearsal reports **0** same-value changes. Its fixture gives 64 documents a
    same-value write, and all 64 changed a byte before value equality.
 3. `write --overwrite` reports only keys whose bytes differ: **0** extra keys in case 3.2.
-4. A nonsense `date` and a nonsense `status` are refused on every write path: **2 of 2**, and
-   **6 of 6** paths for case 4.7.
+4. A nonsense `date` and a nonsense `status` are refused: **2 of 2** values, proved at the two
+   planners every writer passes through. Case 4.7 is amended by M7b-21: only two write paths can
+   be handed a value, and the other four are proved to keep writing a document that already holds
+   one.
 5. Read goldens: **0** move.
 6. `format_version` **6**, `api` **1**, **0** exit codes moved, **1** code added
    (`invalid_value`, exit 4), **1** receipt field added.
@@ -467,3 +469,41 @@ reported. The M7b-4 entry was written as it merged.
 | M7b-2 value equality | 167 | 376 | 64 of 200 same-value writes changed a byte before value equality, 0 after. |
 | M7b-3 receipt accuracy | 80 | 227 | `changed_keys` comes from the old block, and `created_block` stops claiming a block was created when the old one could not be read. |
 | M7b-4 validation | 176 | 398 | The four interpreted keys refuse a value the reader cannot interpret, on every write path. The rehearsal's status-keyed shapes ask for a real status, because the check now runs before the scanner. |
+
+## 13. M7b close-out
+
+**State.** Complete. Four phases, four pull requests, all merged.
+
+| Row | Result | Evidence |
+|---|---|---|
+| 1 | met | case 1.6, and the rehearsal's no-block documents all admit a patch |
+| 2 | met | case 2.7; 0 of 64 same-value writes change a byte, from 64 of 64 |
+| 3 | met | case 3.2 |
+| 4 | met, with M7b-21 | 2 of 2 values refused, at the two planners; the other four paths cannot be handed one |
+| 5 | met | 0 snapshot files moved |
+| 6 | met | `format_version` 6, `api` 1, 0 exit codes moved, 1 code and 1 receipt field added |
+| 7 | met | `cargo doc --no-deps` reports 0 warnings |
+| 8 | met | no retrieval claim was made |
+
+**Size.** 463 logic and 1,301 test lines, against ceilings of 900 and 1,500. M7's estimates ran
+two to four times low because each phase's unit was a tool and its surfaces. M7b wrote upper
+bounds, each phase stayed inside its own, and no phase split. The lesson: an estimate is a budget
+when the unit is a behaviour that already has surfaces, and a guess when the phase creates them.
+
+**What a user can do now that they could not before.** Patch a note that has no frontmatter block,
+which is 79% of a real vault; write the same value twice without touching the file; read a receipt
+that lists only what changed; and be refused a date or a status the reader could not interpret.
+
+**What M7b did not do, and did not claim.** Creating a block is not the same as having metadata.
+The vault that motivated the milestone still has 79% untyped documents: they can be patched now,
+and nothing has patched them. The measurement stands: with the metadata neutralised, the ten
+questions graded the same or better, so retrieval does not depend on the buildup.
+
+**Open, and owned.** R2 holds the searchable-frontmatter question and the ordering gap; its
+trigger is three wording failures in ten and the count after M7 was two. M8 holds `watch`, mmap
+and cross-corpus supersession. Validating `type` is a product decision about an open registry,
+recorded in §0.2 so the next plan does not rediscover it.
+
+**A defect found by a phase, not by a test.** `created_block` reported `true` for a file whose
+block merely could not be read. It was caught while proving the receipt's other field, and fixed
+in M7b-3. A receipt that overstates one field is the same class as one that overstates another.
