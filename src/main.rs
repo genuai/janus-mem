@@ -17,6 +17,7 @@ use janus_mem::config::{self, Config};
 use janus_mem::engine::{Engine, Fleet};
 use janus_mem::error::JanusError;
 use janus_mem::index::embed::{self, Embedder, ModelDirs, Resolved};
+use janus_mem::link::Corpora;
 use janus_mem::search::federate;
 use janus_mem::{
     chunk, doctor, ids, index, lineage, mcp, moves, read, rpc, scan, search, status, suggest,
@@ -163,13 +164,20 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
         }
 
         // A diagnostic reads the walk and the published generation. It takes
-        // no lock, builds nothing and writes nothing (M5 §3.10, M5-12).
+        // no lock, builds nothing and writes nothing (M5 §3.10, M5-12). It reads
+        // the workspace for the one fact its graph half needs: which corpora a
+        // qualified link may reach (M7-37).
         Command::Doctor { json } => {
-            let root = vault::resolve_corpus(cli.vault)?;
+            let (root, config, found) = corpus_and_workspace(workspace, cli.vault)?;
             tracing::info!(vault = %root.display(), "corpus resolved");
 
-            let config = Config::load(&root)?;
-            return doctor::run(&root, &config, &SystemClock, doctor::Options { json });
+            return doctor::run(
+                &root,
+                &config,
+                &SystemClock,
+                doctor::Options { json },
+                found.as_ref(),
+            );
         }
 
         // Identity is a read like `scan`: it answers from the last published
@@ -248,6 +256,9 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                     no_embeddings,
                     progress,
                 },
+                // `janus lineage` reads one corpus: a chain that crosses into
+                // another one is served by `get_lineage` (M7-37).
+                &Corpora::none(),
             )
         }
 
@@ -378,6 +389,44 @@ fn run(cli: Cli) -> Result<ExitCode, JanusError> {
                 "dry_run": dry_run,
             });
             let answer = fleet.answer(&Call::new(Tool::SupersedeDocument, params))?;
+            if json {
+                emit_json(&answer);
+            } else {
+                let _ = render_receipt(&answer, &mut std::io::stdout().lock());
+            }
+            Ok(())
+        }
+
+        // The cross-corpus write. A typed command is the consent, so it needs
+        // no `--allow-write` (M7-15), and it reads a workspace: the source lives
+        // in another corpus and the policy that resolves the written link lives
+        // in the file (M7-38, M7-37).
+        Command::Promote {
+            source,
+            link_from,
+            adopt,
+            target_path,
+            expect_hash,
+            dry_run,
+            json,
+        } => {
+            let fleet = resolve_fleet(
+                workspace,
+                cli.vault,
+                false,
+                Writes::new("janus promote", true, false),
+            )?;
+            // One flag per mode names the file the call writes: the document
+            // that gains the link, or the path of the copy.
+            let target = if adopt { target_path } else { link_from };
+            let params = serde_json::json!({
+                "source": source,
+                "target_path": target.map(|path| path.to_string_lossy().into_owned()),
+                "mode": if adopt { "adopt" } else { "link" },
+                "expected_hash": expect_hash,
+                "dry_run": dry_run,
+            });
+            let answer = fleet.answer(&Call::new(Tool::PromoteDocument, params))?;
             if json {
                 emit_json(&answer);
             } else {
@@ -742,13 +791,28 @@ fn corpus_config(
     workspace: Option<PathBuf>,
     root: Option<PathBuf>,
 ) -> Result<(PathBuf, Config), JanusError> {
+    let (root, config, _found) = corpus_and_workspace(workspace, root)?;
+    Ok((root, config))
+}
+
+/// The one corpus a command reads, the config it reads it under, and the
+/// workspace that holds it (§6.11, M7-37).
+///
+/// The workspace is `None` when no workspace names this corpus, so a caller can
+/// tell "no workspace" from "a workspace that does not hold me". A command that
+/// must reach another corpus — `doctor` resolving a qualified link — needs that
+/// difference, and a command that reads one corpus ignores it.
+fn corpus_and_workspace(
+    workspace: Option<PathBuf>,
+    root: Option<PathBuf>,
+) -> Result<(PathBuf, Config, Option<workspace::Workspace>), JanusError> {
     let root = vault::resolve_corpus(root)?;
     tracing::info!(vault = %root.display(), "corpus resolved");
 
     let mut config = Config::load(&root)?;
     let named = workspace.is_some();
     let Some(found) = workspace_for_prune(workspace)? else {
-        return Ok((root, config));
+        return Ok((root, config, None));
     };
     for warning in &found.warnings {
         eprintln!("warning: {warning}");
@@ -765,10 +829,11 @@ fn corpus_config(
                 ),
             });
         }
-        // An ambient workspace that names no corpus here has nothing to prune.
-        None => {}
+        // An ambient workspace that names no corpus here has nothing to prune,
+        // and nothing to reach either.
+        None => return Ok((root, config, None)),
     }
-    Ok((root, config))
+    Ok((root, config, Some(found)))
 }
 
 /// The workspace a query reads, when one names it (§6.11).
@@ -846,13 +911,14 @@ fn refuse_workspace(command: &Command, named: Option<&Path>) -> Result<(), Janus
 /// `search`, `facts`, `read`, `corpora`, `rpc` and `mcp` read its corpora.
 /// `index`, `scan` and `status` read its prune for the one corpus they name
 /// (M6b-30). `set` reads its corpora, because `read_only` and a corpus role live
-/// only in a workspace (M7-38). The list names the commands that do read a
+/// only in a workspace (M7-38). `doctor` reads it for the corpora a qualified
+/// link may reach (M7-37). The list names the commands that do read a
 /// workspace, not the ones that do not: a command added later refuses the flag
 /// until someone writes it to read one, so the default is the safe one.
 ///
-/// Deliberately absent: `init`, `chunks`, `doctor`, `ids`, `moves`, `lineage`
-/// and `suggest-links` work on one corpus and apply no prune, so the flag must
-/// stay a refusal for them.
+/// Deliberately absent: `init`, `chunks`, `ids`, `moves`, `lineage` and
+/// `suggest-links` work on one corpus and apply no prune, so the flag must stay
+/// a refusal for them.
 fn reads_workspace(command: &Command) -> bool {
     matches!(
         command,
@@ -866,6 +932,8 @@ fn reads_workspace(command: &Command) -> bool {
             | Command::Set { .. }
             | Command::Write { .. }
             | Command::Supersede { .. }
+            | Command::Promote { .. }
+            | Command::Doctor { .. }
             | Command::Rpc { .. }
             | Command::Mcp { .. }
     )
@@ -877,7 +945,6 @@ fn reads_workspace(command: &Command) -> bool {
 fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Init => "init",
-        Command::Doctor { .. } => "doctor",
         Command::Ids { .. } => "ids",
         Command::Moves { .. } => "moves",
         Command::SuggestLinks { .. } => "suggest-links",
@@ -1086,6 +1153,7 @@ fn failure_envelope_wanted(cli: &Cli) -> bool {
             | Command::Set { json: true, .. }
             | Command::Write { json: true, .. }
             | Command::Supersede { json: true, .. }
+            | Command::Promote { json: true, .. }
     )
 }
 

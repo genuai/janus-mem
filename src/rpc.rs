@@ -68,9 +68,9 @@ fn answer(fleet: &Fleet, line: &str) -> (Value, Value) {
         // The line did not have the request shape, so there is no `id` to echo.
         Err(failure) => return (Value::Null, encode(&failure)),
     };
-    // A write name is refused before the tool table is consulted: either the
-    // surface has no `--allow-write`, or the phase that serves it has not landed
-    // (§3.8, case 5.8).
+    // A write name is refused before the tool table is consulted, so a surface
+    // without `--allow-write` answers the same way for every one of the four
+    // (M7-15, case 5.8).
     if let Some(failure) = write_refusal(&request.tool, fleet.writes()) {
         return (request.id, encode(&failure));
     }

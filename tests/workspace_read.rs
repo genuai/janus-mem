@@ -456,19 +456,35 @@ fn case_3_5_a_write_tool_is_refused_whatever_the_corpus_says() {
     // The status command writes nothing, so it reports no write capability.
     assert_eq!(report["writes_enabled"], json!(false));
 
-    // A server without the flag refuses the name; with the flag the name is
-    // legal and its phase has not landed, so it is refused on its own account
-    // (M6-7, M7-4).
-    for (allow_write, expected) in [(false, "write_disabled"), (true, "refused")] {
-        let answer = mcp(
-            dir.path(),
-            allow_write,
-            "promote_document",
-            json!({ "path": SHARED, "body": "rewritten" }),
-        );
-        assert_eq!(answer["ok"], json!(false), "{answer}");
-        assert_eq!(answer["code"], json!(expected), "{answer}");
-    }
+    // A server without the flag refuses the name whatever the corpus says: a
+    // writable archived entry cannot stand in for `--allow-write` (M7-15).
+    let promote = json!({
+        "source": format!("context:{SHARED}"),
+        "mode": "adopt",
+        "target_path": "notes/adopted.md",
+    });
+    let answer = mcp(dir.path(), false, "promote_document", promote.clone());
+    assert_eq!(answer["ok"], json!(false), "{answer}");
+    assert_eq!(answer["code"], json!("write_disabled"), "{answer}");
+
+    // With the flag the name reaches its contract: the copy lands in the
+    // primary and names the corpus it came from (M7-23, M7-37).
+    let answer = mcp(dir.path(), true, "promote_document", promote);
+    assert_eq!(answer["ok"], json!(true), "{answer}");
+    assert_eq!(answer["source_corpus"], json!("context"), "{answer}");
+    assert_eq!(answer["path"], json!("notes/adopted.md"), "{answer}");
+    let copied = json(
+        dir.path(),
+        &[
+            "read",
+            "--workspace",
+            &workspace(dir.path()),
+            "--json",
+            "notes/adopted.md",
+        ],
+    );
+    assert_eq!(copied["body"], json!(ARCHIVED_BODY));
+
     // The archived document is still the bytes the fixture holds.
     let read = json(
         dir.path(),

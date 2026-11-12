@@ -142,7 +142,10 @@ pub struct FactsParams {
     pub corpus: Option<String>,
 }
 
-/// The parameters of one `get_lineage` call (M6 §2.5): exactly one is required.
+/// The parameters of one `get_lineage` call (M6 §2.5): exactly one target.
+///
+/// `corpus` names the corpora the chain may reach through a qualified link, and
+/// a `corpus:path` in `path` names the same thing (M7-37).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LineageParams {
@@ -150,6 +153,8 @@ pub struct LineageParams {
     pub path: Option<String>,
     /// A `current` query whose top result the chain is reported for.
     pub topic: Option<String>,
+    /// The corpora to read: `primary` (default), `all`, or a workspace id.
+    pub corpus: Option<String>,
 }
 
 /// The parameters of one `janus_status` call: none (M6 §2.5).
@@ -259,6 +264,38 @@ pub struct SupersedeParams {
     pub dry_run: Option<bool>,
 }
 
+/// The mode of one `promote_document` call (§6.11, §9.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromoteMode {
+    /// Patch the primary document's `supersedes` with the qualified source.
+    Link,
+    /// Create a primary document that carries the source's text.
+    Adopt,
+}
+
+/// The parameters of one `promote_document` call (§6.11, §9.3, M7-23).
+///
+/// `source` is `corpus:path`, and it is read and never written. `target_path`
+/// names the primary document that gains the link in `link` mode, and the path
+/// the copy is written at in `adopt` mode; it defaults to the source's own path
+/// when a copy is made. `expected_hash` is the target document's etag, so a
+/// `link` needs one and an `adopt` has nothing to guard.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromoteParams {
+    /// The source document, as `corpus:path`.
+    pub source: String,
+    /// The primary document the call writes.
+    pub target_path: Option<String>,
+    /// `link` or `adopt`.
+    pub mode: PromoteMode,
+    /// The etag a read returned for the target document.
+    pub expected_hash: Option<String>,
+    /// Report what would change and write nothing.
+    pub dry_run: Option<bool>,
+}
+
 /// One write's receipt (§2.3, M7-14).
 ///
 /// A receipt is not an envelope: it carries the shared head and these fields,
@@ -283,6 +320,23 @@ pub struct Receipt {
     pub bytes_before: usize,
     /// The file's length after the write, in bytes.
     pub bytes_after: usize,
+}
+
+/// The receipt of one `promote_document` call (§2.3, §3.7).
+///
+/// The shared fields describe the one file the call wrote, and the two added
+/// fields name the corpus the source lives in, so a receipt says which archive a
+/// reader must look in (case 7.2 of §3.9). Both fields are additive, so `api`
+/// stays 1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PromoteReceipt {
+    /// The file the call wrote, flattened into the standard fields.
+    #[serde(flatten)]
+    pub receipt: Receipt,
+    /// The corpus the source document lives in.
+    pub source_corpus: String,
+    /// The source, as the written link names it: `corpus:path`.
+    pub source: String,
 }
 
 /// The receipt of one `supersede_document` call (§2.3, M7-6).

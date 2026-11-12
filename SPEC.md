@@ -471,7 +471,9 @@ If an agent or user *does* want to assert that a rewritten document continues an
 Other cases:
 
 - **Path alias table.** Every path ever seen maps to the `DocId` that occupied it, including historical paths. Link resolution order: current path → historical path → declared `id` → dangling warning. A `supersedes: decisions/old-name.md` still resolves after `old-name.md` moves. Indexing never rewrites link text.
-- **Qualified links name a corpus.** A link text of the form `corpus:path` carries a corpus qualifier. A qualifier equal to this corpus's own `corpus_id` is stripped and the path resolves locally. Any other qualifier is reported as `OtherCorpus` and never resolved, because cross-corpus links belong to M6 (§6.11). A link text that is absolute, contains `..` or carries a drive letter resolves to nothing (`NotFound`) and is never confined against the filesystem: resolution reads the generation only.
+- **Qualified links name a corpus.** A link text of the form `corpus:path` carries a corpus qualifier. A qualifier equal to this corpus's own `corpus_id` is stripped and the path resolves locally. A qualifier that names another corpus is `OtherCorpus` at build time, because a build reads one corpus, and a query that reads both resolves it (see next). A link text that is absolute, contains `..` or carries a drive letter resolves to nothing (`NotFound`) and is never confined against the filesystem: resolution reads the generation only.
+- **A qualified link resolves at query time, when the workspace allows it.** `[search] allow_cross_corpus_links = true` makes a query follow a `corpus:path` link into the corpus it names, when that corpus is one the query read. The named document becomes a node of the chain and the edge is traversed as `supersedes`: the declaring document replaces the named one. The policy is applied when the graph is built, from the generations the query already holds, so flipping it needs no rebuild and no re-index (M7-37, D51). With the policy off, or with the corpus left out of the query, the link is inert: it is stored, `doctor` reports it, and the chain ends there with a note. A corpus id the workspace does not hold is `not_found`, and the message lists the ids it holds. The edge changes no other corpus's answers: cross-corpus *supersession* stays out (§0.2 of the M7 plan).
+
 - **Zero migration.** There is no identity setup step and no `adopt-ids`. A brand-new vault, a vault from another tool, and a vault with no frontmatter all work identically on first `janus index`. `janus ids` explains any document's resolved identity; if a user *chooses* to pin one, `janus set --key id=<value>` is an ordinary surgical write.
 - **Tombstones.** A vanished document with no successor keeps its id, last path, and last-seen date. Excluded from search; `lineage` still reports it as retired — the “quiet expiry” case (§3).
 - **Copies.** Identical content at two paths is two documents. If they resolve to the same identity key, both fall through to the `rel_path` key and `doctor` reports `duplicate_identity`; the link graph deterministically prefers the oldest `path_history` entry.
@@ -581,11 +583,12 @@ Rules:
 - Query selects corpora: `--corpus primary` (default) | `all` | `<id>`. Every result carries `corpus`.
 - **Naming an archived corpus does not promote it.** `--corpus context` reads that corpus and still applies `archived_weight`: a name is a scope choice, not a claim that the corpus is current. A corpus becomes primary only by editing its `role` in the workspace file.
 - When archived corpora are explicitly included, `search.archived_weight` applies (default 0.8; primary 1.0) and appears in the score breakdown. A factor of `1.0` is absent from the JSON, so a single-corpus report is byte-identical to the one before federation existed.
-- **Cross-corpus links are opt-in and qualified.** `supersedes: "context:/decisions/old.md"`. Unqualified paths resolve only within the document's own corpus. Qualified links take effect only when `allow_cross_corpus_links = true` (default false); otherwise `doctor` reports `cross_corpus_link_ignored`. **A qualified link stays inert in this release:** `allow_cross_corpus_links` is read and reserved, and the write that makes such an edge effective arrives with `promote` in M7.
+- **Cross-corpus links are opt-in and qualified.** `supersedes: "context:decisions/old.md"`. Unqualified paths resolve only within the document's own corpus. A qualified link takes effect only when `allow_cross_corpus_links = true` (default false) **and** the query reads the corpus it names; otherwise it is inert and `doctor` reports it as `cross_corpus_link_unsupported`. An effective link is a node in `get_lineage`, oldest first, and it changes no answer of the corpus it names: resolution is a read-side fact (M7-37, D51).
 - **Promotion is an explicit write, never a background consequence:**
-  - `janus promote context:/path --link-from decisions/new.md` — patches the primary document's `supersedes` to include the qualified source (etagged, dry-run by default).
-  - `janus promote context:/path --adopt` — creates a new primary document citing the source. The archived document is untouched.
-  - Promotion never moves, rewrites, or deletes archived documents.
+  - `janus promote context:path --link-from decisions/new.md --expect-hash H` — patches the primary document's `supersedes` with the qualified source. It writes one value, so a document that already names a different document in `supersedes` is refused with `refused`: appending to a list is not something the writer can do (M7-59).
+  - `janus promote context:path --adopt [--target-path decisions/copy.md]` — creates a primary document holding the qualified source in `supersedes`, the source's title and its body. Nothing else is copied, so an archived type or status cannot vote in the primary corpus (D42).
+  - Promotion never moves, rewrites, or deletes archived documents, and the source corpus is never a write target: a call whose target is the source document answers `read_only_corpus` (M7-23).
+  - The receipt adds two fields to the standard one: `source_corpus` and `source`, the corpus the promotion named.
 - **Archived corpora are read-only** unless `read_only = false` is set deliberately; write tools refuse paths outside a writable corpus.
 - Identity keys are namespaced by `corpus_id` (§6.4), so identical documents in different corpora cannot collide.
 - A corpus configured as `read_only` on a read-only filesystem uses `index_dir` to place its index in a writable cache.
@@ -1099,7 +1102,8 @@ janus set <PATH> --expect-hash H --key status=superseded [--key k=v ...] [--dry-
 janus write <PATH> --frontmatter f.yaml (--body -|f.md)
             [--create | --overwrite --expect-hash H] [--dry-run]
 janus supersede <OLD> <NEW> [--append-only] [--dry-run]
-janus promote <corpus>:<path> (--link-from <path> | --adopt) [--dry-run]
+janus promote <corpus>:<path> (--link-from <path> --expect-hash H | --adopt [--target-path <path>])
+             [--dry-run] [--json]
 janus workspace init|add <id> <root> [--role archived] [--read-only]
 janus corpora [--workspace PATH] [--json]    # configured corpora, roles, index freshness
 janus doctor [--json]                        # index health, broken links, duplicates
@@ -1112,13 +1116,14 @@ janus completions <shell>
 ```
 
 `--vault PATH` and `--workspace PATH` are global flags: a user writes either one before
-or after the subcommand, and both mean the same thing in both positions. Ten commands
-read a workspace: `search`, `facts`, `read`, `status`, `corpora`, `rpc` and `mcp` read
-its corpora, and `scan`, `index` and `status` read its prune for the one corpus they
-name. Every other command works on one corpus and **refuses** `--workspace` with a
-`usage` failure that names the command and says it cannot federate. The refusal is the
-point: a command that parsed the flag and ignored it would publish one corpus and look
-like it read the workspace.
+or after the subcommand, and both mean the same thing in both positions. Fourteen
+commands read a workspace: `search`, `facts`, `read`, `status`, `corpora`, `doctor`,
+`set`, `write`, `supersede`, `promote`, `rpc` and `mcp` read its corpora, and `scan` and
+`index` read its prune for the one corpus they name. `doctor` reads it for the corpora a
+qualified link may reach (M7-37). Every other command works on one corpus and
+**refuses** `--workspace` with a `usage` failure that names the command and says it
+cannot federate. The refusal is the point: a command that parsed the flag and ignored it
+would publish one corpus and look like it read the workspace.
 
 Exit codes: `0` ok, `1` runtime error, `2` usage error, `3` conflict/stale hash, `4` refused (unsafe or unsupported operation). Human output is a compact table; `--json` is stable and versioned. From M7, `3` is carried by `conflict` and `precondition_required`: both mean re-read, then retry (§9.3). `cycle` is a refusal at exit 4: the proposed supersession would close a cycle, so the target must change.
 
@@ -1215,7 +1220,7 @@ The type counts stay in `scan --json`, which reports both halves of the question
 | `update_frontmatter` | `path`, `patch`, **`expected_hash`**, `dry_run?` | Surgical key patch; refuses unsupported shapes |
 | `write_document` | `path`, `frontmatter`, `body`, `mode` (create/overwrite), `expected_hash` (required for overwrite), `dry_run?` | Whole-file create/replace |
 | `supersede_document` | `old_path`, **`expected_hash`**, `new_path?`, `new_title?`, `dry_run?` | Transactional dual patch (or append-only with `new_path` created first) |
-| `promote_document` | `source` (`corpus:path`), `target_path?`, `mode` (`link`/`adopt`), `expected_hash?`, `dry_run?` | Declares an archived document as lineage for a primary one; never moves or rewrites the archive (§6.11) |
+| `promote_document` | `source` (`corpus:path`), `target_path?`, `mode` (`link`/`adopt`), `expected_hash?`, `dry_run?` | Declares an archived document as lineage for a primary one; never moves or rewrites the archive (§6.11). `target_path` names the file written, may carry a `corpus:path` qualifier, and is required for `link`. `expected_hash` is the target document's etag, and `adopt` refuses one because a create has nothing to guard |
 
 `expected_hash` is the `content_hash`/etag returned by every read tool. It is **required** for `update_frontmatter`, `supersede_document`, and for `write_document` in `overwrite` mode. Without it, the call answers `precondition_required` with a one-line preview in `hint` — the keys that would change, and the instruction to re-read — and changes nothing. The full preview is a `dry_run` call, because a failure carries no `results` (M7-13). All write tools return receipts, and a hash mismatch returns `Conflict` with both hashes so the agent can re-read and retry.
 
@@ -1564,6 +1569,7 @@ If the targets conflict with the learning goal, the learning goal wins and the t
 | D48 | Chunk ids are `blake3(heading_path ‖ 0x00 ‖ normalized_text)` — the document title and `doc_id` do **not** participate | The default title is the filename stem, so including it would re-key every chunk on a rename. §11-M4 requires a renamed-but-unchanged file to cost *zero* embedding work; content-addressing by text is what makes the embedding cache free whenever the embedded text is unchanged — free across edits, moves, renames and copies only under that condition (§11-M4) | Yes (bump `format_version`, rebuild) |
 | D49 | A body `H1` never becomes the identity-bearing `title`; it enters `heading_path` instead | §6.4 rung 3 keys on the title, so promoting a body heading to the title would let an edit to `# Notes` re-key the whole document — precisely what the identity ladder forbids. The breadcrumb still gets the `H1`; identity does not | Yes |
 | D50 | A derived filesystem timestamp is never a date: mtime does not enter the date ladder, never scores and never sorts | A modification time differs between two copies of one vault — a zip download, a checkout, a copy — so a ranking that reads it is not reproducible. Showing it would also invite trust in a value the author never wrote. Only an authored date, or a date in a name, may change a score or an order (§6.3, §6.10) | No |
+| D51 | A qualified cross-corpus link resolves when the graph is built, from the generations the query already holds; it is read as `supersedes`, and `promote` writes one link value | The snapshot's dangling row keeps the link text but no direction, and a direction in the index would be a `format_version` bump for a read-side fact. The policy is a workspace fact, so applying it at build time makes a flip free (case 7.7) while the index stays a description of one corpus. Wrong if a hand-written qualified `superseded_by` must be followed in its own direction, or if a document needs two promoted links: `supersedes` holds one value (M7-58, M7-59) | No |
 
 ### Open questions (to resolve at the milestone in brackets)
 

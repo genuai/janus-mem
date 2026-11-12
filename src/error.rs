@@ -162,6 +162,17 @@ pub enum JanusError {
         topic: String,
     },
 
+    /// A qualified link or a promote source names a corpus this workspace does
+    /// not hold (§6.11, case 7.8). The message lists the ids the workspace does
+    /// hold, because a misspelt qualifier is the usual cause.
+    #[error("no corpus {corpus:?} in this workspace; it holds {}", list_ids(known))]
+    CorpusNotInWorkspace {
+        /// The id the request or the link named.
+        corpus: String,
+        /// Every id the workspace holds, as the file declares them.
+        known: Vec<String>,
+    },
+
     /// A file could not be written.
     #[error("failed to write {path}")]
     Write {
@@ -303,6 +314,20 @@ pub enum JanusError {
         path: PathBuf,
     },
 
+    /// A promotion would replace a link the target document already declares
+    /// (§3.7 case 7.1).
+    ///
+    /// The writer replaces one value and cannot append to a list, so the call is
+    /// refused rather than dropping the link the document already holds. A retry
+    /// with the same request cannot succeed, so this is a refusal.
+    #[error("{path} already names {current} in `supersedes`; a promote writes one link")]
+    PromoteLinked {
+        /// The document the promotion named.
+        path: PathBuf,
+        /// The link the document declares today.
+        current: String,
+    },
+
     /// A two-file write failed on its second file, and the first file is back
     /// at its original bytes and mode.
     ///
@@ -370,7 +395,8 @@ impl JanusError {
             | Self::SupersessionCycle { .. }
             | Self::KeyShape { .. }
             | Self::NoFrontmatter { .. }
-            | Self::PathExists { .. } => 4,
+            | Self::PathExists { .. }
+            | Self::PromoteLinked { .. } => 4,
 
             // A write that lost a race, and a write with no etag: both are
             // cured by re-reading and retrying (M7-12).
@@ -382,6 +408,7 @@ impl JanusError {
             | Self::TransactionRolledBack { .. }
             | Self::TransactionInconsistent { .. }
             | Self::DocumentNotInCorpus { .. }
+            | Self::CorpusNotInWorkspace { .. }
             | Self::DocumentChanged { .. }
             | Self::TopicNotFound { .. }
             | Self::ChangedDuringRead { .. }
@@ -401,4 +428,11 @@ impl JanusError {
             Self::Usage { .. } | Self::WorkspaceInvalid { .. } => 2,
         }
     }
+}
+
+/// The ids a workspace holds, sorted and joined, so a miss names what exists.
+fn list_ids(known: &[String]) -> String {
+    let mut ids: Vec<&str> = known.iter().map(String::as_str).collect();
+    ids.sort_unstable();
+    ids.join(", ")
 }

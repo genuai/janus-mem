@@ -254,7 +254,6 @@ impl Workspace {
 
     /// The config one corpus is read with: its own file plus this workspace's
     /// prune of every nested corpus root (M6b-26).
-    ///
     /// # Errors
     ///
     /// [`JanusError::ConfigMissing`], [`JanusError::ConfigRead`] or
@@ -263,6 +262,16 @@ impl Workspace {
         let mut config = Config::load(&corpus.root)?;
         self.apply_prunes(&corpus.id, &mut config);
         Ok(config)
+    }
+
+    /// The corpus one `corpus:path` qualifier names, when this file holds it.
+    ///
+    /// A qualifier is a workspace id, so the lookup is by `id` and never by
+    /// root: the same directory can be primary in one workspace and archived in
+    /// another (§6.11, M7-38).
+    #[must_use]
+    pub fn corpus(&self, id: &str) -> Option<&Corpus> {
+        self.corpora.iter().find(|corpus| corpus.id == id)
     }
 
     /// Adds the prunes this workspace derives for the corpus named `id`.

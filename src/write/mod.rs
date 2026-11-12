@@ -49,6 +49,7 @@ mod chain;
 mod commit;
 mod document;
 mod patch;
+mod promote;
 mod scan;
 mod supersede;
 mod value;
@@ -61,6 +62,7 @@ pub use document::{
     overwrite as overwrite_document, plan as plan_document,
 };
 pub use patch::{Patch, Plan, plan};
+pub use promote::{PromoteError, Source, adopted, check_link};
 pub use scan::reason;
 pub use scan::{KeySpan, Scan, ValueShape, ValueSpan, is_patch_key, scan};
 pub use supersede::commit_pair;

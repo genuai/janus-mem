@@ -459,6 +459,13 @@ The error names the file that failed and the file that was restored (M7-31).
 
 **Statement.** Promotion declares lineage. It never moves and never rewrites an archived file.
 
+The write lands in the corpus the call names, which is the primary and never the source
+corpus. `link` writes one value, so a document whose `supersedes` already names a different
+document is refused rather than losing that link (M7-59). `adopt` copies three things and no
+more: the qualified source, the source's title, and its body byte for byte; an archived type
+or status would let old material vote in the primary corpus (D42). The receipt carries the
+standard fields plus `source_corpus` and `source`.
+
 **Case 7.1.** `link` mode patches the primary document's `supersedes` with the qualified
 `corpus:path` and touches nothing else.
 
@@ -472,18 +479,21 @@ reports it, which is the rule M6b left in place.
 
 **Case 7.5.** A promote whose target is in an archived corpus is refused.
 
-**Case 7.6 (resolution).** After `link`, `get_lineage` on the primary document includes the
-archived source as a node, and `janus doctor` stops reporting the link as `other_corpus`. Today
-the resolver answers `DanglingReason::OtherCorpus` (`src/link.rs:135`), so the written link is
-visible to no reader.
+**Case 7.6 (resolution).** After `link`, `get_lineage` on the primary document, with the
+archived corpus in the query's selection, includes the archived source as a node, and `janus
+doctor` stops reporting the link as `other_corpus`. Before this phase the resolver answers
+`DanglingReason::OtherCorpus` (`src/link.rs:135`), so the written link is visible to no reader.
+`get_lineage` therefore takes a `corpus` selection, and `all` names the reach rather than the
+chain: the chain stays in the primary and every corpus is reachable (M7-37).
 
 **Case 7.7.** Flipping `allow_cross_corpus_links` on and re-querying resolves the link with no
 rebuild and no re-index, because the policy is applied when the graph is built
 (`src/graph.rs:244`).
 
 **Case 7.8.** A qualified link whose corpus is not in the workspace is `not_found` and names
-the corpora the workspace holds. A qualified link whose corpus is archived and excluded by the
-query is not followed, and the chain ends there with a note.
+the corpora the workspace holds; only a link on this chain fails the answer, because an
+unrelated document's typo is a `doctor` row. A qualified link whose corpus is archived and
+excluded by the query is not followed, and the chain ends there with a note.
 
 ### 3.8 The config is part of the index identity (P1)
 
@@ -582,6 +592,9 @@ exit 3 is used for the first time.
 | M7-53 | `write_document` writes frontmatter keys sorted, not in the JSON object's order | The request reaches the engine as a JSON object, and that map is ordered by key before the writer sees it; `update_frontmatter` has the same property. Sorting makes the block deterministic on every surface instead of depending on a parser feature. Wrong if a surface later preserves insertion order and a caller relies on it. |
 | M7-54 | M7-5 ships as one PR at 790 logic and 579 test lines; the create/overwrite seam does not put either half under the phase ceiling | The phase estimated ~180 and measured 790, because a create still needs the DTO, the engine branch, the MCP descriptor, the CLI command and the whole-file renderer. That shared work leaves the create half at about 660, over the repository's 600. The PR carries the `large-pr` label and these numbers. Wrong if the create half measures 250 or less after review, which would mean this row chose the wrong seam. |
 | M7-55 | `supersede` creates the new document with `create_new` rather than staging and renaming a temp file, and the cycle check simulates the proposed edge | This supersedes M7-19's second rename. M7-35 requires an existing `new_path` to answer `path_exists`, and `create_new` is the only guard no race can turn into an overwrite; a rename would replace the file the caller did not name. The old file is still restored from `Plan::original` with its mode (M7-31). With `new_path` absent, a cycle can only exist when the chain already reaches that path, so the check adds the edge and refuses when the new path reaches the old one. The cycle has its own `cycle` code, because the caller must change the target, not the shape of a key. Wrong if a create leaves a file the caller did not name, or if a cycle that the call would close is written. |
+| M7-57 | M7-7 ships as one PR at 700 logic and 807 test lines, against the phase ceiling of 550 and 750 and `AGENTS.md`'s 600 and 900 | The split seam does not put either half under the ceiling: the resolver's cases 7.6 to 7.8 need the write that makes the link, so part 2 carries the fixture, the workspace file, the index and the doctor row that part 1 alone cannot exercise. The PR carries the `large-pr` label and these numbers. Wrong if a reviewer reports that this diff cannot be held in one reading. |
+| M7-58 | A qualified link is resolved when the graph is built, from the generations the query already holds, and is read in the `supersedes` direction | The snapshot's dangling row keeps the link text and loses the direction, and storing a direction would be a `format_version` bump for a read-side fact; a build also cannot see another corpus, so resolving there would need a rebuild per policy flip (case 7.7). `promote` writes `supersedes` and nothing else, so the direction it reads is the direction it writes. Wrong if a hand-written qualified `superseded_by` must be followed in its own direction; then the row grows a field and `format_version` moves. |
+| M7-59 | `link` mode writes one `supersedes` value, and refuses a document that already names another document | The writer replaces a value and renders one scalar or one flow sequence; appending to a list needs a value type the patch does not have, and silently dropping the link the document holds is data loss. The refusal is `refused` at exit 4, because a retry with the same request cannot succeed. Wrong if a user must promote two archived documents into one decision; then `supersedes` needs a list value and a receipt field for what was replaced. |
 | M7-56 | M7-6 ships as one PR at 795 logic and 485 test lines, against the phase ceiling of 400 and 600 and `AGENTS.md`'s 600 and 900 | The split seam does not put either half under the ceiling: in-place carries the on-disk chain, the two-file transaction, the DTO, the engine branch, and the MCP, rpc and CLI surfaces, so it is about 760 logic lines alone. `chain.rs` is 245 lines and `supersede.rs` 125, and both are mostly the comments the public-item gate and the safety argument need. The PR carries the `large-pr` label and these numbers. Wrong if a reviewer reports that this diff cannot be held in one reading. |
 
 ## 5. Phases
@@ -792,6 +805,18 @@ than a line in a file.
 `promote` is not done: `adopt` becomes M7b (M7-30) and the resolution stays here, because a
 write whose result no reader follows is not a feature.
 
+**Amendment.** The seam is not taken: the phase ships as one PR at 700 logic and 807 test
+lines, against the phase ceiling of 550 and 750 (M7-57). The file list above is true and five
+more files change with it, each a consequence rather than new scope: `src/doctor.rs` reads the
+workspace's reach, because a resolved link must stop being a row there (case 7.4); `src/main.rs`
+passes that workspace to `doctor` and adds the `promote` command; `src/error.rs` and
+`src/api/error.rs` gain the two refusals the tool answers (`not_found` for an unknown corpus,
+`refused` for a link that would drop another); and `SPEC.md` states the resolution rule
+(§6.9, §6.11, §9.1, §9.3, D51).
+
+**Decisions.** M7-57 (the size), M7-58 (a qualified link is read as `supersedes`), M7-59
+(`link` writes one value and refuses a second).
+
 ### M7-8 — The rehearsal and the 200-file dry run
 
 **Files.** `scripts/write-rehearsal.sh` (new), `tests/fixtures/write-vault/` (new: a generated
@@ -892,6 +917,12 @@ M7-5 measured **790 logic and 579 test lines** against `main` (M7-54). The creat
 would be about 660, because the DTO, the engine branch, the MCP descriptor, the CLI command and
 the whole-file renderer are shared by both modes. The phase therefore ships as one PR with the
 `large-pr` label and these numbers, and this table's 250 is reported as missed, not passed.
+
+M7-7 measured **700 logic and 807 test lines** against `main` (M7-57) — 150 over this table's
+logic ceiling and 57 over its test ceiling. The resolver's cases need the write that makes the
+link, so the seam above does not separate two reviewable halves: part 2 would carry the
+fixture, the workspace file and the index that part 1 writes. The PR carries `large-pr` and
+these numbers, and no comment was shaved and no case dropped to fit.
 
 ## 10. SPEC corrections
 

@@ -252,6 +252,41 @@ pub enum Command {
         json: bool,
     },
 
+    /// Declare a document in another corpus as lineage for one of this corpus
+    /// (§9.3)
+    #[command(group(
+        clap::ArgGroup::new("mode").required(true).args(["link_from", "adopt"])
+    ))]
+    Promote {
+        /// The source document, as corpus:path
+        #[arg(value_name = "SOURCE")]
+        source: String,
+
+        /// Link mode: the corpus path of the document that gains the link
+        #[arg(long, value_name = "PATH", requires = "expect_hash", group = "mode")]
+        link_from: Option<PathBuf>,
+
+        /// Adopt mode: create a copy of the source in this corpus
+        #[arg(long, group = "mode")]
+        adopt: bool,
+
+        /// The corpus path the copy is written at; defaults to the source's path
+        #[arg(long, value_name = "PATH", requires = "adopt")]
+        target_path: Option<PathBuf>,
+
+        /// The content_hash a read returned; required with --link-from
+        #[arg(long, value_name = "H")]
+        expect_hash: Option<String>,
+
+        /// Report what would change and write nothing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit the receipt as one JSON object on stdout, or the failure object
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List the corpora a workspace names, with each index's freshness (§6.11)
     Corpora {
         /// Emit one JSON object on stdout instead of the table

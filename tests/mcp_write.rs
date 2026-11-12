@@ -203,10 +203,18 @@ fn case_4_1_with_the_flag_the_served_tool_reaches_its_contract() {
     let written = text(root, "notes/one.md");
     assert_eq!(written, ONE.replace("status: active", "status: superseded"));
 
-    // The one whose phase has not landed is refused even with the flag.
-    let name = "promote_document";
-    let envelope = call(Some(root), None, true, name, json!({}));
-    assert_eq!(code(&envelope), "refused", "{name}: {envelope}");
+    // The last write name reaches its contract too, and one engine answers it
+    // with the workspace it needs rather than with a refusal (M7-37).
+    let envelope = call(
+        Some(root),
+        None,
+        true,
+        "promote_document",
+        json!({ "source": "context:notes/one.md", "mode": "link" }),
+    );
+    assert_eq!(code(&envelope), "usage", "{envelope}");
+    let message = envelope["message"].as_str().expect("a message");
+    assert!(message.contains("workspace"), "{message}");
 }
 
 #[test]

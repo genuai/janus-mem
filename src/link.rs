@@ -12,16 +12,31 @@
 //! declared the link (§3.3).
 //!
 //! Text forms. A value is a vault-relative path or a declared `id`. A leading
-//! `corpus:` names a corpus: this corpus's own id is stripped and the rest
-//! resolves locally, and any other id is [`DanglingReason::OtherCorpus`] until
-//! M6 owns cross-corpus links (§6.11). An absolute path, a path with `..`, or a
-//! path with a drive letter is [`DanglingReason::NotFound`].
+//! `corpus:` names a corpus. This corpus's own id is stripped and the rest
+//! resolves locally. Any other id is [`DanglingReason::OtherCorpus`] at build
+//! time: a build reads one corpus and cannot see another one. An absolute path, a
+//! path with `..`, or a path with a drive letter is [`DanglingReason::NotFound`].
+//!
+//! # Cross-corpus links at query time (M7-37)
+//!
+//! A dangling row keeps the text it was written with, so a query that reads more
+//! than one corpus can resolve a qualified link later, from the generation it
+//! already holds. [`qualified`] does that: it answers one [`Foreign`] node per
+//! link that resolved, and one [`Ignored`] row per link the query did not
+//! follow. The policy that allows a link to cross is a workspace fact, so it is
+//! applied here and never at build time: flipping it needs no rebuild
+//! (case 7.7).
+//!
+//! A qualified link is followed in the `supersedes` direction: the document that
+//! declares the link replaces the document it names. The snapshot keeps no
+//! direction on a dangling row, and `promote` writes only `supersedes` (M7-58).
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::config::Config;
 use crate::id::DocId;
 use crate::index::{
-    DanglingLink, DanglingReason, Edge, EdgeKind, IdentityRecord, MatchKey, PathEntry,
+    DanglingLink, DanglingReason, Edge, EdgeKind, IdentityRecord, MatchKey, PathEntry, Snapshot,
 };
 use crate::vault::identity::alias_map;
 
@@ -57,22 +72,10 @@ pub fn resolve(
     for document in documents {
         live.insert(document.rel_path, document.id);
     }
-    let alias = alias_map(path_history);
-    // A declared id is a link target whatever document wrote it. The record is
-    // the only table that keeps the text a retired document answered to, so a
-    // link to a vanished document with an `id` still resolves.
-    let mut declared: BTreeMap<&str, DocId> = BTreeMap::new();
-    for (id, record) in identity {
-        for key in &record.keys {
-            if let MatchKey::DeclaredId(text) = key {
-                declared.insert(text.as_str(), *id);
-            }
-        }
-    }
     let tables = Tables {
         live,
-        alias,
-        declared,
+        alias: alias_map(path_history),
+        declared: declared_ids(identity),
     };
 
     let mut pairs: BTreeSet<(DocId, DocId)> = BTreeSet::new();
@@ -124,7 +127,27 @@ struct Tables<'a> {
     declared: BTreeMap<&'a str, DocId>,
 }
 
-impl Tables<'_> {
+impl<'a> Tables<'a> {
+    /// The tables of one published generation, for a link resolved after the
+    /// build (M7-37).
+    ///
+    /// A build reads the documents it walks and this reads the snapshot, so the
+    /// two constructors build the same three tables from the two views of one
+    /// generation.
+    fn of(snapshot: &'a Snapshot) -> Self {
+        let pool = &snapshot.strings;
+        let live: BTreeMap<&str, DocId> = snapshot
+            .docs
+            .iter()
+            .filter_map(|doc| Some((pool.get(doc.rel_path)?, doc.id)))
+            .collect();
+        Self {
+            live,
+            alias: alias_map(&snapshot.path_history),
+            declared: declared_ids(&snapshot.identity),
+        }
+    }
+
     /// One lookup chain. A failure is a reason, not an error.
     fn resolve(&self, text: &str, corpus_id: &str) -> Result<DocId, DanglingReason> {
         let text = text.trim();
@@ -178,6 +201,218 @@ fn record(
             });
         }
     }
+}
+
+/// A declared id is a link target whatever document wrote it.
+///
+/// The identity record is the only table that keeps the text a retired document
+/// answered to, so a link to a vanished document with an `id` still resolves.
+fn declared_ids(identity: &BTreeMap<DocId, IdentityRecord>) -> BTreeMap<&str, DocId> {
+    let mut declared: BTreeMap<&str, DocId> = BTreeMap::new();
+    for (id, record) in identity {
+        for key in &record.keys {
+            if let MatchKey::DeclaredId(text) = key {
+                declared.insert(text.as_str(), *id);
+            }
+        }
+    }
+    declared
+}
+
+// ─────────────────────── cross-corpus links (M7-37) ────────────────────────
+
+/// One corpus a query may follow a qualified link into (§6.11, M7-37).
+#[derive(Debug, Clone, Copy)]
+pub struct Corpus<'a> {
+    /// The workspace's id for this corpus, which is the qualifier a link names.
+    pub id: &'a str,
+    /// The generation the link resolves against.
+    pub snapshot: &'a Snapshot,
+    /// The corpus's own config, so a reader renders its rows as that corpus
+    /// reads them and not with the other corpus's aliases (§6.11).
+    pub config: &'a Config,
+}
+
+/// The corpora one query reads, and the policy that lets a link cross (D42).
+///
+/// A corpus the query left out is not in `selected`, so its links end the chain
+/// and it needs no generation: a read never opens a corpus the query excluded
+/// (case 7.8).
+#[derive(Debug, Clone, Default)]
+pub struct Corpora<'a> {
+    /// True when the workspace allows a qualified link to resolve.
+    pub allowed: bool,
+    /// The corpora this query reads, by workspace id.
+    pub selected: Vec<Corpus<'a>>,
+    /// Every id the workspace holds, so a miss names what exists instead of
+    /// guessing (§6.11). Empty in single-corpus mode.
+    pub known: Vec<&'a str>,
+}
+
+impl Corpora<'_> {
+    /// No other corpus: single-corpus mode, where every qualified link is inert.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            allowed: false,
+            selected: Vec::new(),
+            known: Vec::new(),
+        }
+    }
+}
+
+/// One qualified link that resolved in another corpus (case 7.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Foreign {
+    /// Index into [`Corpora::selected`] of the corpus the link resolved in.
+    pub corpus: usize,
+    /// The document that declared the link, in this generation.
+    pub declarer: DocId,
+    /// The document it named, in that corpus's generation.
+    pub target: DocId,
+}
+
+/// Why a query did not follow one qualified link (cases 7.4, 7.7, 7.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skip {
+    /// The workspace does not let a qualified link resolve.
+    Disabled,
+    /// The workspace holds no corpus with that id.
+    Unknown,
+    /// The corpus is in the workspace and this query did not read it.
+    NotRead,
+    /// The path resolves to nothing in that corpus.
+    NotFound,
+}
+
+/// One qualified link a query did not follow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ignored {
+    /// The document that declared the link.
+    pub declarer: DocId,
+    /// The corpus the qualifier named.
+    pub corpus: String,
+    /// The text the frontmatter carried, unchanged.
+    pub target: String,
+    /// Why the query stopped there.
+    pub reason: Skip,
+}
+
+impl Ignored {
+    /// The `doctor` code this row is reported under (§3.10).
+    ///
+    /// A link to a corpus that cannot be reached is still a link that crosses a
+    /// corpus, and a path that misses inside a corpus the query read is the
+    /// `dangling_link` a same-corpus miss is.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self.reason {
+            Skip::NotFound => "dangling_link",
+            Skip::Disabled | Skip::Unknown | Skip::NotRead => "cross_corpus_link_unsupported",
+        }
+    }
+
+    /// One sentence a reader can act on (case 7.8).
+    ///
+    /// `known` is the ids the workspace holds, so a misspelt qualifier is a
+    /// question the message already answers.
+    #[must_use]
+    pub fn message(&self, known: &[&str]) -> String {
+        match self.reason {
+            Skip::Disabled => format!("a link names another corpus: {}", self.target),
+            Skip::Unknown => format!(
+                "a link names corpus {:?}, which this workspace does not hold; it holds {}",
+                self.corpus,
+                list(known)
+            ),
+            Skip::NotRead => format!(
+                "a link names corpus {:?}, which this query does not read: {}",
+                self.corpus, self.target
+            ),
+            Skip::NotFound => format!(
+                "a link into corpus {:?} does not resolve: {}",
+                self.corpus, self.target
+            ),
+        }
+    }
+}
+
+/// The ids of every corpus a message can name, sorted and joined.
+fn list(known: &[&str]) -> String {
+    if known.is_empty() {
+        return "no corpus".to_owned();
+    }
+    let mut ids: Vec<&str> = known.to_vec();
+    ids.sort_unstable();
+    ids.join(", ")
+}
+
+/// Resolves one generation's qualified links against the corpora a query reads.
+///
+/// Pure: it reads two generations and no file. Both answers are sorted by the
+/// order the dangling rows already hold, so a report is stable across runs.
+#[must_use]
+pub fn qualified(snapshot: &Snapshot, corpora: &Corpora<'_>) -> (Vec<Foreign>, Vec<Ignored>) {
+    let mut foreign = Vec::new();
+    let mut ignored = Vec::new();
+    // A link is only followed when the policy allows it, so nothing is built for
+    // the closed case (D42, case 7.7).
+    let tables: Vec<Tables<'_>> = if corpora.allowed {
+        corpora
+            .selected
+            .iter()
+            .map(|corpus| Tables::of(corpus.snapshot))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for row in &snapshot.dangling_links {
+        if row.reason != DanglingReason::OtherCorpus {
+            continue;
+        }
+        // The row was written by a qualifier, so the split succeeds. A row that
+        // somehow has no qualifier stays unresolved rather than guessed.
+        let Some((corpus, rest)) = split_qualifier(&row.target) else {
+            continue;
+        };
+        let mut skip = |reason| {
+            ignored.push(Ignored {
+                declarer: row.from,
+                corpus: corpus.to_owned(),
+                target: row.target.clone(),
+                reason,
+            });
+        };
+        if !corpora.allowed {
+            skip(Skip::Disabled);
+            continue;
+        }
+        if !corpora.known.contains(&corpus) {
+            skip(Skip::Unknown);
+            continue;
+        }
+        let Some((index, found)) = corpora
+            .selected
+            .iter()
+            .enumerate()
+            .find(|(_, found)| found.id == corpus)
+        else {
+            skip(Skip::NotRead);
+            continue;
+        };
+        // The qualifier is already off, so the rest resolves as a local link in
+        // that corpus. The graphs stay separate: this adds no edge to the other
+        // corpus's own answers (§0.2, M7-37).
+        match tables[index].resolve(rest, &found.snapshot.corpus_id) {
+            Ok(target) => foreign.push(Foreign {
+                corpus: index,
+                declarer: row.from,
+                target,
+            }),
+            Err(_) => skip(Skip::NotFound),
+        }
+    }
+    (foreign, ignored)
 }
 
 /// Splits a `corpus:` qualifier off a link text.

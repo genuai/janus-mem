@@ -198,16 +198,10 @@ fn case_4_5_a_command_that_works_on_one_corpus_refuses_the_flag() {
     let dir = copied();
 
     // Every command that reads one corpus and applies no prune. `scan`, `index`
-    // and `status` are absent because they read the workspace's prune (M6b-30).
-    for command in [
-        "init",
-        "chunks",
-        "doctor",
-        "ids",
-        "moves",
-        "lineage",
-        "suggest-links",
-    ] {
+    // and `status` are absent because they read the workspace's prune (M6b-30),
+    // and `doctor` because it reads the corpora a qualified link may reach
+    // (M7-37).
+    for command in ["init", "chunks", "ids", "moves", "lineage", "suggest-links"] {
         let output = run_with_flag(dir.path(), &[command]);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(

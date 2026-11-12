@@ -35,7 +35,8 @@ const WIRE_ORDER: [&str; 5] = [
     "janus_status",
 ];
 
-/// The four names of §9.3, which this release lists nowhere (case 8.1).
+/// The four names of §9.3: served by this release, and listed with the flag
+/// (case 8.1, M7-48).
 const WRITE_NAMES: [&str; 4] = [
     "update_frontmatter",
     "write_document",
@@ -134,7 +135,7 @@ fn case_9_2_initialize_ships_the_instructions_verbatim() {
         "When a note turns out to matter, it is time to promote it. Ask the user to restate it as a principle, a spec or a decision, with its own date. A promoted note keeps answering questions after the note itself would have faded.\n\n",
         "Tags say what a file is about. The type says how much it counts.\n\n",
         "search gives you spans and scores. read_document gives you the words.\n\n",
-        "update_frontmatter changes frontmatter keys and returns a receipt. It needs expected_hash: the content_hash of a read of that document. Without it the call changes nothing and answers precondition_required; with a stale one it answers conflict. write_document writes a whole file: a frontmatter block, then the body. mode create refuses a path that exists; mode overwrite needs expected_hash too. supersede_document retires the old document and records the new one in one call; it needs expected_hash for the old document, and new_path must not exist. A write needs a .md or .markdown path. A server started without --allow-write refuses every write."
+        "update_frontmatter changes frontmatter keys and returns a receipt. It needs expected_hash: the content_hash of a read of that document. Without it the call changes nothing and answers precondition_required; with a stale one it answers conflict. write_document writes a whole file: a frontmatter block, then the body. mode create refuses a path that exists; mode overwrite needs expected_hash too. supersede_document retires the old document and records the new one in one call; it needs expected_hash for the old document, and new_path must not exist. promote_document declares a document in another corpus as lineage for one of this corpus: mode link patches the target document and needs its expected_hash, and mode adopt creates a copy. The source is read and never changed. A write needs a .md or .markdown path. A server started without --allow-write refuses every write."
     );
     assert_eq!(INSTRUCTIONS, EXPECTED);
     let dir = fixture_vault();
@@ -338,6 +339,7 @@ fn every_tool_schema_matches_its_parameter_struct() {
     let lineage = LineageParams {
         path: None,
         topic: None,
+        corpus: None,
     };
     let read = ReadParams {
         path: String::new(),
@@ -729,21 +731,16 @@ fn case_8_1_the_write_tool_is_listed_only_when_the_server_serves_writes() {
         .collect();
     assert_eq!(names, WIRE_ORDER);
 
-    // With the flag the three served write tools join them, last.
+    // With the flag every write name of §9.3 joins them, last: the four are
+    // served, so the list and the gate describe the same set (M7-48).
     let served = listed(dir.path(), true);
     let names: Vec<&str> = served
         .iter()
         .map(|tool| tool["name"].as_str().expect("a name"))
         .collect();
     let mut expected = WIRE_ORDER.to_vec();
-    expected.extend(["update_frontmatter", "write_document", "supersede_document"]);
+    expected.extend(WRITE_NAMES);
     assert_eq!(names, expected);
-
-    // The one whose phase has not landed is listed in neither mode.
-    let unlanded = ["promote_document"];
-    for write in unlanded {
-        assert!(!names.contains(&write), "{write} must not be listed");
-    }
 }
 
 #[test]
@@ -752,8 +749,6 @@ fn case_8_2_a_write_name_is_refused_by_the_shared_helper() {
     let root = dir.path();
     index(root);
     let writes = |allowed| Writes::new("janus mcp", allowed, false);
-    // The one name whose phase has not landed.
-    const UNLANDED: [&str; 1] = ["promote_document"];
 
     // Without the flag every write name answers `write_disabled`.
     let answers = mcp(root, false, &write_script()).answers;
@@ -771,26 +766,10 @@ fn case_8_2_a_write_name_is_refused_by_the_shared_helper() {
         );
     }
 
-    // With the flag the unlanded name is still refused, and the served three
-    // reach the engine: an empty request is a usage failure, not a refusal.
-    let script: String = UNLANDED
-        .iter()
-        .enumerate()
-        .map(|(index, name)| mcp_call(index as u64 + 2, name, json!({})))
-        .collect();
-    let answers = mcp(root, true, &format!("{}{script}", mcp_opening())).answers;
-    for (name, answer) in UNLANDED.iter().zip(&answers[1..]) {
-        let envelope = mcp_envelope(answer);
-        assert_eq!(envelope["code"], json!("refused"), "{name}: {envelope}");
-        let shared = write_refusal(name, writes(true)).expect("an unlanded write is refused");
-        assert_eq!(
-            envelope,
-            &serde_json::to_value(shared).expect("a failure is JSON")
-        );
-    }
-    // The three served names reach the tool schema, so a request with no
-    // `old_path` or `path` is a parameter error and not a refusal.
-    for name in ["update_frontmatter", "write_document", "supersede_document"] {
+    // With the flag all four reach the tool schema, so a request with no
+    // `old_path`, `path` or `source` is a parameter error and not a refusal.
+    // Every write name §9.3 lists is served, so none is refused here.
+    for name in WRITE_NAMES {
         let script = format!("{}{}", mcp_opening(), mcp_call(2, name, json!({})));
         let answer = mcp(root, true, &script).answers[1].clone();
         assert_eq!(answer["error"]["code"], json!(-32602), "{name}: {answer}");

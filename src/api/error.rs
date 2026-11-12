@@ -20,12 +20,13 @@ pub struct ApiCode {
 }
 
 impl ApiCode {
-    /// The policy refusal: a write tool asked of a surface that serves no write.
+    /// The policy refusal: a write tool asked of a surface that serves no write,
+    /// and a promotion whose target already names a link.
     ///
-    /// No error variant reaches this row, because a refusal is a decision an
-    /// adapter makes before any work runs (§3.8). It is a constructor so the
-    /// adapters of later phases ask here, and not in their own files. M7 keeps
-    /// the row and rewrites its callers.
+    /// A surface's refusal reaches this row through a constructor rather than a
+    /// variant, because it is a decision an adapter makes before any work runs
+    /// (§3.8). A promotion's refusal is a real error, and it shares the code
+    /// because the caller must change the document, not retry the request.
     #[must_use]
     pub const fn refused() -> Self {
         Self {
@@ -101,6 +102,7 @@ impl ApiCode {
                 code: "path_exists",
                 exit: 4,
             },
+            JanusError::PromoteLinked { .. } => Self::refused(),
             JanusError::ConfigMissing { .. } => Self {
                 code: "config_missing",
                 exit: 1,
@@ -127,7 +129,8 @@ impl ApiCode {
             },
             JanusError::DocumentNotInCorpus { .. }
             | JanusError::DocumentChanged { .. }
-            | JanusError::TopicNotFound { .. } => Self {
+            | JanusError::TopicNotFound { .. }
+            | JanusError::CorpusNotInWorkspace { .. } => Self {
                 code: "not_found",
                 exit: 1,
             },

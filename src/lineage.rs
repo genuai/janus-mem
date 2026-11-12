@@ -23,6 +23,7 @@ use crate::graph::{ChainNode, EffectiveStatus, Endpoint, Graph, Window};
 use crate::id::DocId;
 use crate::index::TombstoneMeta;
 use crate::index::embed::Embedder;
+use crate::link::{self, Corpora, Skip};
 use crate::score::ScopeFilter;
 use crate::search::{self, DocRow};
 use crate::vault;
@@ -51,13 +52,15 @@ pub struct Options {
 /// [`JanusError::Usage`] when neither or both of `PATH` and `--topic` is given,
 /// [`JanusError::DocumentNotInCorpus`] when a path names no live and no retired
 /// document, [`JanusError::TopicNotFound`] for a query with no `current` result,
-/// and every failure a read of the generation can produce.
+/// [`JanusError::CorpusNotInWorkspace`] for a link to a corpus this workspace
+/// does not hold, and every failure a read of the generation can produce.
 pub fn run(
     root: &Path,
     config: &Config,
     clock: &dyn Clock,
     embedder: Option<&dyn Embedder>,
     options: Options,
+    corpora: &Corpora<'_>,
 ) -> Result<(), JanusError> {
     let started = Instant::now();
     // The argument check runs before any read, so a usage error builds nothing.
@@ -79,7 +82,9 @@ pub fn run(
         options.no_rebuild,
         options.progress,
     )?;
-    let report = compute(root, config, clock, embedder, &prepared, &options, started)?;
+    let report = compute(
+        root, config, clock, embedder, &prepared, &options, started, corpora,
+    )?;
     render(&report, options.json)
 }
 
@@ -88,6 +93,7 @@ pub fn run(
 /// # Errors
 ///
 /// Exactly [`run`]'s.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute(
     root: &Path,
     config: &Config,
@@ -96,27 +102,30 @@ pub(crate) fn compute(
     prepared: &search::Prepared,
     options: &Options,
     started: Instant,
+    corpora: &Corpora<'_>,
 ) -> Result<Report, JanusError> {
     let (id, topic) = locate(root, config, clock, embedder, prepared, options)?;
-    let graph = Graph::for_snapshot(&prepared.snapshot, config);
-    let rows = search::doc_rows(&prepared.snapshot, config);
+    let (graph, ignored) = Graph::for_snapshot_linked(&prepared.snapshot, config, corpora);
+    let mut rows = search::doc_rows(&prepared.snapshot, config);
+    let mut tombstones: Vec<&TombstoneMeta> = prepared.snapshot.tombstones.iter().collect();
+    // A resolved link is a node of this chain, so its row is rendered from the
+    // generation the link resolved in (M7-37).
+    for corpus in &corpora.selected {
+        rows.extend(search::doc_rows(corpus.snapshot, corpus.config));
+        tombstones.extend(corpus.snapshot.tombstones.iter());
+    }
     let scopes = ScopeFilter::new(&[], false);
     let tables = Tables {
         graph: &graph,
         rows: rows.iter().map(|row| (row.id, row)).collect(),
-        tombstones: prepared
-            .snapshot
-            .tombstones
-            .iter()
-            .map(|meta| (meta.id, meta))
-            .collect(),
+        tombstones: tombstones.into_iter().map(|meta| (meta.id, meta)).collect(),
         // One window and one status per node for this whole answer, never one
         // per row (M5-33).
         windows: graph.windows(&scopes),
         statuses: graph.effective_statuses(&scopes),
     };
     let chain = graph.chain(id);
-    let mut notes = Vec::new();
+    let mut notes = linked_notes(&ignored, &chain, corpora)?;
     let cycle_breaks = tables.cycle_breaks(&chain, &mut notes);
     let terminal = tables.terminal(&chain, &mut notes);
     Ok(Report {
@@ -269,6 +278,34 @@ fn corpus_path(given: &Path, root: &Path) -> Result<String, JanusError> {
 
 // ────────────────────────────── the tables ─────────────────────────────────
 
+/// The notes one chain carries for the qualified links it did not follow.
+///
+/// A link to a corpus this workspace does not hold is the one case a note cannot
+/// cure: the qualifier is a typo or a missing entry, and every chain of the
+/// corpus would repeat the same line, so the answer is `not_found` with the ids
+/// the workspace holds (case 7.8). Only a link on this chain fails the answer;
+/// an unrelated document's broken link is `doctor`'s row.
+fn linked_notes(
+    ignored: &[link::Ignored],
+    chain: &[ChainNode],
+    corpora: &Corpora<'_>,
+) -> Result<Vec<String>, JanusError> {
+    let inside: BTreeSet<DocId> = chain.iter().map(|node| node.id).collect();
+    let mut notes = Vec::new();
+    for row in ignored {
+        if !inside.contains(&row.declarer) {
+            continue;
+        }
+        if row.reason == Skip::Unknown {
+            return Err(JanusError::CorpusNotInWorkspace {
+                corpus: row.corpus.clone(),
+                known: corpora.known.iter().map(|id| (*id).to_owned()).collect(),
+            });
+        }
+        notes.push(row.message(&corpora.known));
+    }
+    Ok(notes)
+}
 /// Everything one node row reads, gathered once per answer.
 struct Tables<'a> {
     graph: &'a Graph,

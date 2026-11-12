@@ -18,7 +18,8 @@ pub mod error;
 
 pub use crate::scan::API_VERSION;
 pub use dto::{
-    Failure, Ok, Receipt, SupersedeParams, SupersedeReceipt, UpdateParams, WriteMode, WriteParams,
+    Failure, Ok, PromoteMode, PromoteParams, PromoteReceipt, Receipt, SupersedeParams,
+    SupersedeReceipt, UpdateParams, WriteMode, WriteParams,
 };
 pub use error::ApiCode;
 
@@ -48,6 +49,9 @@ pub enum Tool {
     WriteDocument,
     /// `supersede_document`: retire one document and record its successor.
     SupersedeDocument,
+    /// `promote_document`: declare an archived document as lineage for a primary
+    /// one, without moving or rewriting the archive.
+    PromoteDocument,
 }
 
 impl Tool {
@@ -61,6 +65,7 @@ impl Tool {
         Self::UpdateFrontmatter,
         Self::WriteDocument,
         Self::SupersedeDocument,
+        Self::PromoteDocument,
     ];
 
     /// The wire name an agent sends and reads (§9.2).
@@ -75,19 +80,25 @@ impl Tool {
             Self::UpdateFrontmatter => "update_frontmatter",
             Self::WriteDocument => "write_document",
             Self::SupersedeDocument => "supersede_document",
+            Self::PromoteDocument => "promote_document",
         }
     }
 
-    /// True when the call names one document in `path`, so a `corpus:path`
+    /// True when the call names one document by path, so a `corpus:path`
     /// qualifier may stand in for the `corpus` parameter (M6b-6, M7-38).
+    ///
+    /// `path` is the field a read or a patch names; a promotion names the file
+    /// it writes in `target_path` (M7-37).
     #[must_use]
     pub const fn names_a_path(self) -> bool {
         matches!(
             self,
             Self::ReadDocument
+                | Self::Lineage
                 | Self::UpdateFrontmatter
                 | Self::WriteDocument
                 | Self::SupersedeDocument
+                | Self::PromoteDocument
         )
     }
 
@@ -138,15 +149,7 @@ impl Call {
     }
 }
 
-/// The write tools this release names but does not serve yet (§3.8).
-///
-/// `update_frontmatter` left this list in M7-4, `write_document` in M7-5, and
-/// `supersede_document` in M7-6, which serve them. A caller that sends the one
-/// remaining name gets a refusal, not "no such tool": the name is legal and
-/// the phase that serves it has not landed. Each phase deletes its own name.
-const UNLANDED_WRITE_TOOLS: [&str; 1] = ["promote_document"];
-
-/// The four write names of §9.3, served or not.
+/// The four write names of §9.3, every one served by this release.
 const WRITE_TOOLS: [&str; 4] = [
     "update_frontmatter",
     "write_document",
@@ -231,30 +234,16 @@ impl Writes {
 
 /// The refusal for one tool name, or `None` when the name may run.
 ///
-/// The refusal lives here, not in an adapter, so `janus rpc` (case 5.8) and
-/// `janus mcp` (case 8.2) cannot answer the same name differently.
-///
-/// Two rules, in order. Every write name is refused when the surface has no
-/// `--allow-write` (case 4.1, case 4.2). A write tool whose phase has not
-/// landed is refused even with the flag, because the release does not serve it.
+/// The refusal lives here, not in an adapter, so `janus rpc` and `janus mcp`
+/// cannot answer the same name differently. One rule: every write name of §9.3
+/// is refused when the surface has no `--allow-write` (case 4.1, case 4.2).
+/// Every one of the four is served, so a legal request reaches the engine.
 #[must_use]
 pub fn write_refusal(name: &str, writes: Writes) -> Option<Failure> {
-    if !WRITE_TOOLS.contains(&name) {
+    if writes.allowed || !WRITE_TOOLS.contains(&name) {
         return None;
     }
-    if !writes.allowed {
-        return Some(Failure::from_error(&JanusError::WriteDisabled {
-            surface: writes.surface.to_owned(),
-        }));
-    }
-    if !UNLANDED_WRITE_TOOLS.contains(&name) {
-        return None;
-    }
-    Some(Failure {
-        api: API_VERSION,
-        ok: false,
-        code: ApiCode::refused().code,
-        message: format!("{name} is a write tool, and this release does not serve it yet"),
-        hint: Some("the phase that serves it is not merged; use a read tool until then".to_owned()),
-    })
+    Some(Failure::from_error(&JanusError::WriteDisabled {
+        surface: writes.surface.to_owned(),
+    }))
 }
