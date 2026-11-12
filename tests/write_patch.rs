@@ -1388,6 +1388,20 @@ fn two_values_the_date_parser_rejects_are_two_values() {
     assert_eq!(plan.text, "---\ndate: 2026-11\n---\n\nbody\n");
 }
 
+/// The empty string is a value, and a request for it is not a request for null.
+///
+/// A read-back taken over the request text would parse `""` as a null and make
+/// this write a no-op (M7b-16).
+#[test]
+fn the_empty_string_is_not_a_null() {
+    let input = "---\ntitle:\n---\n\nbody\n";
+    let plan = planned(input, &[("title", Some(""))]);
+
+    assert_eq!(plan.changed_keys, ["title"]);
+    assert_eq!(plan.text, "---\ntitle: \"\"\n---\n\nbody\n");
+    assert_eq!(typed(&plan.text).title.as_deref(), Some(""));
+}
+
 /// A list and a null are two values: a reader that drops the list must not make
 /// a request for null a no-op.
 #[test]
