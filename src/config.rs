@@ -280,6 +280,19 @@ impl Config {
         self.aliases.get(field)
     }
 
+    /// The field a frontmatter key belongs to, or `None` for a key the config
+    /// does not interpret.
+    ///
+    /// The reverse of [`Config::aliases`]: the first field whose alias list holds
+    /// `key`. A key outside every list belongs to the caller, and the writer
+    /// stores it as the caller wrote it.
+    #[must_use]
+    pub fn field_of(&self, key: &str) -> Option<Field> {
+        Field::ALL
+            .into_iter()
+            .find(|field| self.aliases(*field).iter().any(|alias| alias == key))
+    }
+
     /// The alias → canonical type map, for inspection and tests.
     #[must_use]
     pub fn type_aliases(&self) -> &BTreeMap<String, String> {
@@ -1946,6 +1959,16 @@ mod tests {
     fn alias_whitespace_is_trimmed_and_blanks_dropped() {
         let config = parse("[frontmatter]\ntitle = [\" name \", \"\"]\n");
         assert_eq!(config.aliases(Field::Title), ["name".to_owned()]);
+    }
+
+    #[test]
+    fn field_of_is_the_reverse_of_the_alias_lists() {
+        let config = parse("");
+        assert_eq!(config.field_of("status"), Some(Field::Status));
+        assert_eq!(config.field_of("state"), Some(Field::Status));
+        assert_eq!(config.field_of("doc_version"), Some(Field::Version));
+        assert_eq!(config.field_of("owner"), None, "a key the reader ignores");
+        assert_eq!(config.field_of("Status"), None, "a key is case-sensitive");
     }
 
     // ──────────────────────────── type registry ───────────────────────────

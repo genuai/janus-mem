@@ -383,11 +383,16 @@ fn case_6_8_a_failed_second_write_restores_the_old_file_and_mode() {
         create_frontmatter: false,
         dry_run: false,
     };
-    let old_plan = plan(std::str::from_utf8(&original).expect("UTF-8"), &patch).expect("plan");
+    let config = Config::load(root).expect("the corpus config");
+    let old_plan = plan(
+        std::str::from_utf8(&original).expect("UTF-8"),
+        &config,
+        &patch,
+    )
+    .expect("plan");
     let mut frontmatter: BTreeMap<String, Option<String>> = BTreeMap::new();
     frontmatter.insert("supersedes".to_owned(), Some("notes/old.md".to_owned()));
     let new_document = plan_document(&frontmatter, "", None).expect("plan the new document");
-    let config = Config::load(root).expect("the corpus config");
     let options = CommitOptions {
         path: old_path.clone(),
         root: root.to_path_buf(),
