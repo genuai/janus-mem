@@ -303,9 +303,8 @@ Three instruments, all fixed before the work starts:
 2. **The private vault's ten questions**: kept outside this repository. Baseline, graded fresh on
    2026-11-12: top-1 **4/10**, top-3 **7/10**, one wording failure (Q10). **Supplementary evidence,
    never a condition** — the M7 plan's §7 rule, which this plan keeps.
-3. **The three real questions** the owner asked, with these expected answers, recorded outside this
-   repository except for the first, which is already a public fact: the Q3 case, whose answering
-   document is a marketing review, must reach the top three.
+3. **The three real questions** the owner asked, with their expected answers, recorded outside this
+   repository: the Q3 case, whose answering document must reach the top three.
 
 ### The calibration rule, fixed before the numbers
 
