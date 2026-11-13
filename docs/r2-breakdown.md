@@ -5,9 +5,9 @@
 > Evidence: the gate of 2026-11-12 on two corpora, and a chunk-level diagnosis of one real
 > question that ranked its answer 97th.
 >
-> **Done when:** the question *"how are our shorts doing on youtube?"* puts its answering document
-> in the top three, from rank 97, without losing a grade on either ten-question packet and without
-> dropping a decision, spec or principle out of its own answer's top three.
+> **Done when:** the case recorded outside this repository as **the Q3 case** moves its answering
+> document from rank **97** into the top three, without losing a grade on the repository packet and
+> without dropping a decision, spec or principle out of its own answer's top three.
 
 **Words used here.** **Argmax**: the document's score is its best chunk's score. **Coverage**: how
 many chunks of a document hold a query term. **Coordination**: how many distinct query terms a
@@ -18,26 +18,27 @@ document matches anywhere. **Canary**: a question whose answer must not move.
 **Decision: R2 changes how a document's score is aggregated from its chunks. It does not add
 embeddings, and it does not change the type weights.**
 
-A real question — "how are our shorts doing on youtube?" — puts its answering document at rank 97.
-The diagnosis is not what a first reading suggests:
+A real question, recorded outside this repository, puts its answering document at rank 97. The
+diagnosis is not what a first reading suggests:
 
 | Claim | Measured |
 |---|---|
 | the authority gap decides | **no**: 46 of the 96 documents above it are `note` at the same 0.90, and giving it the winner's 1.50 still leaves it below eight of them |
 | recency decides | **no**: within a 14-day window it is 48th |
-| its text lacks the terms | **no**: 25 `shorts` occurrences, against 6 in the document that wins |
+| its text lacks the terms | **no**: 25 occurrences of the query's rare term, against 6 in the document that wins |
 | its **best chunk** lacks the terms | **yes**: 1 of 3 query terms, against 2 of 3 for the winner |
 
-The document is spread thin: 32 chunks, 18 with `shorts`, and its best chunk holds two occurrences
-in 145 tokens. The document that wins has a 120-token chunk holding two different query terms. The
-argmax rewards density and ignores the 25 occurrences elsewhere.
+The document is spread thin: 32 chunks, 18 holding the rare term, and its best chunk holds two
+occurrences in 145 tokens. The document that wins has a 120-token chunk holding two different query
+terms. The argmax rewards density and ignores the 25 occurrences elsewhere. The case's paths and
+text stay outside this repository, as §7 requires.
 
 | R2 item | state today | evidence |
 |---|---|---|
 | document score | argmax over chunks | `src/search/mod.rs` (group to one row per document) |
 | coordination (distinct terms matched per document) | absent | the scorer sees one chunk at a time |
 | a per-chunk diagnostic | absent | `search` reports the argmax chunk only |
-| chunk ordinals | `search` and `chunks` disagree | diagnosis, surprise 1: search ordinal 11 is chunks ordinal 15 by span |
+| chunk ordinals | `search` and `chunks` disagree | the diagnosis: search ordinal 11 is chunks ordinal 15 by span |
 | `scores` breakdown | has `lexical`, `relevance`, `final` | enough to compare two documents, not enough to see why |
 
 ### 0.1 In scope
@@ -87,19 +88,37 @@ pub struct DocEvidence {
 }
 ```
 
-Both are already available where the grouping happens: the chunk scores exist, and the terms each
-chunk matched are in the postings the scorer walked. Nothing is re-walked.
+The chunk scores exist where the grouping happens. **Coordination does not**: `LexicalIndex::score_query`
+returns scores only (`src/index/lexical.rs:241`), so the per-chunk matched terms are not in the
+scorer's output. Phase 1 widens that signature to return the matched terms per chunk, and that file
+is in Phase 1's list. Nothing is re-walked; the terms are already in hand where the score is
+computed.
 
 ### 2.2 The three aggregations
 
+The aggregation is a **factor** in `(0, 1.25]`, applied after the argmax and reported as its own
+field. It is not folded into `relevance`, because `relevance = blend · title_boost ∈ [0, 2]` is a
+documented identity and folding would break it.
+
 ```text
-max            = top[0]
-max_plus_top   = top[0] + λ · (top[1] + top[2]) / 2      λ = [scoring] top_weight, default 0.10
-coverage       = top[0] · (1 + μ · coordination / total)  μ = [scoring] coverage_weight, default 0.15
+factor_max    = 1
+factor_top    = 1 + λ · (top[1] + top[2]) / (2 · top[0])   λ = [scoring] top_weight, default 0.10
+factor_cover  = 1 + μ · coordination / total                μ = [scoring] coverage_weight, default 0.15
+factory       = clamp(chosen, 1.0, 1.25)
+final_doc     = final_argmax_chunk · factor
 ```
 
-`max` is the default and must reproduce today's output byte for byte, including ties: the tie-break
-order does not change.
+`top[i]` are the chunk's **relevance** scores, before authority and decay, so the factor multiplies
+the same quantity in every mode. `top[0] == 0` cannot occur on a returned row (`relevance > 0` is
+the admission rule), and the code still guards it: a zero makes the factor 1.0. `total == 0` makes
+the coverage factor 1.0 for the same reason.
+
+The clamp at 1.25 keeps the score bound a constant: `final ≤ 3.0 · 1.25 = 3.75`, and §10 corrects
+the bound in SPEC §7.2 and the property test's assertion.
+
+`max` is the default and must reproduce today's output byte for byte, including ties. The factor
+field is omitted from the JSON when it is 1.0, the way `scores.corpus` already is
+(`src/score.rs:257`), so every golden stays.
 
 ### 2.3 The diagnostic
 
@@ -148,9 +167,9 @@ three rankings are identical.
 **Case 2.3.** For a document with `coordination = 2`, `total = 3` and `μ = 0.15`,
 `coverage = top[0] · 1.1`, computed by hand.
 
-**Case 2.4.** The multiplier is applied to the document's **relevance**, before authority and decay,
-so the `scores` breakdown still multiplies to `final` (the M6b-32 identity, now with the aggregate
-factor as one of its terms).
+**Case 2.4.** `scores.aggregate` is a field of `Breakdown`, omitted when it is 1.0, and
+`final = relevance · authority · decay · corpus · aggregate` for every row (the M6b-32 identity,
+with one more factor). A test asserts the identity on a row where the factor is not 1.0.
 
 **Case 2.5.** A document with zero coordination cannot occur on a returned row (`relevance > 0` is
 the admission rule), and a test asserts that the multiplier is never applied to a zero.
@@ -168,7 +187,8 @@ three rankings it produced.
 
 **Case 3.3.** The Q3 case reaches the top three.
 
-**Case 3.4.** Neither packet loses a grade: top-1 ≥ 4/10 and top-3 ≥ 7/10 on both.
+**Case 3.4.** The repository packet loses no grade: top-1 **≥ 4/10** and top-3 **≥ 9/10**. The
+private packet is recorded beside it and is not a condition.
 
 **Case 3.5.** Five canaries keep their answer in the top three.
 
@@ -195,14 +215,18 @@ three rankings it produced.
 | R2-5 | `--explain` is a flag, not a default field | One extra field per row costs every consumer, and the diagnostic is for an investigation, not for an agent's context. |
 | R2-6 | The five canaries come from the private packet and are recorded outside this repository | The repository's packet guards top-1 and top-3; the canaries guard the answer that must not move, and their text is private. |
 | R2-7 | Chunk ordinals stay inconsistent until a separate PR | A ranking review should not carry a reporting fix, and the fix has its own cause: `search` numbers chunks after grouping, `chunks` numbers them before. |
+| R2-9 | The factor is a separate clamped field, not a change to `relevance` | `relevance` has a documented range and a documented identity; folding would break both, and a clamp keeps `final`'s bound a constant. |
+| R2-10 | `top[i]` are chunk **relevance** scores, and a zero makes the factor 1.0 | One quantity in every mode, and a guard rather than a division by zero. |
+| R2-11 | The repository gate for the Q3 failure is a fixture Phase 1 builds | A gate no reviewer can read is not a gate. The private case stays evidence. |
 | R2-8 | No embeddings | The packet measured one wording failure in ten. The trigger for semantic ranking is three, and Q3 is a coverage failure: the terms are present, spread thin. |
 
 ## 5. Phases
 
 ### Phase 1 — the diagnostic
 
-**Files.** `src/search/mod.rs` (the grouping, the evidence), `src/score.rs` (the terms a chunk
-matched, if not already exposed), `src/api/dto.rs` (`explain`), `src/cli.rs`, `src/main.rs`,
+**Files.** `src/index/lexical.rs` (return the matched terms per chunk), `src/search/mod.rs` (the
+grouping, the evidence), `src/score.rs` (the evidence types), `src/api/dto.rs` (`explain`),
+`src/cli.rs`, `src/main.rs`,
 `src/mcp/tools.rs` (the `explain` parameter), `tests/search_explain.rs` (new),
 `tests/golden_search.rs` (one golden with the flag).
 
@@ -213,7 +237,8 @@ matched, if not already exposed), `src/api/dto.rs` (`explain`), `src/cli.rs`, `s
 **Accept.** Without `--explain`, every golden is byte-identical. With it, the Q3 review and the five
 canaries report the numbers their ranks imply.
 
-**Split seam.** The evidence in the engine first; the surfaces second.
+**Split seam.** The index change first (the matched terms per chunk), the evidence and the surfaces
+second. If the index change alone passes 400, ship it as its own PR: it changes no score.
 
 ### Phase 2 — the aggregation
 
@@ -231,7 +256,8 @@ canaries report the numbers their ranks imply.
 
 ### Phase 3 — the calibration
 
-**Files.** `janus.toml`, `SPEC.md` §7.2, `docs/r2-breakdown.md`, one test that pins the three
+**Files.** `janus.toml`, `SPEC.md` §7.2, `docs/r2-breakdown.md`, `tests/golden_search.rs` (a
+non-`max` default moves those goldens, and this PR owns the move), one test that pins the three
 rankings, and the phase log.
 
 **Build.** Run the grid, apply the rule, ship the winner.
@@ -255,10 +281,11 @@ under twice today.
 
 Three instruments, all fixed before the work starts:
 
-1. **The repository's ten questions**: `tests/eval/repo-ten.jsonl`. Baseline top-1 **4/10**, top-3
-   **8/10**, p50 6 ms.
+1. **The repository's ten questions**: `tests/eval/repo-ten.jsonl`, measured on this document's own
+   commit: top-1 **4/10**, top-3 **9/10**, p50 6 ms. This is the gate.
 2. **The private vault's ten questions**: kept outside this repository. Baseline, graded fresh on
-   2026-11-12: top-1 **4/10**, top-3 **7/10**, one wording failure (Q10).
+   2026-11-12: top-1 **4/10**, top-3 **7/10**, one wording failure (Q10). **Supplementary evidence,
+   never a condition** — the M7 plan's §7 rule, which this plan keeps.
 3. **The three real questions** the owner asked, with these expected answers, recorded outside this
    repository except for the first, which is already a public fact: the Q3 case, whose answering
    document is a marketing review, must reach the top three.
@@ -269,8 +296,8 @@ Try every combination of `aggregate ∈ {max_plus_top, coverage}` and its weight
 `{0.05, 0.10, 0.15, 0.25}`. Keep a combination only if all of these hold:
 
 - **C1** the Q3 answering document is in the top three;
-- **C2** the repository packet's top-1 ≥ 4 and top-3 ≥ 8, and the private packet's top-1 ≥ 4 and
-  top-3 ≥ 7;
+- **C2** the repository packet's top-1 **≥ 4/10** and top-3 **≥ 9/10**, and the private packet's
+  top-1 and top-3 no worse than its baseline (supplementary, recorded, not a gate);
 - **C3** all five canaries keep their answer in the top three;
 - **C4** p50 latency under 300 ms on the repository packet.
 
@@ -283,10 +310,14 @@ aggregation is not the lever — recorded, with the numbers, and handed to the n
 
 ## 8. Definition of done
 
-1. The Q3 answering document is in the top three: **rank ≤ 3**, from **97**.
-2. The repository packet: top-1 **≥ 4/10**, top-3 **≥ 8/10**, no grade worse.
-3. The private packet: top-1 **≥ 4/10**, top-3 **≥ 7/10**, no grade worse.
-4. Five canaries: **5 of 5** keep their answer in the top three.
+1. **The Q3 case** moves its answering document into the top three: **rank ≤ 3**, from **97**.
+   Supplementary: the case is recorded outside this repository, so no reviewer reads it here. The
+   repository gate for the same failure is a fixture that reproduces it: a long document whose rare
+   term appears in many chunks and in no single dense one, against a short document with one dense
+   chunk. Phase 1 builds that fixture, and case 3.3 asserts it.
+2. The repository packet: top-1 **≥ 4/10**, top-3 **≥ 9/10**, no grade worse.
+3. The private packet, supplementary: top-1 and top-3 no worse than its baseline, recorded.
+4. Five canaries, supplementary: **5 of 5** keep their answer in the top three.
 5. p50 on the repository packet: **< 300 ms**, from 6 ms — the aggregation is linear in chunk count,
    so the budget is generous on purpose.
 6. `format_version` **6**, `api` **1**, **0** codes added, **0** exit codes moved.
@@ -299,7 +330,7 @@ aggregation is not the lever — recorded, with the numbers, and handed to the n
 
 | phase | logic ceiling | estimate | test ceiling | estimate |
 |---|---|---|---|---|
-| R2-1 diagnostic | 250 | ~200 | 400 | ~300 |
+| R2-1 diagnostic | 400 | ~350 | 500 | ~350 |
 | R2-2 aggregation | 250 | ~180 | 400 | ~280 |
 | R2-3 calibration | 150 | ~80 | 250 | ~150 |
 
@@ -310,8 +341,11 @@ phases created surfaces; R2's phases extend surfaces that exist, so these are up
 
 1. **§7.2.** Replace "A doc's score is the max over its chunks; the returned chunk is the argmax"
    with the calibrated rule, and name the config key that selects it.
-2. **§7.2.** Add the aggregate factor to the arithmetic block, between `relevance` and `authority`.
-3. **§9.1.** `janus search` gains `--explain`.
+2. **§7.2.** Add `aggregate` to the arithmetic block as a factor after `decay` and `corpus`, state
+   that it is clamped to `[1.0, 1.25]`, and correct the bound from `final ≤ 3.0` to
+   `final ≤ 3.75`.
+3. **§9.1.** `janus search` gains `--explain`, and the `scores` breakdown gains `aggregate`, omitted
+   when neutral, the way `corpus` already is.
 4. **§9.2.** `search` gains `explain?` on the MCP tool.
 5. **§16.1.** Name `[scoring] aggregate`, `top_weight` and `coverage_weight`.
 6. **§11.** Add R2 between M7b and M8, with the done-when above.
