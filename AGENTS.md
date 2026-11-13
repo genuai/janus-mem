@@ -167,6 +167,41 @@ decisions:
 - **Test-first for anything with a rule** (scoring, frontmatter patching,
   chunking). A bug fix lands with a failing test first.
 
+## Public repository: what never goes in
+
+This repository is public. A private path, a harness identifier, an absolute home directory, a real
+email address or a credential is a leak. A leak survives the commit that removes it.
+
+**Never write any of these into a file, a commit message, a pull request, an issue, or a reply:**
+
+| Class | Examples |
+|---|---|
+| A private vault path or folder | a home directory, a numbered vault folder, a system or archive folder |
+| A harness path or id | an agent home directory, a thread id, an environment id, a project id, a branch named after one |
+| A model or agent name | the model this project runs on, the harness that drives it |
+| A real email address | an author address. A GitHub `noreply` address is allowed |
+| A credential | a key, a token, a password, a private key, a webhook URL with a secret |
+| Private content | a decision, a thought, a journal entry, a client or family fact, a query copied from a private vault |
+
+Write the fact instead of the machinery. Cite a path and a count, never the content.
+
+**The mechanism, not the intention.** `scripts/leak-check.sh` implements the table above. It fails
+on a tracked file, a commit subject, or a commit author. CI runs it on every push and on every pull
+request, and it scans the pull request's branch name and body as well, because GitHub publishes
+those.
+
+```bash
+scripts/leak-check.sh           # the tree at HEAD
+scripts/leak-check.sh --staged  # what you are about to commit
+scripts/leak-check.sh --all     # the tree, every commit subject, every commit author
+```
+
+`scripts/leak-allow` lists accepted hits, one `path:rule` per line. It exists so the debt is visible and
+countable, and it must end empty. **A new hit is fixed, not excepted.** An exception is a decision
+with a date and an owner, recorded in the phase log that removes it.
+
+The author identity is pinned to a GitHub `noreply` address. A commit that changes it is a finding.
+
 ## Writing for readers
 
 Documentation that a person or an agent reads to *use* the tool follows the

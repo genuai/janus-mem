@@ -7,6 +7,37 @@ on:
   pull_request:
 
 jobs:
+  # The repository is public. This job fails when a tracked file, a commit
+  # subject or a commit author publishes something that must stay private. The
+  # rule table and its exceptions are in `scripts/leak-check.sh` and
+  # `.leak-allow`; `AGENTS.md` says what never goes in.
+  leak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Scan the tree and every commit
+        run: scripts/leak-check.sh --all
+      - name: Scan this pull request's branch name and body
+        # GitHub's own merge and PR metadata is published too: a branch named
+        # after a thread, or a body quoting a private path, is a leak the tree
+        # scan cannot see.
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          EVENT_PATH: ${{ github.event_path }}
+        run: |
+          fail=0
+          case "$HEAD_REF" in
+            bb/* | *thr_* | *env_* | *proj_*)
+              echo "::error::branch name leaks a harness id: $HEAD_REF"
+              fail=1 ;;
+          esac
+          jq -r '"PR #" + (.number|tostring), (.pull_request.body // "")' "$EVENT_PATH" \
+            | scripts/leak-check.sh --text || fail=1
+          exit $fail
+
   changes:
     runs-on: ubuntu-latest
     outputs:
