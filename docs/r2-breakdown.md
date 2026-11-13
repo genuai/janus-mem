@@ -109,9 +109,10 @@ final_doc     = final_argmax_chunk · factor
 ```
 
 `top[i]` are the chunk's **relevance** scores, before authority and decay, so the factor multiplies
-the same quantity in every mode. `top[0] == 0` cannot occur on a returned row (`relevance > 0` is
-the admission rule), and the code still guards it: a zero makes the factor 1.0. `total == 0` makes
-the coverage factor 1.0 for the same reason.
+the same quantity in every mode. An absent entry — a document with fewer than three chunks — is
+`0.0`, so a one-chunk document's `factor_top` is exactly 1.0. `top[0] == 0` cannot occur on a
+returned row (`relevance > 0` is the admission rule), and the code still guards it: a zero makes the
+factor 1.0. `total == 0` makes the coverage factor 1.0 for the same reason.
 
 The clamp at 1.25 keeps the score bound a constant: `final ≤ 3.0 · 1.25 = 3.75`. The bound is a
 **second** property test, over the post-aggregation row, because `score()` never sees the factor and
@@ -296,8 +297,9 @@ Three instruments, all fixed before the work starts:
    recorded clock (`docs/r1-breakdown.md:299-309`):
    `janus search "<q>" --intent current --limit 10 --no-embeddings --json`, one query per line, the
    rank of the expected path read from the JSON. Measured on this document's commit at the clock
-   stated beside the count: top-1 **4/10**, top-3 **9/10**, p50 6 ms. This is the gate, and Phase 3
-   must use the same command so the two numbers compare.
+   stated beside the count (run 2026-11-12, clock 2026-11-12): top-1 **4/10**, top-3 **9/10**,
+   p50 6 ms. This is the gate, and Phase 3 must use the same command and print the date with its
+   numbers so the two compare.
 2. **The private vault's ten questions**: kept outside this repository. Baseline, graded fresh on
    2026-11-12: top-1 **4/10**, top-3 **7/10**, one wording failure (Q10). **Supplementary evidence,
    never a condition** — the M7 plan's §7 rule, which this plan keeps.
