@@ -96,7 +96,7 @@ computed.
 
 ### 2.2 The three aggregations
 
-The aggregation is a **factor** in `(0, 1.25]`, applied after the argmax and reported as its own
+The aggregation is a **factor** in `[1.0, 1.25]`, applied after the argmax and reported as its own
 field. It is not folded into `relevance`, because `relevance = blend · title_boost ∈ [0, 2]` is a
 documented identity and folding would break it.
 
@@ -104,7 +104,7 @@ documented identity and folding would break it.
 factor_max    = 1
 factor_top    = 1 + λ · (top[1] + top[2]) / (2 · top[0])   λ = [scoring] top_weight, default 0.10
 factor_cover  = 1 + μ · coordination / total                μ = [scoring] coverage_weight, default 0.15
-factory       = clamp(chosen, 1.0, 1.25)
+factor        = clamp(chosen, 1.0, 1.25)
 final_doc     = final_argmax_chunk · factor
 ```
 
@@ -113,8 +113,9 @@ the same quantity in every mode. `top[0] == 0` cannot occur on a returned row (`
 the admission rule), and the code still guards it: a zero makes the factor 1.0. `total == 0` makes
 the coverage factor 1.0 for the same reason.
 
-The clamp at 1.25 keeps the score bound a constant: `final ≤ 3.0 · 1.25 = 3.75`, and §10 corrects
-the bound in SPEC §7.2 and the property test's assertion.
+The clamp at 1.25 keeps the score bound a constant: `final ≤ 3.0 · 1.25 = 3.75`. The bound is a
+**second** property test, over the post-aggregation row, because `score()` never sees the factor and
+its own `final ≤ 3.0` assertion stays as it is. §10 corrects the bound in SPEC §7.2.
 
 `max` is the default and must reproduce today's output byte for byte, including ties. The factor
 field is omitted from the JSON when it is 1.0, the way `scores.corpus` already is
@@ -154,7 +155,12 @@ goldens.
 chunk that matched only a stopword is not a match.
 
 **Case 1.5.** The five canaries and the Q3 case, run with `--explain`, report values that explain
-their rank: for the review, `coordination` ≥ 2 and `chunks_matching` ≥ 18.
+their rank: the answering document's `coordination` ≥ 2 and `chunks_matching` ≥ 18.
+
+**Case 1.6.** The fixture: a long document with both query terms spread over its chunks and never
+together, and a short document with both in one chunk. Under `max`, the short document ranks first
+and the long one does not, which is the failure the milestone exists for, reproduced in the
+repository.
 
 ### 3.2 The aggregation (P2)
 
@@ -162,10 +168,12 @@ their rank: for the review, `coordination` ≥ 2 and `chunks_matching` ≥ 18.
 three rankings are identical.
 
 **Case 2.2.** For a document with `top = [0.5, 0.4, 0.1]` and `λ = 0.1`,
-`max_plus_top = 0.5 + 0.1 · 0.25 = 0.525`, computed by hand.
+`factor_top = 1 + 0.1 · (0.4 + 0.1) / (2 · 0.5) = 1.05`, and the document's `final` is the argmax
+chunk's `final` times that, compared at the M6b-32 relative tolerance of `1e-12` rather than exactly.
 
 **Case 2.3.** For a document with `coordination = 2`, `total = 3` and `μ = 0.15`,
-`coverage = top[0] · 1.1`, computed by hand.
+`factor_cover = 1 + 0.15 · 2 / 3 ≈ 1.1`, and `final` is the argmax `final` times it, at the same
+tolerance.
 
 **Case 2.4.** `scores.aggregate` is a field of `Breakdown`, omitted when it is 1.0, and
 `final = relevance · authority · decay · corpus · aggregate` for every row (the M6b-32 identity,
@@ -176,6 +184,9 @@ the admission rule), and a test asserts that the multiplier is never applied to 
 
 **Case 2.6.** An unknown `aggregate` value is a config warning and falls back to `max`, like every
 other enumeration in the config.
+
+**Case 2.7.** On case 1.6's fixture, `coverage` puts the long document first and `max` does not. A
+mode that cannot move this fixture is not the fix for this failure, and this case says so.
 
 ### 3.3 The calibration (P3)
 
@@ -209,7 +220,7 @@ private packet is recorded beside it and is not a condition.
 | ID | Decision | Why |
 |---|---|---|
 | R2-1 | The default stays `max` until the calibration selects otherwise | A release that changes ranking by default must have the numbers first. `max` reproduces today byte for byte, so the release is safe before calibration and the change is one line after. |
-| R2-2 | The aggregate factor multiplies `relevance`, before authority and decay | Otherwise the `scores` breakdown stops multiplying to `final`, and the breakdown is the only way a user can see why a document ranked where it did. |
+| R2-2 | The aggregate factor is a separate field applied to `final` after `decay` and `corpus`, clamped to `[1.0, 1.25]` | `relevance` has a documented range and a documented identity; folding into it breaks both. A separate clamped factor keeps `final = relevance · authority · decay · corpus · aggregate`, so the breakdown still multiplies to the final score. |
 | R2-3 | `max_plus_top` rewards breadth linearly, `coverage` rewards distinct terms | They answer different failures: a document that says one thing in several places, against one that answers the whole question in one place. The calibration says which this corpus needs. |
 | R2-4 | The calibration rule is fixed before the numbers, per §7 | A rule edited after the data arrives is worthless. |
 | R2-5 | `--explain` is a flag, not a default field | One extra field per row costs every consumer, and the diagnostic is for an investigation, not for an agent's context. |
@@ -262,7 +273,7 @@ rankings, and the phase log.
 
 **Build.** Run the grid, apply the rule, ship the winner.
 
-**Tests.** Cases 3.1 to 3.6, measured, not asserted.
+**Tests.** Cases 3.1 to 3.6, measured with §7's command and clock, not asserted.
 
 **Accept.** The Q3 case is in the top three, no packet lost a grade, the canaries hold, latency is
 under twice today.
@@ -281,8 +292,12 @@ under twice today.
 
 Three instruments, all fixed before the work starts:
 
-1. **The repository's ten questions**: `tests/eval/repo-ten.jsonl`, measured on this document's own
-   commit: top-1 **4/10**, top-3 **9/10**, p50 6 ms. This is the gate.
+1. **The repository's ten questions**: `tests/eval/repo-ten.jsonl`, graded with the R1 command and a
+   recorded clock (`docs/r1-breakdown.md:299-309`):
+   `janus search "<q>" --intent current --limit 10 --no-embeddings --json`, one query per line, the
+   rank of the expected path read from the JSON. Measured on this document's commit at the clock
+   stated beside the count: top-1 **4/10**, top-3 **9/10**, p50 6 ms. This is the gate, and Phase 3
+   must use the same command so the two numbers compare.
 2. **The private vault's ten questions**: kept outside this repository. Baseline, graded fresh on
    2026-11-12: top-1 **4/10**, top-3 **7/10**, one wording failure (Q10). **Supplementary evidence,
    never a condition** — the M7 plan's §7 rule, which this plan keeps.
@@ -312,9 +327,11 @@ aggregation is not the lever — recorded, with the numbers, and handed to the n
 
 1. **The Q3 case** moves its answering document into the top three: **rank ≤ 3**, from **97**.
    Supplementary: the case is recorded outside this repository, so no reviewer reads it here. The
-   repository gate for the same failure is a fixture that reproduces it: a long document whose rare
-   term appears in many chunks and in no single dense one, against a short document with one dense
-   chunk. Phase 1 builds that fixture, and case 3.3 asserts it.
+   repository gate is a fixture Phase 1 builds: a long document whose **two** query terms are spread
+   over many chunks and never together in one, against a short document that holds both in one dense
+   chunk. The long document's coordination is **2 of 2**, so `factor_cover` can lift it; with one term
+   only, the coverage mode would be unfalsifiable. Cases 1.6 and 2.7 pin the failure under `max` and
+   the fix under `coverage`.
 2. The repository packet: top-1 **≥ 4/10**, top-3 **≥ 9/10**, no grade worse.
 3. The private packet, supplementary: top-1 and top-3 no worse than its baseline, recorded.
 4. Five canaries, supplementary: **5 of 5** keep their answer in the top three.
