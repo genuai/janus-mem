@@ -1,0 +1,22 @@
+# Known leaks, accepted until the scrub lands. One `path:rule` per line.
+# The file must end empty. Every line is debt with an owner: the scrub that
+# removes it is the phase that rewrites history and rewrites the docs.
+#
+#   private-root    a private vault folder name used as an example
+#   private-agent   "Hermes" as an MCP client: is it a public name? decision pending
+#   email           a real author address in the history, fixed by the rewrite
+
+README.md:private-agent
+SPEC.md:private-agent
+commit:email
+docs/corpus-config.md:private-root
+docs/ideas.md:private-agent
+docs/m4c-breakdown.md:private-root
+docs/m6-breakdown.md:private-agent
+docs/m6b-breakdown.md:private-root
+docs/mcp-clients.md:private-agent
+docs/r1-breakdown.md:private-root
+tests/corpus_config_docs.rs:private-root
+tests/mcp_clients_docs.rs:private-agent
+commit:email
+commit:harness-id
